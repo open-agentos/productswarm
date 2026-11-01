@@ -1,0 +1,143 @@
+name: Governance question
+description: A decision that is not yours to make alone. See GOVERNANCE.md §4.
+title: "GOV-Q: "
+labels: ["gov:question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before opening:** check `governance/INDEX.md` for precedent and search open `gov:question` issues for duplicates.
+        One decision per question. Title it as a question.
+
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Domain
+      description: From governance/jurisdictions.yml
+      options:
+        - default
+        - code-conventions
+        - dependencies
+        - architecture
+        - product-scope
+        - docs
+        - ci-and-workflows
+        - security
+        - spend
+        - external
+        - governance
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What you were doing, why the decision came up, links to the task issue, PR, run or evidence.
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: Options
+      description: At least two. "Do nothing" counts. One line of consequence each.
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: recommendation
+    attributes:
+      label: Recommendation
+      description: Which option you'd pick and why.
+    validations:
+      required: true
+
+  - type: textarea
+    id: default
+    attributes:
+      label: Default action if unanswered
+      description: What you (or the next agent) will do if no ruling arrives before the time to live.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: blocking
+    attributes:
+      label: Blocking?
+      description: "No = you are proceeding on the default (only allowed if the default is two-way)."
+      options:
+        - "no — proceeding on default"
+        - "yes — work stopped on this path"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reversibility
+    attributes:
+      label: Reversibility
+      description: When unsure, pick the more serious rating.
+      options: [two-way, costly, one-way]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: blast
+    attributes:
+      label: Blast radius
+      options: [task, repo, org, external]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: nature
+    attributes:
+      label: Nature
+      options: [factual, values, preference]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: knowledge
+    attributes:
+      label: Knowledge
+      description: "held = a specific person or agent knows something the thread doesn't"
+      options: [shared, held]
+    validations:
+      required: true
+
+  - type: input
+    id: ttl
+    attributes:
+      label: Time to live
+      description: Date after which the default happens anyway (YYYY-MM-DD).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: shape
+    attributes:
+      label: Suggested shape
+      description: First row in GOVERNANCE.md §3 that fits.
+      options: [authoritative, empirical, advice, consent, committee, vote]
+    validations:
+      required: true
+
+  - type: textarea
+    id: precedent
+    attributes:
+      label: Precedent checked
+      description: Which GOV-NNNN records you looked at and why they don't cover this. "None relevant" is a valid answer.
+    validations:
+      required: true
+
+  - type: input
+    id: asker
+    attributes:
+      label: Raised by
+      description: Your role/identity (e.g. builder) and the task issue you were on.
+    validations:
+      required: true
