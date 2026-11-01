@@ -47,7 +47,8 @@ To run a committee by hand, start each member as a separate session with the iss
 **Started 2026-11-01 (productswarm).** Setup notes:
 
 - The fleet is manually started Claude Code sessions (see `roles/`), not AgentOS. There is no intake, so setup step 6 doesn't apply.
-- All sessions act through the owner's GitHub account. Role identity is a self-declared signature, so App-identity voting (§7.5) can't be verified in this run. Merge-as-ratification only holds because sessions are told never to merge; CODEOWNERS can't tell them apart from the owner. Watch for any session that merges or approves.
+- ~~All sessions act through the owner's GitHub account.~~ Fixed 2026-11-01: each role is a GitHub App (`productswarm-<role>[bot]`), and sessions are launched with `ops/swarm-session`. Votes (§7.5) can now be tallied by verified identity. No App has `workflows` or `administration` permission.
+- Merge-as-ratification needs a ruleset on `main` requiring code-owner review. The private repo on the free plan can't have one yet, so until then it rests on sessions being told never to merge. Watch for any App that merges or approves.
 - Workload: the swarm dashboard and session heartbeat in `PRODUCT.md`.
 
 Add a row for every question. This file is the Phase 0 deliverable.

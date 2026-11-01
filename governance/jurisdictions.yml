@@ -6,11 +6,10 @@
 # vote_eligible: identities whose votes count (shapes: committee-with-vote, vote)
 # default_shape: a hint; GOVERNANCE.md §3's ordering still applies
 #
-# productswarm runs Phase 0 with manually started Claude Code sessions, not AgentOS Apps.
-# Every session acts through the owner's GitHub account, so an agent "identity" is a
-# role signature: each comment, issue and PR body ends with `-- <role> (<model>)`.
-# Signatures are self-declared and prove nothing. Authority still comes only from
-# merges by humans.owner (GOVERNANCE.md §6), and sessions never merge.
+# productswarm runs Phase 0 with manually started Claude Code sessions. Each session is
+# launched with `ops/swarm-session <role>` and acts on GitHub as that role's GitHub App,
+# so the identities below are verified by GitHub. Authority still comes only from merges
+# by humans.owner (GOVERNANCE.md §6); CODEOWNERS requires the owner's review on every PR.
 
 version: 0
 
@@ -18,10 +17,10 @@ identities:
   humans:
     owner: "@mattmcalister"
   agents:
-    planner: "role:planner"
-    builder: "role:builder"
-    reviewer: "role:reviewer"
-    docs: "role:docs"
+    planner: "productswarm-planner[bot]"
+    builder: "productswarm-builder[bot]"
+    reviewer: "productswarm-reviewer[bot]"
+    docs: "productswarm-docs[bot]"
 
 quorum: 0.5          # fraction of vote_eligible who must vote for a vote to count
 consent_window: 48h  # default objection window for the consent shape
