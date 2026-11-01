@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# gh wrapper used inside swarm sessions: runs the real gh as the session's role App.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+real=$(PATH="${PATH//$here:/}" command -v gh) || { echo "gh shim: real gh not found" >&2; exit 1; }
+GH_TOKEN="$("$here/../swarm-token" "${SWARM_ROLE:?gh shim: SWARM_ROLE not set}")" exec "$real" "$@"

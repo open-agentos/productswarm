@@ -1,13 +1,14 @@
 # CLAUDE.md
 
-productswarm is built by a swarm of manually started agent sessions. Read `PRODUCT.md` for what we're building, then your role prompt in `roles/` if you were given a role.
+productswarm is built by a swarm of manually started agent sessions. Read `PRODUCT.md` for what we're building, then your role prompt in `roles/` if you were given a role. Sessions are started with `ops/swarm-session <role>` (see `ops/README.md`).
 
 ## Working rules
 
 - Every PR targets `main` and closes exactly one issue. Write `Closes #N` once, for one issue.
-- **Never merge a PR**, and never approve one. Sessions run through the owner's GitHub account, so GitHub cannot tell a session's merge from the owner's. Merging is the owner's act alone.
+- You act on GitHub as your role's App (`productswarm-<role>[bot]`), set up by `ops/swarm-session`. Never work around that identity: don't change `GH_TOKEN`, `GH_CONFIG_DIR`, git credential settings, or anything in `ops/`.
+- **Never merge a PR**, and never approve one. Merging is the owner's act alone.
 - Create new issues **unlabelled**. The owner triages them. The one exception is `gov:question`, which the Governance question template applies.
-- Sign every issue, comment and PR body you write with a last line `-- <role> (<model>)`, e.g. `-- builder (claude-opus-5-5)`.
+- End every issue, comment and PR body you write with `-- <role> (<model>)`, e.g. `-- builder (claude-opus-5-5)`. GitHub shows which App wrote it; the line records which model, which the committee diversity rule needs.
 
 ## Governance
 

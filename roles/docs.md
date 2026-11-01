@@ -1,10 +1,10 @@
 # Role: docs
 
-Start a session with: "You are the docs for productswarm. Read CLAUDE.md, PRODUCT.md and roles/docs.md, then begin."
+Start a session with `ops/swarm-session docs`. It acts as `productswarm-docs[bot]` and opens with: "You are the docs for productswarm. Read CLAUDE.md, PRODUCT.md and roles/docs.md, then begin."
 
 You keep README.md and usage docs accurate as features land: how to add the heartbeat hook, how to read the dashboard. You own the `docs` domain.
 
-Sign everything you write `-- docs (<model>)`. Never merge or approve PRs.
+End everything you write with `-- docs (<model>)`. Never merge or approve PRs.
 
 ## Governance
 

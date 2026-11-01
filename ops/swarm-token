@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Print a GitHub installation token for a role's App, minting a new one when the
+# cached token has under 10 minutes left. Tokens last an hour and are scoped to productswarm.
+#
+#   ops/swarm-token <role>              print the token
+#   ops/swarm-token --git <role> get    act as a git credential helper
+set -euo pipefail
+
+git_mode=0
+if [[ "${1:-}" == "--git" ]]; then git_mode=1; shift; fi
+role="${1:?usage: swarm-token [--git] <role>}"
+if [[ $git_mode == 1 ]]; then
+  [[ "${2:-}" == "get" ]] || exit 0   # ignore store/erase
+  cat >/dev/null                       # drain git's request
+fi
+
+repo="${PRODUCTSWARM_REPO:-open-agentos/productswarm}"
+dir="${PRODUCTSWARM_APPS_DIR:-$HOME/.config/productswarm/apps}"
+conf="$dir/$role.json" key="$dir/$role.pem" cache="$dir/$role.token.json"
+[[ -f $conf && -f $key ]] || { echo "swarm-token: no App credentials for '$role' in $dir (run ops/create-apps.py)" >&2; exit 1; }
+
+now=$(date +%s)
+token=""
+if [[ -f $cache ]] && (( $(jq -r '.expires_at | fromdateiso8601' "$cache") - now > 600 )); then
+  token=$(jq -r .token "$cache")
+else
+  b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+  app_id=$(jq -r .app_id "$conf")
+  header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+  payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$app_id" | b64url)
+  sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$key" -binary | b64url)
+  jwt="$header.$payload.$sig"
+  api() { curl -fsS -H "Authorization: Bearer $jwt" -H "Accept: application/vnd.github+json" "$@"; }
+  inst=$(api "https://api.github.com/repos/$repo/installation" | jq -r .id) \
+    || { echo "swarm-token: productswarm-$role is not installed on $repo" >&2; exit 1; }
+  umask 077
+  api -X POST "https://api.github.com/app/installations/$inst/access_tokens" \
+    -d "{\"repositories\":[\"${repo#*/}\"]}" | jq '{token, expires_at}' > "$cache.tmp"
+  mv "$cache.tmp" "$cache"
+  token=$(jq -r .token "$cache")
+fi
+
+if [[ $git_mode == 1 ]]; then
+  printf 'username=x-access-token\npassword=%s\n' "$token"
+else
+  printf '%s\n' "$token"
+fi

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Start a Claude Code session that acts on GitHub as a role's App.
+#
+#   ops/swarm-session <role> [claude args...]
+#
+# gh and git push authenticate as productswarm-<role>[bot]; commits are authored by it.
+# With no extra args, the session starts with the role's opener prompt.
+set -euo pipefail
+role="${1:?usage: swarm-session <planner|builder|reviewer|docs> [claude args...]}"; shift
+ops="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$ops/.." && pwd)"
+[[ -f "$root/roles/$role.md" ]] || { echo "swarm-session: unknown role '$role'" >&2; exit 1; }
+
+# Fail now, not mid-session, if the App isn't set up.
+"$ops/swarm-token" "$role" >/dev/null
+
+dir="${PRODUCTSWARM_APPS_DIR:-$HOME/.config/productswarm/apps}"
+slug=$(jq -r .slug "$dir/$role.json")
+uid=$(jq -r '.bot_user_id // empty' "$dir/$role.json")
+if [[ -z $uid ]]; then
+  uid=$(curl -fsS "https://api.github.com/users/${slug}%5Bbot%5D" | jq -r .id)
+  jq --argjson id "$uid" '.bot_user_id = $id' "$dir/$role.json" > "$dir/$role.json.tmp" && mv "$dir/$role.json.tmp" "$dir/$role.json"
+fi
+
+export SWARM_ROLE="$role"
+export PATH="$ops/shims:$PATH"
+unset GH_TOKEN GITHUB_TOKEN
+# An empty gh config dir means a gh that bypasses the shim has no login: it fails closed
+# instead of acting as the owner.
+export GH_CONFIG_DIR="$dir/$role.gh"
+mkdir -p "$GH_CONFIG_DIR"
+export GIT_AUTHOR_NAME="$slug[bot]" GIT_COMMITTER_NAME="$slug[bot]"
+export GIT_AUTHOR_EMAIL="$uid+$slug[bot]@users.noreply.github.com" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+# Replace any configured github.com credential helper (e.g. osxkeychain) with the role's App.
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=""
+export GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1="!$ops/swarm-token --git $role"
+
+echo "swarm-session: $role as $slug[bot]"
+cd "$root"
+if [[ $# -eq 0 ]]; then
+  exec claude "You are the $role for productswarm. Read CLAUDE.md, PRODUCT.md and roles/$role.md, then begin."
+fi
+exec claude "$@"
