@@ -1,0 +1,6 @@
+# This is the only enforcement in Phase 0: agents cannot ratify rulings or amend their own jurisdiction.
+
+/GOVERNANCE.md                         @mattmcalister
+/governance/                           @mattmcalister
+/.github/ISSUE_TEMPLATE/gov-question.yml @mattmcalister
+/.github/CODEOWNERS                    @mattmcalister

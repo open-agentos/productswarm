@@ -1,0 +1,111 @@
+# Who may decide what. Human-only file (see GOVERNANCE.md §10).
+#
+# decide:        roles that may decide autonomously (two-way decisions only, GOVERNANCE.md §3 row 3)
+# owner:         who decides when the shape is authoritative or advice
+# ratify:        who may merge decision records for this domain (Phase 0: humans only)
+# vote_eligible: identities whose votes count (shapes: committee-with-vote, vote)
+# default_shape: a hint; GOVERNANCE.md §3's ordering still applies
+#
+# productswarm runs Phase 0 with manually started Claude Code sessions, not AgentOS Apps.
+# Every session acts through the owner's GitHub account, so an agent "identity" is a
+# role signature: each comment, issue and PR body ends with `-- <role> (<model>)`.
+# Signatures are self-declared and prove nothing. Authority still comes only from
+# merges by humans.owner (GOVERNANCE.md §6), and sessions never merge.
+
+version: 0
+
+identities:
+  humans:
+    owner: "@mattmcalister"
+  agents:
+    planner: "role:planner"
+    builder: "role:builder"
+    reviewer: "role:reviewer"
+    docs: "role:docs"
+
+quorum: 0.5          # fraction of vote_eligible who must vote for a vote to count
+consent_window: 48h  # default objection window for the consent shape
+
+domains:
+
+  default:
+    description: Anything not matched below.
+    owner: humans.owner
+    decide: []
+    ratify: [humans.owner]
+    default_shape: advice
+
+  code-conventions:
+    description: Style, naming, file layout, test structure, local refactors.
+    owner: agents.reviewer
+    decide: [agents.builder, agents.reviewer]
+    ratify: [humans.owner]
+    vote_eligible: [agents.builder, agents.reviewer, agents.docs]
+    default_shape: autonomous
+
+  dependencies:
+    description: Adding, removing or major-upgrading a dependency.
+    owner: humans.owner
+    decide: [agents.builder]          # patch/minor bumps only; anything else is costly
+    ratify: [humans.owner]
+    default_shape: advice
+
+  architecture:
+    description: Module boundaries, data models, public interfaces, new services.
+    owner: humans.owner
+    decide: []
+    ratify: [humans.owner]
+    vote_eligible: [agents.planner, agents.builder, agents.reviewer]
+    default_shape: committee
+
+  product-scope:
+    description: What gets built, sequencing, cutting or adding scope.
+    owner: humans.owner
+    decide: [agents.planner]          # within an already-approved plan only
+    ratify: [humans.owner]
+    default_shape: advice
+
+  docs:
+    description: Documentation structure, tone, what to document.
+    owner: agents.docs
+    decide: [agents.docs]
+    ratify: [humans.owner]
+    default_shape: autonomous
+
+  ci-and-workflows:
+    description: GitHub Actions, triggers, permissions, secrets usage.
+    owner: humans.owner
+    decide: []
+    ratify: [humans.owner]
+    default_shape: authoritative
+    note: Workflow changes can create agent loops. Always treat these as costly or one-way.
+
+  security:
+    description: Auth, credentials, permissions, data exposure, supply chain. Includes what heartbeat hooks capture and send.
+    owner: humans.owner
+    decide: []
+    ratify: [humans.owner]
+    default_shape: authoritative
+    always_one_way: true
+
+  spend:
+    description: LLM model choice, budgets, anything that changes cost per run.
+    owner: humans.owner
+    decide: []
+    ratify: [humans.owner]
+    default_shape: authoritative
+
+  external:
+    description: Releases, publishing, outward communication, anything a customer or the public sees.
+    owner: humans.owner
+    decide: []
+    ratify: [humans.owner]
+    default_shape: authoritative
+    always_one_way: true
+
+  governance:
+    description: Changes to GOVERNANCE.md, this file, or the decision process itself.
+    owner: humans.owner
+    decide: []
+    ratify: [humans.owner]
+    default_shape: authoritative
