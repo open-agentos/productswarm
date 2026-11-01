@@ -1,0 +1,7 @@
+{"v":1,"ts":"2026-11-01T18:20:00Z","session_id":"0b6c2f0e-3d1a-4c55-9a7e-5f1d2b8e9c41","repo":"open-agentos/productswarm","role":"builder","model":"claude-opus-5-5","event":"session_started","cost_usd":0}
+{"v":1,"ts":"2026-11-01T18:21:30Z","session_id":"0b6c2f0e-3d1a-4c55-9a7e-5f1d2b8e9c41","repo":"open-agentos/productswarm","role":"builder","model":"claude-opus-5-5","event":"working_on","issue":2,"cost_usd":0.12}
+{"v":1,"ts":"2026-11-01T18:26:30Z","session_id":"0b6c2f0e-3d1a-4c55-9a7e-5f1d2b8e9c41","repo":"open-agentos/productswarm","role":"builder","model":"claude-opus-5-5","event":"heartbeat","issue":2,"cost_usd":0.71}
+{"v":1,"ts":"2026-11-01T18:42:10Z","session_id":"0b6c2f0e-3d1a-4c55-9a7e-5f1d2b8e9c41","repo":"open-agentos/productswarm","role":"builder","model":"claude-opus-5-5","event":"pr_opened","issue":2,"pr":16,"gov_question":null,"cost_usd":1.84}
+{"v":1,"ts":"2026-11-01T18:44:00Z","session_id":"0b6c2f0e-3d1a-4c55-9a7e-5f1d2b8e9c41","repo":"open-agentos/productswarm","role":"builder","model":"claude-opus-5-5","event":"working_on","issue":3,"cost_usd":1.90}
+{"v":1,"ts":"2026-11-01T18:47:20Z","session_id":"0b6c2f0e-3d1a-4c55-9a7e-5f1d2b8e9c41","repo":"open-agentos/productswarm","role":"builder","model":"claude-opus-5-5","event":"blocked","issue":3,"gov_question":15,"cost_usd":2.05}
+{"v":1,"ts":"2026-11-01T18:48:00Z","session_id":"0b6c2f0e-3d1a-4c55-9a7e-5f1d2b8e9c41","repo":"open-agentos/productswarm","role":"builder","model":"claude-opus-5-5","event":"stopped","cost_usd":2.07}

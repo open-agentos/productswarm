@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/open-agentos/productswarm/heartbeat/event.schema.json",
+  "title": "productswarm heartbeat event",
+  "description": "One event from one agent session. See heartbeat/SCHEMA.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "ts", "session_id", "repo", "role", "model", "event"],
+  "properties": {
+    "v": { "const": 1 },
+    "ts": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "session_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+    "role": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "event": {
+      "enum": ["session_started", "working_on", "pr_opened", "blocked", "heartbeat", "stopped"]
+    },
+    "issue": { "type": ["integer", "null"], "minimum": 1 },
+    "pr": { "type": ["integer", "null"], "minimum": 1 },
+    "gov_question": { "type": ["integer", "null"], "minimum": 1 },
+    "cost_usd": { "type": ["number", "null"], "minimum": 0 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "event": { "const": "working_on" } } },
+      "then": { "required": ["issue"], "properties": { "issue": { "type": "integer" } } }
+    },
+    {
+      "if": { "properties": { "event": { "const": "pr_opened" } } },
+      "then": {
+        "required": ["pr", "issue"],
+        "properties": { "pr": { "type": "integer" }, "issue": { "type": "integer" } }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "blocked" } } },
+      "then": { "required": ["gov_question"], "properties": { "gov_question": { "type": "integer" } } }
+    }
+  ]
+}
