@@ -136,6 +136,9 @@ class LoadTest(Base):
         sessions = m.load()
         self.assertEqual(sorted({s.role for s in sessions}), sorted(ROLES))
 
+    def test_repo_manifest_runs_a_reviewer_by_default(self):   # L6, #51
+        self.assertGreaterEqual(sum(s.role == "reviewer" for s in m.load()), 1)
+
     def test_cli(self):
         path = self.dir / "swarm.toml"
         path.write_text(session("builder", spend_cap_usd=15))

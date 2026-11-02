@@ -21,6 +21,8 @@ role = "builder"
 count = 1
 model = "claude-opus-5-5"
 
+# The reviewer runs by default (L6): each session reviews every open, non-draft PR
+# once per push, then stops. Its loop is in roles/reviewer.md.
 [[session]]
 role = "reviewer"
 count = 1
