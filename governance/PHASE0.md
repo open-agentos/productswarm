@@ -64,7 +64,9 @@ Add a row for every question. This file is the Phase 0 deliverable.
 - **Owners rule in comments.** Both rulings arrived as issue comments, not records. Converting them took a drafting step plus clarifying questions. Evidence for Phase 1 `gov rule`: turn an owner comment into a record PR, and ask back when the comment is ambiguous for a one-way decision.
 - **Ruling PRs show the owner as author** because they were drafted through the owner's `gh` login. Fine while merge is the ratifying act, but a drafting App identity would keep authorship honest.
 - **Model signatures disagree.** Planner signed `claude-opus-4-8[1m]`, builder `claude-opus-5-5`. Self-reported; the launcher should record the actual model before the committee diversity rule relies on it.
-- **H5 test pending.** The builder's schema PR #16 was written on the defaults. Watch whether it finds GOV-0002/0003 by checking precedent, unprompted.
+- **H5 first pass.** Told only "the questions on #2 have been resolved. Continue.", the builder found GOV-0002 and GOV-0003, revised PR #16 to match both, and cited them in the description. It also listed the calls it made that the rulings didn't cover (tracking-issue title, marker, comment format, close on stop). One data point; the real test is whether later questions cite them.
+- **Schema accepted through a PR, not a question.** The event schema is a costly architecture decision, but the builder treated PR review as its ratification instead of opening a question. Borderline: merging is the owner's act either way, but the decision record trail skips it. Candidate rule: a PR that sets an interface other roles build on should say so in its description.
+- **Auto mode blocked `gh pr edit` and `gh pr ready`** for the builder, leaving PR #16 a stale draft until the owner allowed them. Role sessions may need a narrow allowlist for their own PR housekeeping.
 
 Also note anything that **should** have been a question and wasn't (oversteps found in PR review). Those are the misses that a classifier can't learn from the issue list alone.
 
