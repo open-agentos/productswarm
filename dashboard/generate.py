@@ -26,8 +26,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import spend
+
 HERE = Path(__file__).resolve().parent
 
+SPEND_DAYS = 7     # days shown in the spend-per-day table
 IDLE_MINUTES = 15  # heartbeat/SCHEMA.md leaves the idle threshold to #4
 DAYS = 14          # closed tracking issues older than this are skipped
 
@@ -166,6 +169,7 @@ def derive(session: dict, events: list[dict], open_issues: set[int], now: dt.dat
         "gov_question": gov, "model": last["model"] if last else None,
         "last_event": last["event"] if last else None, "last_ts": last_ts,
         "started_ts": parse_ts(events[0]["ts"]) if events else None,
+        "cost": spend.session_cost(events), "daily": spend.daily(events, parse_ts),
     }
 
 
@@ -199,9 +203,15 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta) -> dict:
                     "review": p.get("reviewDecision") or "", "created_ts": parse_ts(p["createdAt"]),
                     "closes": closes})
 
+    today = now.date()
+    days = [today - dt.timedelta(days=i) for i in range(SPEND_DAYS)]
+    per_day = {d: sum(s["daily"].get(d, 0.0) for s in sessions) for d in days}
+
     return {"repo": repo, "now": now, "idle_minutes": int(idle_after.total_seconds() // 60),
             "issue_titles": {n: i["title"] for n, i in issues.items()},
-            "sessions": sessions, "prs": prs, "gov": gov}
+            "sessions": sessions, "prs": prs, "gov": gov,
+            "spend": {"per_day": per_day, "today": per_day[today],
+                      "unpriced": [s for s in sessions if s["cost"] is None]}}
 
 
 # ---------------------------------------------------------------- rendering
@@ -232,6 +242,9 @@ th { font-weight:600; color:var(--muted); font-size:12px; white-space:nowrap; }
 .s-active { background:var(--active); } .s-idle { background:var(--idle); }
 .s-blocked { background:var(--blocked); } .s-stopped { background:var(--stopped); }
 code { font-size:12px; }
+.num { text-align:right; white-space:nowrap; }
+table.narrow { width:auto; min-width:240px; }
+.method { max-width:720px; font-size:12px; }
 details summary { cursor:pointer; margin:12px 0 4px; color:var(--muted); }
 """
 
@@ -285,9 +298,10 @@ def session_rows(m: dict, sessions: list[dict]) -> str:
             f"<td><a href=\"https://github.com/{esc(repo)}/issues/{s['tracking_issue']}\">"
             f"<code>{esc(s['session_id'][:8])}</code></a>"
             f"<br><span class=\"muted\">started {esc(ago(s['started_ts'], now))}</span></td>"
+            f"<td class=\"num\">{esc(spend.usd(s['cost']))}</td>"
             "</tr>")
     head = ("<tr><th>Status</th><th>Role</th><th>Current issue</th>"
-            "<th>Last activity</th><th>Session</th></tr>")
+            "<th>Last activity</th><th>Session</th><th class=\"num\">Spend (est.)</th></tr>")
     return f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
 
 
@@ -313,6 +327,7 @@ def render(m: dict) -> str:
         tile(len(ready), "PRs to review", hot=True),
         tile(sum(s["status"] == "active" for s in live), "active"),
         tile(sum(s["status"] == "idle" for s in live), "idle"),
+        f'<div><b>{esc(spend.usd(m["spend"]["today"]))}</b>spent today (est.)</div>',
         "</div>",
         "<h2>Sessions</h2>",
         session_rows(m, live) if live else '<p class="muted">No live sessions.</p>',
@@ -350,6 +365,19 @@ def render(m: dict) -> str:
                    f'<th>Sessions waiting</th><th>Opened</th></tr>{"".join(rows)}</table></div>')
     else:
         out.append('<p class="muted">None.</p>')
+
+    sp = m["spend"]
+    out.append("<h2>Spend per day (est.)</h2>")
+    rows = "".join(f"<tr><td>{d.isoformat()}</td><td class=\"num\">{esc(spend.usd(v))}</td></tr>"
+                   for d, v in sp["per_day"].items())
+    out.append('<div class="scroll"><table class="narrow"><tr><th>Day (UTC)</th>'
+               f'<th class="num">Spend</th></tr>{rows}</table></div>')
+    note = spend.METHOD + " Per day is each session's increase within that UTC day."
+    if sp["unpriced"]:
+        ids = ", ".join(f"{s['role']} {s['session_id'][:8]}" for s in sp["unpriced"])
+        note += (f" Left out of totals, with no tokens or an unpriced model: "
+                 f"{len(sp['unpriced'])} session(s) ({ids}).")
+    out.append(f'<p class="muted method">Method: {esc(note)}</p>')
 
     out.append("</main></body></html>\n")
     return "\n".join(out)

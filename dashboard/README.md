@@ -11,7 +11,7 @@ open dashboard/out/index.html
 
 Options: `--repo owner/name` (default: this checkout's `origin`), `--out PATH`, `--days N` (include sessions that stopped in the last N days, default 14), `--idle-minutes N` (default 15).
 
-It reads GitHub through `gh api`, so inside a swarm session it acts as the role's App. Scheduled regeneration and hosting are #5; spend is #6.
+It reads GitHub through `gh api`, so inside a swarm session it acts as the role's App. Scheduled regeneration and hosting are #5.
 
 ## What it reads
 
@@ -31,6 +31,12 @@ Per [heartbeat/SCHEMA.md](../heartbeat/SCHEMA.md):
 | active | otherwise |
 
 A session's current issue is the most recent `issue` any of its events carried.
+
+## Spend
+
+Each session's spend, today's total and the last 7 UTC days are an **API list-price equivalent**, per the default in gov question #28 (pending a ruling). `spend.py` multiplies each session's latest cumulative `token_counts` by the model's list price. Cache writes are priced at the 1-hour rate. A non-null `cost_usd` on an event wins over the estimate. Per day is each session's increase in cost within that UTC day. This isn't what was billed: sessions on a subscription aren't charged per token.
+
+Prices are in `spend.PRICES`, copied from the [pricing page](https://platform.claude.com/docs/en/about-claude/pricing) on the date in `PRICES_AS_OF`, which the page shows. When prices change, update both. Sessions with no token counts, or on a model missing from the table, show "—", are left out of totals, and are listed under the method note.
 
 ## Tests
 
