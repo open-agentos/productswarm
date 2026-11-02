@@ -63,7 +63,14 @@ Add a row for every question. This file is the Phase 0 deliverable.
 | #31 | security | authoritative | authoritative | yes | n/a (blocking) | 0.06 | 0 | Spun off #28. Good precedent check: cited GOV-0002 and noted an owner comment is direction, not a ruling. Owner: do nothing for now. No record; correctly closed as "not now" rather than a ruling. |
 | #32 | ci-and-workflows | authoritative | authoritative | yes | n/a (blocking) | 0.1 | 0 | Workflow trigger and token. Owner chose option 1 by comment and wrote the workflow file himself in the web UI (Apps lack `workflows`, as designed). No record. |
 | #33 | external | authoritative | authoritative | yes | n/a (blocking) | 0.1 | 0 | Dashboard visibility: one-way, external blast radius. Owner chose public Pages with noindex by comment. No record, though this is the kind of decision §5 says must have one. |
-| #36 | security | authoritative | | no | | | | Raised by the owner's coordinating session (not a role) after the repo went public: do GOV-0002/0003 still hold? |
+| #36 | security | authoritative | authoritative | no | yes | 0.8 | 0 | Raised by the owner's coordinating session (not a role) after the repo went public: do GOV-0002/0003 still hold? Owner reaffirmed (option 1). Record GOV-0004, drafted by the coordinating session. |
+| #41 | product-scope | authoritative | authoritative | yes | n/a (blocking) | 1.3 | 0 | Planner asked before writing any v1 issues, citing the v0 non-goal in PRODUCT.md and evidence from this log. Proposed scope plus the design questions it foresaw. Record GOV-0005. Planner H1 pass. |
+| #43 | architecture | authoritative | authoritative | no | yes | 1.0 | 0 | How launcher sessions run. Opened up front by the planner, not left to the builder. Answered by comment; no record (two-way). |
+| #44 | architecture | authoritative | authoritative | no | yes | 1.1 | 0 | Manifest format. Same pattern as #43. No record. |
+| #45 | spend | authoritative | authoritative | no | yes | 1.1 | 0 | Default spend cap: none for v1. No record. |
+| #46 | security | authoritative | authoritative | yes | n/a (blocking) | 1.1 | 0 | May the launcher stop a session on its own: no, warn only. One-way, so a record: GOV-0008, the first drafted by the docs role under GOV-0007. |
+| #54 | governance | authoritative | authoritative | no | yes | 0.07 | 0 | Planner proposed owner-applied `gov:ruled` and `ready` labels as the triage and go-ahead signals. Record GOV-0006, drafted by the planner. |
+| #57 | governance | authoritative | authoritative | no | yes | 0.02 | 0 | Planner proposed that docs drafts ruling PRs from the owner's answers. Owner: "Option 1, docs." Record GOV-0007, drafted by the planner. |
 
 **Other observations (2026-11-02)**
 
@@ -84,6 +91,15 @@ Add a row for every question. This file is the Phase 0 deliverable.
 - **The builder asked well.** Five questions in about an hour, each with options, a default, and (for #31, #32) explicit precedent checks. #31 split a security sub-question out of a spend answer instead of acting on the owner's comment. Evidence for H1 and H5.
 - **Only the builder has run.** No reviewer has reviewed a PR, so oversteps can only be found by the owner. H1 is untested from the reviewer side.
 - **Visibility changed under existing rulings.** GOV-0002 and GOV-0003 were ruled while the repo was private. It is now public, so tracking-issue events (role, model, issue numbers, tool names, token counts) are public too. Raised as #36 rather than assumed.
+
+**Observations (2026-11-02, v1 launcher)**
+
+- **The fleet fixed its own governance gaps.** The planner turned two log observations into questions (#54, #57): owner-applied labels as the ruling and go-ahead signals (GOV-0006), and the docs role drafting ruling PRs from the owner's answers (GOV-0007). Records are now authored by agents and ratified by the owner's merge, which addresses "owners rule in comments" and "ruling PRs show the owner as author". The owner still answers in one comment.
+- **Planner asked first, and up front.** #41 came before any issue, and the planner opened the four design questions itself (#43–#46) instead of leaving them for the builder. This reverses "Planner deferred asking".
+- **Two-way answers still get no record.** #43–#45 were answered by comment and closed. That's consistent with the owner's earlier view; GOV-0007 makes records automatic only when one is needed.
+- **v1 shipped in about an hour, mostly unreviewed.** Six PRs (#64, #65, #70–#72, #74) merged within minutes of opening. The ruleset requires the owner's approval, but the owner merged as admin and bypassed it. Only #72 had a reviewer pass. That review was useful: it caught an unmet "done when" and a pagination bug, which the builder then fixed. The reviewer's first real review.
+- **Closing a tab leaves a session open forever.** Tracking issues for sessions whose tabs were closed (#25, #40, #59) never got `stopped`, so `swarm inbox` leads with three stale idle sessions. `swarm stop` works. Filed as #75.
+- **A governance memory note is still outside the repo.** The builder's `owner-comment-resolutions` memory predates GOV-0006/0007 and isn't reviewed. Still to settle.
 
 Also note anything that **should** have been a question and wasn't (oversteps found in PR review). Those are the misses that a classifier can't learn from the issue list alone.
 
