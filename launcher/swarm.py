@@ -277,8 +277,17 @@ class Launcher:
 
 # ---------------------------------------------------------------- ls
 
+def spend_cell(s: dict, usd: Callable) -> str:
+    """Estimated spend, the role's cap if it has one, and OVER CAP past it (warn only, GOV-0008)."""
+    cell = usd(s.get("cost"))
+    if s.get("cap") is not None:
+        cell += f" / {usd(s['cap'])}" + (" OVER CAP" if s.get("over_cap") else "")
+    return cell
+
+
 def ls_rows(model: dict, started: list[Started], local_state: Callable[[Started], str],
-            now: dt.datetime, ago: Callable) -> list[list[str]]:
+            now: dt.datetime, ago: Callable, usd: Callable = lambda x: "-" if x is None else f"${x:,.2f}"
+            ) -> list[list[str]]:
     """One row per live heartbeat session, plus launcher sessions with no heartbeat yet.
 
     model is dashboard/generate.py's build() output, so status, current issue and last
@@ -293,11 +302,11 @@ def ls_rows(model: dict, started: list[Started], local_state: Callable[[Started]
         rows.append([e.name if e else "-", s["role"], s["model"] or "-",
                      f"#{s['issue']}" if s["issue"] else "-",
                      s["status"] + (f" on #{s['gov_question']}" if s["gov_question"] else ""),
-                     ago(s["last_ts"], now), local_state(e) if e else "not launcher",
-                     s["session_id"]])
+                     ago(s["last_ts"], now), spend_cell(s, usd),
+                     local_state(e) if e else "not launcher", s["session_id"]])
     for e in started:
         if e.session_id not in seen:
-            rows.append([e.name, e.role, e.model, "-", "no heartbeat yet", "-", local_state(e),
+            rows.append([e.name, e.role, e.model, "-", "no heartbeat yet", "-", "-", local_state(e),
                          e.session_id])
     return rows
 
@@ -320,17 +329,18 @@ def heartbeat(repo: str, idle_minutes: int, now: dt.datetime) -> dict:
         data = g.fetch(repo, now, days=1)
     except (OSError, subprocess.SubprocessError, ValueError) as e:
         raise RuntimeError(str(e)) from None
-    return g.build(data, now, dt.timedelta(minutes=idle_minutes))
+    return g.build(data, now, dt.timedelta(minutes=idle_minutes), caps=g.load_caps())
 
 
 def ls(launcher: Launcher, repo: str, idle_minutes: int) -> int:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     model = heartbeat(repo, idle_minutes, now)
-    rows = ls_rows(model, launcher.live(), launcher.state, now, dashboard().ago)
+    g = dashboard()
+    rows = ls_rows(model, launcher.live(), launcher.state, now, g.ago, g.spend.usd)
     if not rows:
         launcher.out("no live sessions")
         return 0
-    launcher.out(table(["NAME", "ROLE", "MODEL", "ISSUE", "STATUS", "LAST", "PROCESS", "SESSION"], rows))
+    launcher.out(table(["NAME", "ROLE", "MODEL", "ISSUE", "STATUS", "LAST", "SPEND (EST.)", "PROCESS", "SESSION"], rows))
     return 0
 
 

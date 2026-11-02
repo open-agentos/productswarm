@@ -174,14 +174,38 @@ def derive(session: dict, events: list[dict], open_issues: set[int], now: dt.dat
     }
 
 
-def build(data: dict, now: dt.datetime, idle_after: dt.timedelta) -> dict:
+def load_caps(path: Path | None = None) -> dict[str, float]:
+    """Per-session spend cap by role, from the committed swarm.toml (L4, #52).
+
+    The manifest is public, so caps keep the page public-data-only. A session's cap is
+    its role's `spend_cap_usd`; no cap if the role sets none (#45). A missing or invalid
+    manifest gives no caps rather than breaking the page."""
+    try:
+        sys.path.insert(0, str(HERE.parent / "launcher"))
+        import manifest
+        sessions = manifest.load(path or manifest.DEFAULT_PATH)
+    except Exception:   # ImportError (no tomllib), ManifestError: no caps, page still renders
+        return {}
+    return {s.role: s.spend_cap_usd for s in sessions if s.spend_cap_usd is not None}
+
+
+def over_cap(cost: float | None, cap: float | None) -> bool:
+    """Warn-only (GOV-0008): this flags a session; nothing stops it."""
+    return cost is not None and cap is not None and cost > cap
+
+
+def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
+          caps: dict[str, float] | None = None) -> dict:
     repo = data["repo"]
     issues = {i["number"]: i for i in data["issues"]}
     open_issues = {n for n, i in issues.items() if i.get("state") == "open"}
     sessions = []
     for s in tracking_issues(issues.values()):
         events = session_events(s, data["comments"].get(s["issue"], []), repo)
-        sessions.append(derive(s, events, open_issues, now, idle_after))
+        d = derive(s, events, open_issues, now, idle_after)
+        d["cap"] = (caps or {}).get(d["role"])
+        d["over_cap"] = d["status"] != "stopped" and over_cap(d["cost"], d["cap"])
+        sessions.append(d)
     epoch = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
     sessions.sort(key=lambda s: (STATUS_ORDER[s["status"]], -(s["last_ts"] or epoch).timestamp()))
 
@@ -227,7 +251,7 @@ def time_to_live(body: str | None) -> str | None:
 
 # ---------------------------------------------------------------- needs you (L5)
 
-NEEDS_KINDS = ("blocked", "question", "pr", "idle")   # most urgent first
+NEEDS_KINDS = ("blocked", "question", "pr", "idle", "over_cap")   # most urgent first
 
 
 def needs_you(m: dict) -> list[dict]:
@@ -277,20 +301,31 @@ def needs_you(m: dict) -> list[dict]:
                           "detail": f"no event since {ago(s['last_ts'], now)}"
                                     + (f", on #{s['issue']}" if s["issue"] else ""),
                           "since": s["last_ts"]})
+    for s in m["sessions"]:
+        if s.get("over_cap"):
+            items.append({"kind": "over_cap", "ref": session(s), "title": "",
+                          "url": issue_url(s["tracking_issue"]),
+                          "session_url": issue_url(s["tracking_issue"]),
+                          "detail": f"est. {spend.usd(s['cost'])}, cap {spend.usd(s['cap'])}"
+                                    + (f", on #{s['issue']}" if s["issue"] else "")
+                                    + "; warn only: swarm stop ends it (GOV-0008)",
+                          "since": s["last_ts"], "over": s["cost"] / s["cap"]})
     far = dt.datetime.max.replace(tzinfo=dt.timezone.utc)
-    items.sort(key=lambda i: (NEEDS_KINDS.index(i["kind"]), i["since"] or far))
+    # Over-cap sessions: furthest over first. Everything else: longest waiting first.
+    items.sort(key=lambda i: (NEEDS_KINDS.index(i["kind"]), -i.get("over", 0), i["since"] or far))
     return items
 
 
 NEEDS_LABELS = {"blocked": "blocked", "question": "gov question", "pr": "PR to review",
-                "idle": "idle session"}
+                "idle": "idle session", "over_cap": "over cap"}
 NEEDS_EMPTY = "Nothing is waiting on you."
 
 
 def needs_line(item: dict, now: dt.datetime) -> str:
     """One item as plain text, without its link. The CLI and the page both show this."""
     title = f" {item['title']}" if item["title"] else ""
-    since = f" · {ago(item['since'], now)}" if item["since"] and item["kind"] != "idle" else ""
+    since = (f" · {ago(item['since'], now)}"
+             if item["since"] and item["kind"] not in ("idle", "over_cap") else "")
     return f"[{NEEDS_LABELS[item['kind']]}] {item['ref']}{title} · {item['detail']}{since}"
 
 
@@ -381,7 +416,9 @@ def session_rows(m: dict, sessions: list[dict]) -> str:
             f"<td><a href=\"https://github.com/{esc(repo)}/issues/{s['tracking_issue']}\">"
             f"<code>{esc(s['session_id'][:8])}</code></a>"
             f"<br><span class=\"muted\">started {esc(ago(s['started_ts'], now))}</span></td>"
-            f"<td class=\"num\">{esc(spend.usd(s['cost']))}</td>"
+            f"<td class=\"num\">{esc(spend.usd(s['cost']))}"
+            + (f"<br><span class=\"pill s-blocked\">over cap {esc(spend.usd(s['cap']))}</span>"
+               if s.get("over_cap") else "") + "</td>"
             "</tr>")
     head = ("<tr><th>Status</th><th>Role</th><th>Current issue</th>"
             "<th>Last activity</th><th>Session</th><th class=\"num\">Spend (est.)</th></tr>")
@@ -512,7 +549,7 @@ def main(argv: list[str]) -> int:
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
         return 1
-    model = build(data, now, dt.timedelta(minutes=args.idle_minutes))
+    model = build(data, now, dt.timedelta(minutes=args.idle_minutes), caps=load_caps())
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render(model), encoding="utf-8")
