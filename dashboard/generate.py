@@ -193,6 +193,7 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta) -> dict:
             gov.append({"number": n, "title": it["title"], "url": it["html_url"],
                         "labels": [lb for lb in labels if lb != "gov:question"],
                         "created_ts": parse_ts(it["created_at"]),
+                        "ttl": time_to_live(it.get("body")),
                         "waiting": [s for s in sessions if s["gov_question"] == n]})
 
     prs = []
@@ -215,6 +216,84 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta) -> dict:
                       "unpriced": [s for s in sessions if s["cost"] is None]}}
 
 
+TTL_RE = re.compile(r"^###\s*Time to live\s*\n+\s*(\S[^\n]*?)\s*$", re.M)
+
+
+def time_to_live(body: str | None) -> str | None:
+    """The 'Time to live' answer from a Governance question template body."""
+    m = TTL_RE.search(body or "")
+    return m.group(1) if m and m.group(1) != "_No response_" else None
+
+
+# ---------------------------------------------------------------- needs you (L5)
+
+NEEDS_KINDS = ("blocked", "question", "pr", "idle")   # most urgent first
+
+
+def needs_you(m: dict) -> list[dict]:
+    """Everything waiting on the owner, most urgent first: the one list behind both the
+    dashboard's first section and `swarm inbox`, so they can't disagree.
+
+    Reads only build()'s model, which comes from public GitHub data (GOV-0002, GOV-0004).
+    Within a kind, the longest waiting comes first. Each item: kind, ref, title, url,
+    detail, since, and for session items session_url.
+    """
+    repo, now, titles = m["repo"], m["now"], m["issue_titles"]
+
+    def issue_url(n):
+        return f"https://github.com/{repo}/issues/{n}"
+
+    def session(s):
+        return f"{s['role']} session {s['session_id'][:8]}"
+
+    items = []
+    for s in m["sessions"]:
+        if s["status"] == "blocked":
+            q = s["gov_question"]
+            items.append({"kind": "blocked", "ref": f"#{q}", "title": titles.get(q, ""),
+                          "url": issue_url(q), "session_url": issue_url(s["tracking_issue"]),
+                          "detail": f"{session(s)} is blocked on it"
+                                    + (f" (working on #{s['issue']})" if s["issue"] else ""),
+                          "since": s["last_ts"]})
+    for q in m["gov"]:
+        if not q["waiting"]:
+            bits = [f"time to live {q['ttl']}" if q["ttl"] else "no time to live given"]
+            bits += q["labels"]
+            items.append({"kind": "question", "ref": f"#{q['number']}", "title": q["title"],
+                          "url": q["url"], "detail": ", ".join(bits), "since": q["created_ts"]})
+    for p in m["prs"]:
+        if not p["draft"]:
+            state = p["review"].replace("_", " ").lower() or "awaiting review"
+            closes = ", ".join(f"#{c['number']}" for c in p["closes"])
+            items.append({"kind": "pr", "ref": f"PR #{p['number']}", "title": p["title"],
+                          "url": p["url"],
+                          "detail": state + (f", closes {closes}" if closes else ""),
+                          "since": p["created_ts"]})
+    for s in m["sessions"]:
+        if s["status"] == "idle":
+            items.append({"kind": "idle", "ref": session(s), "title": "",
+                          "url": issue_url(s["tracking_issue"]),
+                          "session_url": issue_url(s["tracking_issue"]),
+                          "detail": f"no event since {ago(s['last_ts'], now)}"
+                                    + (f", on #{s['issue']}" if s["issue"] else ""),
+                          "since": s["last_ts"]})
+    far = dt.datetime.max.replace(tzinfo=dt.timezone.utc)
+    items.sort(key=lambda i: (NEEDS_KINDS.index(i["kind"]), i["since"] or far))
+    return items
+
+
+NEEDS_LABELS = {"blocked": "blocked", "question": "gov question", "pr": "PR to review",
+                "idle": "idle session"}
+NEEDS_EMPTY = "Nothing is waiting on you."
+
+
+def needs_line(item: dict, now: dt.datetime) -> str:
+    """One item as plain text, without its link. The CLI and the page both show this."""
+    title = f" {item['title']}" if item["title"] else ""
+    since = f" · {ago(item['since'], now)}" if item["since"] and item["kind"] != "idle" else ""
+    return f"[{NEEDS_LABELS[item['kind']]}] {item['ref']}{title} · {item['detail']}{since}"
+
+
 # ---------------------------------------------------------------- rendering
 
 CSS = """
@@ -234,6 +313,9 @@ a { color:var(--link); text-decoration:none; } a:hover { text-decoration:underli
 .needs div { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:8px 12px; }
 .needs b { font-size:18px; margin-right:4px; }
 .needs .hot { border-color:var(--blocked); }
+ol.inbox { margin:0; padding-left:24px; }
+ol.inbox li { padding:4px 0; border-bottom:1px solid var(--line); }
+ol.inbox li.k-blocked::marker { color:var(--blocked); font-weight:600; }
 .scroll { overflow-x:auto; }
 table { border-collapse:collapse; width:100%; }
 th, td { text-align:left; padding:6px 10px 6px 0; border-bottom:1px solid var(--line); vertical-align:top; }
@@ -306,6 +388,19 @@ def session_rows(m: dict, sessions: list[dict]) -> str:
     return f'<div class="scroll"><table>{head}{"".join(rows)}</table></div>'
 
 
+def needs_section(m: dict) -> str:
+    items = needs_you(m)
+    if not items:
+        return f'<h2>Needs you</h2><p class="muted">{esc(NEEDS_EMPTY)}</p>'
+    lis = []
+    for i in items:
+        line = esc(needs_line(i, m["now"]))
+        session = (f' · <a href="{esc(i["session_url"])}">session</a>'
+                   if i.get("session_url") and i["session_url"] != i["url"] else "")
+        lis.append(f'<li class="k-{i["kind"]}"><a href="{esc(i["url"])}">{line}</a>{session}</li>')
+    return f'<h2>Needs you ({len(items)})</h2><ol class="inbox">{"".join(lis)}</ol>'
+
+
 def render(m: dict) -> str:
     repo, now, titles = m["repo"], m["now"], m["issue_titles"]
     live = [s for s in m["sessions"] if s["status"] != "stopped"]
@@ -323,6 +418,7 @@ def render(m: dict) -> str:
         f"<title>Swarm dashboard · {esc(repo)}</title><style>{CSS}</style></head><body><main>",
         f"<h1>Swarm dashboard</h1><div class=\"muted\">{esc(repo)} · generated {esc(stamp(now))}"
         f" · idle after {m['idle_minutes']} min without an event</div>",
+        needs_section(m),
         '<div class="needs">',
         tile(blocked, "blocked sessions", hot=True),
         tile(len(m["gov"]), "open gov questions", hot=True),

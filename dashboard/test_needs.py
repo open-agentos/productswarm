@@ -1,0 +1,107 @@
+"""Tests for the "Needs you" list (generate.needs_you) and its place on the page.
+
+Run: python3 -m unittest discover -s dashboard
+"""
+import html
+import re
+import sys
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import generate as g  # noqa: E402
+from test_generate import NOW, ev, tracking, issue, comment, build, ts  # noqa: E402
+
+GOV_BODY = "### Domain\n\narchitecture\n\n### Time to live\n\n2026-11-09\n\n### Suggested shape\n\nadvice\n"
+
+
+def question(n, title, minutes_ago, body=GOV_BODY, labels=()):
+    it = issue(n, title, ["gov:question", *labels])
+    it["created_at"], it["body"] = ts(minutes_ago), body
+    return it
+
+
+def pr(n, minutes_ago, draft=False, review="", closes=()):
+    return {"number": n, "title": f"PR {n}", "url": f"https://x/pull/{n}",
+            "author": {"login": "app/productswarm-builder"}, "isDraft": draft,
+            "createdAt": ts(minutes_ago), "reviewDecision": review,
+            "closingIssuesReferences": [{"number": c} for c in closes]}
+
+
+def model():
+    issues = [
+        tracking(50, "blocked-new"), tracking(51, "blocked-old"), tracking(52, "idle-short"),
+        tracking(53, "idle-long"), tracking(54, "active"), tracking(55, "gone", state="closed"),
+        issue(4, "Dashboard"),
+        question(26, "GOV-Q: old unwaited", 600, labels=["gov:ruled"]),
+        question(27, "GOV-Q: new unwaited", 60, body="no template"),
+        question(28, "GOV-Q: someone waits", 30),
+        question(29, "GOV-Q: another waits", 20),
+    ]
+    comments = {
+        50: [comment([ev("blocked-new", "blocked", 5, issue=4, gov_question=29)])],
+        51: [comment([ev("blocked-old", "blocked", 50, gov_question=28)])],
+        52: [comment([ev("idle-short", "working_on", 20, issue=4)])],
+        53: [comment([ev("idle-long", "session_started", 300)])],
+        54: [comment([ev("active", "working_on", 1, issue=4)])],
+        55: [comment([ev("gone", "stopped", 400)])],
+    }
+    prs = [pr(31, 10, closes=[4]), pr(30, 90, review="CHANGES_REQUESTED"), pr(32, 500, draft=True)]
+    return build(issues, comments, prs)
+
+
+class NeedsYouTest(unittest.TestCase):
+    def test_order(self):
+        items = g.needs_you(model())
+        self.assertEqual([(i["kind"], i["ref"]) for i in items], [
+            ("blocked", "#28"), ("blocked", "#29"),             # longest blocked first
+            ("question", "#26"), ("question", "#27"),           # unwaited, oldest first
+            ("pr", "PR #30"), ("pr", "PR #31"),                 # not drafts, oldest first
+            ("idle", "builder session idle-lon"), ("idle", "builder session idle-sho"),
+        ])
+
+    def test_details_and_links(self):
+        items = {i["ref"]: i for i in g.needs_you(model())}
+        b = items["#29"]
+        self.assertEqual(b["url"], "https://github.com/open-agentos/productswarm/issues/29")
+        self.assertEqual(b["session_url"], "https://github.com/open-agentos/productswarm/issues/50")
+        self.assertEqual(b["detail"], "builder session blocked- is blocked on it (working on #4)")
+        self.assertEqual(items["#26"]["detail"], "time to live 2026-11-09, gov:ruled")
+        self.assertEqual(items["#27"]["detail"], "no time to live given")
+        self.assertEqual(items["PR #30"]["detail"], "changes requested")
+        self.assertEqual(items["PR #31"]["detail"], "awaiting review, closes #4")
+        self.assertEqual(items["builder session idle-sho"]["detail"], "no event since 20m ago, on #4")
+
+    def test_line(self):
+        items = g.needs_you(model())
+        self.assertEqual(g.needs_line(items[0], NOW),
+                         "[blocked] #28 GOV-Q: someone waits · builder session blocked- is blocked on it · 50m ago")
+        self.assertEqual(g.needs_line(items[-1], NOW),
+                         "[idle session] builder session idle-sho · no event since 20m ago, on #4")
+
+    def test_empty(self):
+        m = build([tracking(54, "active")], {54: [comment([ev("active", "working_on", 1, issue=4)])]})
+        self.assertEqual(g.needs_you(m), [])
+        self.assertIn(g.NEEDS_EMPTY, g.render(m))
+
+    def test_time_to_live(self):
+        self.assertEqual(g.time_to_live(GOV_BODY), "2026-11-09")
+        self.assertEqual(g.time_to_live("### Time to live\n\n_No response_\n"), None)
+        self.assertEqual(g.time_to_live(None), None)
+
+
+class PageTest(unittest.TestCase):
+    def test_first_section_matches_the_list(self):
+        m = model()
+        page = g.render(m)
+        self.assertLess(page.index("<h2>Needs you (8)</h2>"), page.index("<h2>Sessions</h2>"))
+        section = page[page.index('<ol class="inbox">'):page.index("</ol>")]
+        shown = [html.unescape(re.sub(r"<[^>]+>", "", li)).split(" · session")[0]
+                 for li in re.findall(r"<li[^>]*>(.*?)</li>", section)]
+        self.assertEqual(shown, [g.needs_line(i, m["now"]) for i in g.needs_you(m)])
+        self.assertIn('<a href="https://github.com/open-agentos/productswarm/issues/50">session</a>', section)
+
+
+if __name__ == "__main__":
+    unittest.main()

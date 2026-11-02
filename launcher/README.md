@@ -39,6 +39,23 @@ It refuses, and says why, if:
 
 `--force` overrides only the last of these. GOV-0006 says the launcher starts sessions only on `ready` issues, so no flag skips the label check. Add `ready` to the issue instead.
 
+## swarm inbox: what needs you
+
+```bash
+launcher/swarm inbox
+```
+
+It prints one numbered list of everything waiting on you, most urgent first, each with its link. It's the same list, in the same order, as the "Needs you" section at the top of the dashboard: both come from `needs_you()` in `dashboard/generate.py`.
+
+| Order | What | Within the kind |
+|---|---|---|
+| 1 | Sessions blocked on a `gov:question`, with the question | longest blocked first |
+| 2 | Open `gov:question`s nobody is blocked on, with their time to live | oldest first |
+| 3 | Open PRs that aren't drafts, waiting for review or merge | oldest first |
+| 4 | Idle sessions: no event within the idle threshold | longest idle first |
+
+If nothing is waiting, it says "Nothing is waiting on you."
+
 ### Local state
 
 Nothing new is posted to GitHub. What the launcher started is recorded under `~/.productswarm/launcher/` (or `$PRODUCTSWARM_HOME/launcher/`):
