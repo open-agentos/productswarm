@@ -88,6 +88,14 @@ class StatusTest(unittest.TestCase):
                         issues=[issue(26, "GOV-Q: x", ["gov:question"])])
         self.assertEqual((s["status"], s["issue"]), ("active", 6))
 
+    def test_pr_shown_while_on_its_issue(self):
+        s = self.status([ev("s1", "pr_opened", 10, issue=4, pr=27), ev("s1", "heartbeat", 5, issue=4)])
+        self.assertEqual((s["issue"], s["pr"]), (4, 27))
+
+    def test_old_pr_dropped_after_moving_to_new_issue(self):
+        s = self.status([ev("s1", "pr_opened", 10, issue=4, pr=27), ev("s1", "working_on", 5, issue=6)])
+        self.assertEqual((s["issue"], s["pr"]), (6, None))
+
     def test_no_events_is_idle(self):
         self.assertEqual(self.status([])["status"], "idle")
 
