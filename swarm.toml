@@ -1,0 +1,32 @@
+# Swarm manifest: which sessions `swarm up` starts (v1 launcher, GOV-0005).
+# Format and location per the owner's answer on #44: TOML, read with stdlib tomllib.
+#
+# One [[session]] table per role:
+#   role           required  a role with a prompt in roles/<role>.md
+#   count          required  how many sessions of this role, at least 1
+#   model          required  the Claude model ID the sessions run on
+#   spend_cap_usd  optional  per-session spend cap in USD; no cap if left out (#45).
+#                            Warn-only: the launcher never stops a session (GOV-0008).
+#
+# Any other key is an error. Changing a role's model changes cost per run: that is a
+# `spend` decision for the owner.
+
+[[session]]
+role = "planner"
+count = 1
+model = "claude-opus-5-5"
+
+[[session]]
+role = "builder"
+count = 1
+model = "claude-opus-5-5"
+
+[[session]]
+role = "reviewer"
+count = 1
+model = "claude-opus-5-5"
+
+[[session]]
+role = "docs"
+count = 1
+model = "claude-opus-5-5"
