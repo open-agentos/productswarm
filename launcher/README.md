@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged, using the manifest (L1) and `swarm up / ls / stop` (L2).
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged, using the manifest (L1), `swarm up / ls / stop` (L2) and `swarm launch` (L3).
 
 ## swarm up / ls / stop
 
@@ -21,6 +21,23 @@ ops/swarm-session <role> --model <model> --session-id <uuid> "<the usual opener 
 **`ls`** reads the tracking issues through the dashboard's reader (`dashboard/generate.py`), so status, current issue and last activity mean exactly what they mean on the dashboard. It shows every live session, including ones you started by hand (`PROCESS: not launcher`). A session the launcher just started appears as `no heartbeat yet` until its first event reaches GitHub.
 
 **`stop`** sends SIGTERM. Claude Code runs its `SessionEnd` hook on SIGTERM, so the heartbeat records `stopped` and the dashboard shows the session as stopped. `stop` waits up to 20 seconds and then tells you whether the heartbeat recorded the stop. It only stops sessions the launcher started, and only you run it (GOV-0008: the launcher never stops a session on its own).
+
+## swarm launch: start a session on one issue
+
+```bash
+launcher/swarm launch builder --issue 49            # model from swarm.toml's builder entry
+launcher/swarm launch builder --issue 49 --model claude-sonnet-5-5 --dry-run
+```
+
+It starts one session in a new Terminal window, as `up` does. Its opener ends "…then work on issue #49.", so the heartbeat records `working_on` #49 with no change to the hook. The session is named `<role>-issue-<n>`, so it never takes a manifest slot from `up`.
+
+It refuses, and says why, if:
+
+- #N doesn't exist, is a pull request, or is closed;
+- #N doesn't carry `ready`, or the most recent `ready` label was added by anyone other than the owner named in `governance/jurisdictions.yml` (per GOV-0006);
+- a live session is already on #N. "Live" means a heartbeat session that isn't stopped and whose current issue is #N, or a session `launch` started on #N that hasn't sent a heartbeat yet. The refusal names the session.
+
+`--force` overrides only the last of these. GOV-0006 says the launcher starts sessions only on `ready` issues, so no flag skips the label check. Add `ready` to the issue instead.
 
 ### Local state
 
