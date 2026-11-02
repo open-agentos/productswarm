@@ -150,6 +150,7 @@ class PageTest(unittest.TestCase):
         self.assertIn(f"https://github.com/{REPO}/issues/26", page)
         self.assertIn("1 stopped", page)
         self.assertNotIn("<script", page)
+        self.assertIn('<meta name="robots" content="noindex, nofollow">', page)
 
 
 FAKE_GH = r"""#!/usr/bin/env python3

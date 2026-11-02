@@ -318,6 +318,7 @@ def render(m: dict) -> str:
     out = [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        '<meta name="robots" content="noindex, nofollow">',  # published publicly; see #33
         f"<title>Swarm dashboard · {esc(repo)}</title><style>{CSS}</style></head><body><main>",
         f"<h1>Swarm dashboard</h1><div class=\"muted\">{esc(repo)} · generated {esc(stamp(now))}"
         f" · idle after {m['idle_minutes']} min without an event</div>",

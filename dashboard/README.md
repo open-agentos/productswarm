@@ -11,7 +11,13 @@ open dashboard/out/index.html
 
 Options: `--repo owner/name` (default: this checkout's `origin`), `--out PATH`, `--days N` (include sessions that stopped in the last N days, default 14), `--idle-minutes N` (default 15).
 
-It reads GitHub through `gh api`, so inside a swarm session it acts as the role's App. Scheduled regeneration and hosting are #5.
+It reads GitHub through `gh api`, so inside a swarm session it acts as the role's App.
+
+## Where it's published
+
+`.github/workflows/dashboard.yml` regenerates the page every 15 minutes (plus a manual run) and publishes it to GitHub Pages at <https://open-agentos.github.io/productswarm/>. It runs on a schedule only, never on issue, comment or PR events, and its token can read the repo but not write to it (`pages` and `id-token` are only for the deploy), per the owner's choice on #32.
+
+The page is **public**, because this repo is. It shows nothing that isn't already public in the repo's issues and comments, and it carries `noindex` so search engines skip it, per the owner's choice on #33. GitHub may delay scheduled runs, and disables them on public repos after 60 days without repo activity.
 
 ## What it reads
 
