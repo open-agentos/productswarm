@@ -49,7 +49,7 @@ The schema enforces the length limit and, via `#/$defs/remote`, the absence of `
 | `pr_opened` | the session opens a PR | `pr`, and `issue` it closes |
 | `blocked` | the session stops work waiting on a ruling | `gov_question` |
 | `heartbeat` | periodic liveness while working, rate-limited by the hook | — |
-| `stopped` | the session ends | — |
+| `stopped` | the session ends, or a later session of the same role on the same machine finds it gone without having ended (heartbeat/README.md) | — |
 
 `prompt` is allowed only on `prompt_submitted`. Other optional fields may be set on any event when known (e.g. `issue` on a `heartbeat`), so the latest event alone tells the dashboard what a session is on.
 

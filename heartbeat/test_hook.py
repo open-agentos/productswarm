@@ -74,8 +74,8 @@ class HookTest(unittest.TestCase):
                 "input_tokens": inp, "output_tokens": out,
                 "cache_read_input_tokens": 10, "cache_creation_input_tokens": 1}}}) + "\n")
 
-    def spool(self):
-        p = self.tmp / "home" / "events" / f"{SID}.jsonl"
+    def spool(self, sid=SID):
+        p = self.tmp / "home" / "events" / f"{sid}.jsonl"
         return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
 
     def gh_calls(self):
@@ -193,6 +193,80 @@ class HookTest(unittest.TestCase):
         self.assertEqual([e["event"] for e in self.spool()], ["session_started", "stopped", "session_started"])
         self.assertEqual(self.gh_calls()[-1]["argv"][:3], ["issue", "reopen", "99"])
         self.assertEqual(sum(c["argv"][:2] == ["issue", "create"] for c in self.gh_calls()), 1)
+
+    # A session whose window was closed: SessionEnd never runs (#75).
+    GONE = "99999999-8888-7777-6666-555555555555"
+
+    def vanish(self, sid, silent_for=0, role="builder", launcher=False):
+        """Start a session as `role`, then leave it without SessionEnd, `silent_for` seconds ago."""
+        env = self.env
+        self.env = {**env, "SWARM_ROLE": role}
+        self.run_hook("SessionStart", session_id=sid, source="startup")
+        self.run_hook("UserPromptSubmit", session_id=sid, prompt="work on issue 7")
+        self.env = env
+        p = self.tmp / "home" / "state" / f"{sid}.json"
+        state = json.loads(p.read_text())
+        state["last_event_at"] -= silent_for
+        p.write_text(json.dumps(state))
+        if launcher:
+            pid = self.tmp / "home" / "launcher" / f"{sid}.pid"
+            pid.parent.mkdir(parents=True, exist_ok=True)
+            pid.write_text("4242\n")
+
+    def closes(self):
+        return [c["argv"][2] for c in self.gh_calls() if c["argv"][:2] == ["issue", "close"]]
+
+    def test_next_session_stops_a_silent_vanished_session(self):
+        self.vanish(self.GONE, silent_for=hook.STALE_AFTER + 60)
+        self.run_hook("SessionStart", source="startup")
+        gone = self.spool(self.GONE)
+        self.assertEqual([e["event"] for e in gone], ["session_started", "prompt_submitted", "working_on", "stopped"])
+        self.assertEqual(gone[-1]["issue"], 7)
+        self.assertEqual(self.closes(), ["99"])
+        self.assertTrue(json.loads((self.tmp / "home" / "state" / f"{self.GONE}.json").read_text())["stopped"])
+        self.assertEqual([e["event"] for e in self.spool()], ["session_started"])   # the new one is untouched
+
+    def test_launcher_session_whose_process_is_gone_stops_at_once(self):
+        self.vanish(self.GONE, launcher=True)
+        self.run_hook("SessionStart", source="startup")
+        self.assertEqual(self.spool(self.GONE)[-1]["event"], "stopped")
+        self.assertEqual(self.closes(), ["99"])
+
+    def test_recently_active_session_is_left_alone(self):
+        self.vanish(self.GONE, silent_for=60)
+        self.run_hook("SessionStart", source="startup")
+        self.assertNotEqual(self.spool(self.GONE)[-1]["event"], "stopped")
+        self.assertEqual(self.closes(), [])
+
+    def test_running_process_is_left_alone_however_silent(self):
+        self.vanish(self.GONE, silent_for=hook.STALE_AFTER * 10, launcher=True)
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--session-id", self.GONE])
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        self.run_hook("SessionStart", source="startup")
+        self.assertNotEqual(self.spool(self.GONE)[-1]["event"], "stopped")
+        self.assertEqual(self.closes(), [])
+
+    def test_other_roles_are_left_alone(self):
+        # The dashboard takes a session's events only from its own role's App.
+        self.vanish(self.GONE, silent_for=hook.STALE_AFTER + 60, role="planner")
+        self.run_hook("SessionStart", source="startup")
+        self.assertNotEqual(self.spool(self.GONE)[-1]["event"], "stopped")
+
+    def test_swept_session_that_comes_back_reopens(self):
+        self.vanish(self.GONE, silent_for=hook.STALE_AFTER + 60)
+        self.run_hook("SessionStart", source="startup")
+        self.run_hook("UserPromptSubmit", session_id=self.GONE, prompt="still here")
+        self.assertEqual([e["event"] for e in self.spool(self.GONE)][-3:],
+                         ["stopped", "session_started", "prompt_submitted"])
+        self.assertEqual(self.gh_calls()[-1]["argv"][:3], ["issue", "reopen", "99"])
+
+    def test_sweep_by_hand(self):
+        self.vanish(self.GONE, silent_for=hook.STALE_AFTER + 60)
+        r = subprocess.run([sys.executable, "-I", str(HOOK), "sweep"], capture_output=True, text=True,
+                           env=self.env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"stopped: {self.GONE}", r.stderr)
+        self.assertEqual(self.closes(), ["99"])
 
 
 class RedactionTest(unittest.TestCase):
