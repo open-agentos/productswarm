@@ -10,3 +10,4 @@ Phase 0: this file is maintained by hand. Every ruling PR adds or updates a row 
 | [GOV-0002](decisions/GOV-0002-heartbeat-capture.md) | Heartbeat events: minimal fields, tool names, token counts; prompt text local-only, redacted, truncated | security | authoritative | in-force | 2026-11-30 |
 | [GOV-0003](decisions/GOV-0003-heartbeat-storage.md) | Heartbeat events go to comments on a per-session tracking issue (interim; prompt text stays local) | architecture | authoritative | in-force | 2026-11-30 |
 | [GOV-0004](decisions/GOV-0004-heartbeat-public-repo.md) | GOV-0002 and GOV-0003 hold unchanged for a public repo; everything posted to GitHub is public | security | authoritative | in-force | 2026-11-30 |
+| [GOV-0005](decisions/GOV-0005-v1-local-launcher.md) | v1 is a lightweight local launcher (manifest, up/ls/stop, issue handoff, spend cap, needs-you list, reviewer by default) | product-scope | authoritative | in-force | 2027-01-31 |
