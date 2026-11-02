@@ -55,7 +55,16 @@ Add a row for every question. This file is the Phase 0 deliverable.
 
 | Issue | Domain | Asker's shape | Correct shape | Blocking? | Default stood? | Hours to ruling | Rounds | Notes (what the agent got wrong or right; did it fit any shape?) |
 |---|---|---|---|---|---|---|---|---|
-| | | | | | | | | |
+| #14 | architecture | authoritative | authoritative | no | no: owner chose option 4 (issue comments) over the recommended option 3 (local spool + sync) | 13.3 | 0 | Raised by builder unprompted, but the planner had already flagged it on #2. Strong options: noticed option 2 would widen App permissions (a security question in itself). Ruled by owner comment; converted to GOV-0003 by hand. |
+| #15 | security | authoritative | authoritative | yes (`gov:blocking`) | n/a (blocking) | 13.2 | 0 | Recommended minimal fields; owner widened to prompt text, tool names, token counts. "Tool requests" was ambiguous, and safeguards for prompt text were unstated, so clarifying questions were needed before writing a one-way ruling. Ruled by owner comment; converted to GOV-0002 by hand. |
+
+**Other observations (2026-11-02)**
+
+- **Planner deferred asking.** The planner spotted both #14 and #15 on #2 but left raising them "when a builder picks it up". Unclear whether a planner should ask itself; candidate for a rule or a role-prompt change.
+- **Owners rule in comments.** Both rulings arrived as issue comments, not records. Converting them took a drafting step plus clarifying questions. Evidence for Phase 1 `gov rule`: turn an owner comment into a record PR, and ask back when the comment is ambiguous for a one-way decision.
+- **Ruling PRs show the owner as author** because they were drafted through the owner's `gh` login. Fine while merge is the ratifying act, but a drafting App identity would keep authorship honest.
+- **Model signatures disagree.** Planner signed `claude-opus-4-8[1m]`, builder `claude-opus-5-5`. Self-reported; the launcher should record the actual model before the committee diversity rule relies on it.
+- **H5 test pending.** The builder's schema PR #16 was written on the defaults. Watch whether it finds GOV-0002/0003 by checking precedent, unprompted.
 
 Also note anything that **should** have been a question and wasn't (oversteps found in PR review). Those are the misses that a classifier can't learn from the issue list alone.
 
