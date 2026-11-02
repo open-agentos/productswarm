@@ -153,7 +153,8 @@ def derive(session: dict, events: list[dict], open_issues: set[int], now: dt.dat
     last_ts = parse_ts(last["ts"]) if last else None
     state_ev = next((e for e in reversed(events) if e["event"] not in QUIET_EVENTS), None)
     issue = next((e["issue"] for e in reversed(events) if e.get("issue")), None)
-    pr = next((e["pr"] for e in reversed(events) if e.get("pr")), None)
+    # Show a PR only while the session is still on the issue it was opened for (#29).
+    pr = next((e["pr"] for e in reversed(events) if e.get("pr") and e.get("issue") == issue), None)
     gov = None
     if (last and last["event"] == "stopped") or session["closed"]:
         status = "stopped"  # the hook closes the issue after posting `stopped`
