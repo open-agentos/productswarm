@@ -4,6 +4,8 @@
     launcher/swarm up [--dry-run]   start every manifest session that isn't already running
     launcher/swarm ls               list live sessions from the heartbeat tracking issues
     launcher/swarm stop <session>   end one session the launcher started (name or session id)
+    launcher/swarm launch <role> --issue N [--model M] [--force] [--dry-run]
+                                    start one session on issue N (L3)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
 unchanged, in a new Terminal window: the owner's answer on #43. That runtime is kept
@@ -24,6 +26,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -45,9 +48,13 @@ START_GRACE = 60      # seconds a session may take to write its pid file before 
 STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
 
-def opener(role: str) -> str:
-    """The prompt ops/swarm-session uses when given no args; given args, it passes them on."""
-    return f"You are the {role} for productswarm. Read CLAUDE.md, PRODUCT.md and roles/{role}.md, then begin."
+def opener(role: str, issue: int | None = None) -> str:
+    """The prompt ops/swarm-session uses when given no args (it passes args on unchanged).
+
+    With an issue, it names it: the heartbeat's `working_on` detection matches
+    "issue #N" in a prompt, so the session's current issue is set with no hook change."""
+    then = f"work on issue #{issue}" if issue else "begin"
+    return f"You are the {role} for productswarm. Read CLAUDE.md, PRODUCT.md and roles/{role}.md, then {then}."
 
 
 def home() -> Path:
@@ -94,10 +101,12 @@ class Started:
     model: str
     session_id: str
     started: float          # unix time the window was opened
+    issue: int | None = None  # set by `swarm launch --issue`
 
     @classmethod
     def from_dict(cls, d: dict) -> "Started":
-        return cls(**{k: d[k] for k in ("name", "role", "model", "session_id", "started")})
+        return cls(**{k: d[k] for k in ("name", "role", "model", "session_id", "started")},
+                   issue=d.get("issue"))
 
 
 @dataclass
@@ -176,7 +185,7 @@ class Launcher:
             "cd", shlex.quote(str(self.root)), "&&",
             "echo $$ >|", shlex.quote(str(self.pid_file(s.session_id))), "&&",
             "exec", shlex.quote(str(self.root / "ops" / "swarm-session")), shlex.quote(s.role),
-            "--model", shlex.quote(s.model), "--session-id", s.session_id, shlex.quote(opener(s.role)),
+            "--model", shlex.quote(s.model), "--session-id", s.session_id, shlex.quote(opener(s.role, s.issue)),
         ])
         return "exec /bin/bash -c " + shlex.quote(inner)
 
@@ -195,25 +204,28 @@ class Launcher:
         if not todo:
             self.out("nothing to start: every manifest session is running")
             return 0
-        if not dry_run:
-            self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        failed = 0
-        for s in todo:
-            entry = Started(name=s.name, role=s.role, model=s.model,
-                            session_id=str(uuid.uuid4()), started=self.clock())
-            if dry_run:
-                self.out(f"would start: {s.name}  {s.model}\n  {self.command(entry)}")
-                continue
-            try:
-                self.run(self.command(entry))
-            except (RuntimeError, OSError, subprocess.SubprocessError) as e:
-                self.out(f"failed to start {s.name}: {e}")
-                failed += 1
-                continue
-            live.append(entry)
-            self.save(live)   # after each start, so a later failure doesn't lose it
-            self.out(f"started: {s.name}  {s.model}  {entry.session_id}")
+        failed = sum(not self.start(Started(name=s.name, role=s.role, model=s.model,
+                                            session_id=str(uuid.uuid4()), started=self.clock()),
+                                    live, dry_run)
+                     for s in todo)
         return 1 if failed else 0
+
+    def start(self, entry: Started, live: list[Started], dry_run: bool = False) -> bool:
+        """Open one session's window and record it. Returns False if it couldn't start."""
+        on = f"  on #{entry.issue}" if entry.issue else ""
+        if dry_run:
+            self.out(f"would start: {entry.name}  {entry.model}{on}\n  {self.command(entry)}")
+            return True
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            self.run(self.command(entry))
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            self.out(f"failed to start {entry.name}: {e}")
+            return False
+        live.append(entry)
+        self.save(live)   # after each start, so a later failure doesn't lose it
+        self.out(f"started: {entry.name}  {entry.model}{on}  {entry.session_id}")
+        return True
 
     # ------------------------------------------------------------ stop
 
@@ -294,27 +306,135 @@ def table(header: list[str], rows: list[list[str]]) -> str:
     return "\n".join("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip() for r in [header] + rows)
 
 
-def ls(launcher: Launcher, repo: str | None, idle_minutes: int) -> int:
+def dashboard():
     sys.path.insert(0, str(ROOT / "dashboard"))
-    import generate as g   # the dashboard's reader, not a second parser
+    import generate   # the dashboard's reader, not a second parser
+    return generate
 
-    repo = repo or g.default_repo()
-    if not repo:
-        launcher.out("swarm ls: can't tell the repo; pass --repo owner/name")
-        return 2
-    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+def heartbeat(repo: str, idle_minutes: int, now: dt.datetime) -> dict:
+    """Live heartbeat state, exactly as the dashboard builds it. Raises RuntimeError."""
+    g = dashboard()
     try:
         data = g.fetch(repo, now, days=1)
-    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
-        launcher.out(f"swarm ls: {e}")
-        return 1
-    model = g.build(data, now, dt.timedelta(minutes=idle_minutes))
-    rows = ls_rows(model, launcher.live(), launcher.state, now, g.ago)
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        raise RuntimeError(str(e)) from None
+    return g.build(data, now, dt.timedelta(minutes=idle_minutes))
+
+
+def ls(launcher: Launcher, repo: str, idle_minutes: int) -> int:
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    model = heartbeat(repo, idle_minutes, now)
+    rows = ls_rows(model, launcher.live(), launcher.state, now, dashboard().ago)
     if not rows:
         launcher.out("no live sessions")
         return 0
     launcher.out(table(["NAME", "ROLE", "MODEL", "ISSUE", "STATUS", "LAST", "PROCESS", "SESSION"], rows))
     return 0
+
+
+# ---------------------------------------------------------------- launch (L3)
+
+JURISDICTIONS = ROOT / "governance" / "jurisdictions.yml"
+OWNER_RE = re.compile(r'^\s*owner:\s*"?@([A-Za-z0-9-]+)"?\s*$', re.M)
+
+
+def owner_login(path: Path = JURISDICTIONS) -> str:
+    """humans.owner from jurisdictions.yml: the first `owner: "@login"` line."""
+    m = OWNER_RE.search(path.read_text())
+    if not m:
+        raise RuntimeError(f"can't find the owner's login in {path}")
+    return m.group(1)
+
+
+def ready_by(events: list[dict]) -> str | None:
+    """Who added `ready` most recently (GOV-0006: the most recent `labeled` event for it)."""
+    labeled = [e for e in events if e.get("event") == "labeled"
+               and (e.get("label") or {}).get("name") == "ready"]
+    return (labeled[-1].get("actor") or {}).get("login") if labeled else None
+
+
+def issue_refusals(n: int, issue: dict | None, events: list[dict], owner: str) -> list[str]:
+    """Reasons not to start a session on issue n. --force overrides none of these."""
+    if issue is None:
+        return [f"#{n} doesn't exist"]
+    if "pull_request" in issue:
+        return [f"#{n} is a pull request, not an issue"]
+    if issue.get("state") != "open":
+        return [f"#{n} is closed"]
+    labels = {lb.get("name") for lb in issue.get("labels") or []}
+    if "ready" not in labels:
+        return [f"#{n} isn't labelled `ready`; the launcher starts sessions only on `ready` "
+                f"issues (per GOV-0006)"]
+    actor = ready_by(events)
+    if actor != owner:
+        return [f"#{n}'s `ready` label was added by {actor or 'nobody we can see'}, not @{owner}, "
+                f"so it doesn't count (per GOV-0006)"]
+    return []
+
+
+def holders(n: int, model: dict, started: list[Started]) -> list[str]:
+    """Live sessions already on issue n: heartbeat sessions whose current issue is n, plus
+    launcher sessions started on n that have no heartbeat yet."""
+    names = {e.session_id: e.name for e in started}
+    seen = {s["session_id"] for s in model["sessions"]}
+    out = [f"{names.get(s['session_id'], s['role'])} ({s['status']}, session {s['session_id']})"
+           for s in model["sessions"] if s["status"] != "stopped" and s["issue"] == n]
+    out += [f"{e.name} (starting, session {e.session_id})"
+            for e in started if e.issue == n and e.session_id not in seen]
+    return out
+
+
+def launch_name(role: str, n: int, taken: set[str]) -> str:
+    name, k = f"{role}-issue-{n}", 2
+    while name in taken:
+        name, k = f"{role}-issue-{n}-{k}", k + 1
+    return name
+
+
+def gh_issue(repo: str, n: int) -> tuple[dict | None, list[dict]]:
+    """The issue and its events, or (None, []) if there is no such issue."""
+    g = dashboard()
+    try:
+        issue = g.gh_json("api", f"repos/{repo}/issues/{n}")
+    except RuntimeError as e:
+        if "Not Found" in str(e) or "404" in str(e):
+            return None, []
+        raise
+    return issue, g.gh_items(f"repos/{repo}/issues/{n}/events?per_page=100")
+
+
+def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, force: bool = False,
+           dry_run: bool = False, idle_minutes: int = 15,
+           get_issue: Callable = gh_issue, get_heartbeat: Callable = heartbeat,
+           owner: Callable[[], str] = owner_login) -> int:
+    issue, events = get_issue(repo, n)
+    refused = issue_refusals(n, issue, events, owner())
+    if refused:
+        launcher.out(f"swarm launch: refused: {refused[0]}")
+        return 1
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    live = launcher.live()
+    taken = holders(n, get_heartbeat(repo, idle_minutes, now), live)
+    if taken and not force:
+        launcher.out(f"swarm launch: refused: #{n} already has a live session: {'; '.join(taken)}. "
+                     f"Stop it (swarm stop <name>) or pass --force")
+        return 1
+    if taken:
+        launcher.out(f"--force: starting another session on #{n} alongside {'; '.join(taken)}")
+    entry = Started(name=launch_name(role, n, {e.name for e in live}), role=role, model=model,
+                    session_id=str(uuid.uuid4()), started=launcher.clock(), issue=n)
+    return 0 if launcher.start(entry, live, dry_run) else 1
+
+
+def model_for(role: str, given: str | None, path: str) -> str:
+    """--model if given, else the manifest's model for the role. Raises ManifestError/LookupError."""
+    if given:
+        return given
+    for s in manifest.load(path):
+        if s.role == role:
+            return s.model
+    raise LookupError(f"{role} isn't in {path}; pass --model")
 
 
 # ---------------------------------------------------------------- CLI
@@ -337,10 +457,37 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_ls.add_argument("--idle-minutes", type=int, default=15)
     p_stop = sub.add_parser("stop", help="end one session the launcher started")
     p_stop.add_argument("session", help="its name (builder-1) or session id")
+    p_launch = sub.add_parser("launch", help="start one session on a given issue")
+    p_launch.add_argument("role")
+    p_launch.add_argument("--issue", type=int, required=True, help="the issue to work on")
+    p_launch.add_argument("--model", help="default: the manifest's model for the role")
+    p_launch.add_argument("--force", action="store_true",
+                          help="start even if a live session is already on the issue")
+    p_launch.add_argument("--dry-run", action="store_true", help="check and print; start nothing")
+    p_launch.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
+    p_launch.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_launch.add_argument("--idle-minutes", type=int, default=15)
     args = ap.parse_args(argv)
 
     launcher = launcher or Launcher(home())
+    repo = None
+    if args.cmd in ("ls", "launch"):
+        repo = args.repo or dashboard().default_repo()
+        if not repo:
+            launcher.out(f"swarm {args.cmd}: can't tell the repo; pass --repo owner/name")
+            return 2
     try:
+        if args.cmd == "launch":
+            if "/" in args.role or not (launcher.root / "roles" / f"{args.role}.md").is_file():
+                launcher.out(f"swarm launch: unknown role '{args.role}' (no roles/{args.role}.md)")
+                return 1
+            try:
+                model = model_for(args.role, args.model, args.manifest)
+            except (manifest.ManifestError, LookupError) as e:
+                launcher.out(f"swarm launch: {e}")
+                return 1
+            return launch(launcher, args.role, args.issue, model, repo=repo, force=args.force,
+                          dry_run=args.dry_run, idle_minutes=args.idle_minutes)
         if args.cmd == "up":
             try:
                 sessions = manifest.load(args.manifest)
@@ -352,9 +499,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                              "these sessions (python3 heartbeat/install.py)")
             return launcher.up(sessions, dry_run=args.dry_run)
         if args.cmd == "ls":
-            return ls(launcher, args.repo, args.idle_minutes)
+            return ls(launcher, repo, args.idle_minutes)
         return launcher.stop(args.session)
-    except RuntimeError as e:   # an unreadable state file
+    except RuntimeError as e:   # GitHub unreachable, or an unreadable state file
         launcher.out(f"swarm {args.cmd}: {e}")
         return 1
 

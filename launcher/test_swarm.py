@@ -232,10 +232,153 @@ class CliTest(Base):
         self.assertIn("count must be at least 1", self.lines[-1])
         self.assertEqual(self.fake.commands, [])
 
+    def test_launch_unknown_role(self):
+        self.l.root = Path(__file__).resolve().parent.parent
+        self.assertEqual(swarm.main(["launch", "designer", "--issue", "1", "--repo", "o/r"], self.l), 1)
+        self.assertIn("unknown role 'designer'", self.lines[-1])
+        self.assertEqual(swarm.main(["launch", "../roles/builder", "--issue", "1", "--repo", "o/r"], self.l), 1)
+
     def test_corrupt_state_file(self):
         (self.home / "launcher" / "sessions.json").write_text("{")
         self.assertEqual(swarm.main(["stop", "builder-1"], self.l), 1)
         self.assertIn("not valid JSON", self.lines[-1])
+
+
+OWNER = "mattmcalister"
+
+
+def issue(n=49, state="open", labels=("ready",), pr=False):
+    it = {"number": n, "state": state, "labels": [{"name": x} for x in labels]}
+    if pr:
+        it["pull_request"] = {}
+    return it
+
+
+def labeled(name, actor, event="labeled"):
+    return {"event": event, "label": {"name": name}, "actor": {"login": actor}}
+
+
+def hb(sid, issue_n, status="active", role="builder"):
+    return {"session_id": sid, "role": role, "model": M, "issue": issue_n, "status": status,
+            "gov_question": None, "last_ts": None}
+
+
+class LaunchTest(Base):
+    def go(self, it=None, events=None, sessions=(), force=False, n=49, dry_run=False):
+        it = issue(n) if it is None else it
+        events = [labeled("ready", OWNER)] if events is None else events
+        return swarm.launch(self.l, "builder", n, "claude-sonnet-5-5", repo="o/r", force=force,
+                            dry_run=dry_run,
+                            get_issue=lambda repo, num: (it if it != "missing" else None, events),
+                            get_heartbeat=lambda repo, idle, now: {"sessions": list(sessions)},
+                            owner=lambda: OWNER)
+
+    def refused(self, *a, **kw):
+        self.assertEqual(self.go(*a, **kw), 1)
+        self.assertEqual(self.fake.commands, [])
+        self.assertTrue(self.lines[-1].startswith("swarm launch: refused: "), self.lines[-1])
+        return self.lines[-1]
+
+    def test_starts_with_the_issue_in_the_opener(self):
+        self.assertEqual(self.go(), 0)
+        (cmd,) = self.fake.commands
+        self.assertIn("then work on issue #49.", cmd)
+        self.assertIn("--model claude-sonnet-5-5", cmd)
+        (e,) = self.l.live()
+        self.assertEqual((e.name, e.issue), ("builder-issue-49", 49))
+
+    def test_opener_matches_the_heartbeat_working_on_rule(self):
+        hook = Path(__file__).resolve().parent.parent / "heartbeat" / "hook.py"
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hook", hook)
+        h = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(h)
+        self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(swarm.opener("builder", 49)), ["49"])
+        self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(swarm.opener("builder")), [])
+
+    def test_missing_closed_or_pr(self):
+        self.assertIn("#49 doesn't exist", self.refused("missing"))
+        self.assertIn("#49 is closed", self.refused(issue(state="closed")))
+        self.assertIn("is a pull request", self.refused(issue(pr=True)))
+
+    def test_not_ready(self):
+        self.assertIn("isn't labelled `ready`", self.refused(issue(labels=()), events=[]))
+
+    def test_ready_added_by_someone_else(self):
+        msg = self.refused(events=[labeled("ready", "productswarm-planner[bot]")])
+        self.assertIn("added by productswarm-planner[bot], not @mattmcalister", msg)
+
+    def test_most_recent_ready_event_counts(self):
+        self.refused(events=[labeled("ready", OWNER), labeled("ready", OWNER, "unlabeled"),
+                             labeled("ready", "someone-else")])
+        self.lines.clear()
+        self.assertEqual(self.go(events=[labeled("ready", "someone-else"), labeled("bug", "x"),
+                                         labeled("ready", OWNER)]), 0)
+
+    def test_force_does_not_override_issue_rules(self):
+        self.refused(issue(labels=()), events=[], force=True)
+        self.refused(issue(state="closed"), force=True)
+
+    def test_refused_while_a_live_session_has_the_issue(self):
+        msg = self.refused(sessions=[hb("sid-a", 49, "idle")])
+        self.assertIn("#49 already has a live session: builder (idle, session sid-a)", msg)
+        self.assertIn("--force", msg)
+
+    def test_stopped_or_other_issue_sessions_dont_count(self):
+        self.assertEqual(self.go(sessions=[hb("a", 49, "stopped"), hb("b", 50)]), 0)
+
+    def test_second_launch_refused_before_its_heartbeat_arrives(self):
+        self.assertEqual(self.go(), 0)
+        self.assertEqual(self.go(), 1)
+        self.assertIn("builder-issue-49 (starting", self.lines[-1])
+        self.assertEqual(len(self.fake.commands), 1)
+
+    def test_launcher_session_is_named_in_the_refusal(self):
+        self.go()
+        (e,) = self.l.live()
+        self.assertEqual(self.go(sessions=[hb(e.session_id, 49)]), 1)
+        self.assertIn("builder-issue-49 (active", self.lines[-1])
+
+    def test_force_starts_a_second_with_a_new_name(self):
+        self.go()
+        self.assertEqual(self.go(force=True), 0)
+        self.assertEqual(self.names(), ["builder-issue-49", "builder-issue-49-2"])
+        self.assertTrue(any(x.startswith("--force: starting another") for x in self.lines))
+
+    def test_dry_run(self):
+        self.assertEqual(self.go(dry_run=True), 0)
+        self.assertEqual(self.fake.commands, [])
+        self.assertTrue(self.lines[-1].startswith("would start: builder-issue-49"))
+
+    def test_launch_entries_are_not_manifest_slots(self):
+        self.go()
+        self.l.up([S("builder")])
+        self.assertEqual(self.names(), ["builder-issue-49", "builder-1"])
+
+    def test_old_state_without_issue_still_loads(self):
+        (self.home / "launcher" / "sessions.json").write_text(json.dumps(
+            [{"name": "docs-1", "role": "docs", "model": M, "session_id": "s", "started": 0}]))
+        self.assertIsNone(self.l.load()[0].issue)
+
+
+class LaunchHelpersTest(unittest.TestCase):
+    def test_owner_login_from_jurisdictions(self):
+        self.assertEqual(swarm.owner_login(), OWNER)
+
+    def test_model_for(self):
+        path = str(manifest.DEFAULT_PATH)
+        self.assertEqual(swarm.model_for("builder", "claude-haiku-5-5", path), "claude-haiku-5-5")
+        self.assertEqual(swarm.model_for("builder", None, path), manifest.load()[1].model)
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write('[[session]]\nrole = "docs"\ncount = 1\nmodel = "m"\n')
+        self.addCleanup(os.unlink, f.name)
+        with self.assertRaises(LookupError):
+            swarm.model_for("builder", None, f.name)
+
+    def test_launch_name(self):
+        self.assertEqual(swarm.launch_name("docs", 7, set()), "docs-issue-7")
+        self.assertEqual(swarm.launch_name("docs", 7, {"docs-issue-7", "docs-issue-7-2"}),
+                         "docs-issue-7-3")
 
 
 @unittest.skipUnless(os.path.exists("/bin/bash"), "needs /bin/bash")
