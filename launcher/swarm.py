@@ -6,6 +6,7 @@
     launcher/swarm stop <session>   end one session the launcher started (name or session id)
     launcher/swarm launch <role> --issue N [--model M] [--force] [--dry-run]
                                     start one session on issue N (L3)
+    launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
 unchanged, in a new Terminal window: the owner's answer on #43. That runtime is kept
@@ -333,6 +334,21 @@ def ls(launcher: Launcher, repo: str, idle_minutes: int) -> int:
     return 0
 
 
+def inbox(launcher: Launcher, repo: str, idle_minutes: int) -> int:
+    """The dashboard's "Needs you" list, from the same function (generate.needs_you)."""
+    g = dashboard()
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    items = g.needs_you(heartbeat(repo, idle_minutes, now))
+    launcher.out(inbox_text(items, now, g))
+    return 0
+
+
+def inbox_text(items: list[dict], now: dt.datetime, g) -> str:
+    if not items:
+        return g.NEEDS_EMPTY
+    return "\n".join(f"{n}. {g.needs_line(i, now)}\n   {i['url']}" for n, i in enumerate(items, 1))
+
+
 # ---------------------------------------------------------------- launch (L3)
 
 JURISDICTIONS = ROOT / "governance" / "jurisdictions.yml"
@@ -457,6 +473,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_ls.add_argument("--idle-minutes", type=int, default=15)
     p_stop = sub.add_parser("stop", help="end one session the launcher started")
     p_stop.add_argument("session", help="its name (builder-1) or session id")
+    p_inbox = sub.add_parser("inbox", help="what's waiting on the owner, most urgent first")
+    p_inbox.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_inbox.add_argument("--idle-minutes", type=int, default=15)
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
     p_launch.add_argument("role")
     p_launch.add_argument("--issue", type=int, required=True, help="the issue to work on")
@@ -471,7 +490,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
 
     launcher = launcher or Launcher(home())
     repo = None
-    if args.cmd in ("ls", "launch"):
+    if args.cmd in ("ls", "launch", "inbox"):
         repo = args.repo or dashboard().default_repo()
         if not repo:
             launcher.out(f"swarm {args.cmd}: can't tell the repo; pass --repo owner/name")
@@ -500,6 +519,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return launcher.up(sessions, dry_run=args.dry_run)
         if args.cmd == "ls":
             return ls(launcher, repo, args.idle_minutes)
+        if args.cmd == "inbox":
+            return inbox(launcher, repo, args.idle_minutes)
         return launcher.stop(args.session)
     except RuntimeError as e:   # GitHub unreachable, or an unreadable state file
         launcher.out(f"swarm {args.cmd}: {e}")

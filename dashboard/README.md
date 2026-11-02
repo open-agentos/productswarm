@@ -19,6 +19,19 @@ It reads GitHub through `gh api`, so inside a swarm session it acts as the role'
 
 The page is **public**, because this repo is. It shows nothing that isn't already public in the repo's issues and comments, and it carries `noindex` so search engines skip it, per the owner's choice on #33. GitHub may delay scheduled runs, and disables them on public repos after 60 days without repo activity.
 
+## Needs you
+
+The page opens with one ordered list of everything waiting on the owner (L5). `launcher/swarm inbox` prints the same list. Both come from `needs_you()` in `generate.py`, so the page and the command always show the same items in the same order.
+
+| Order | What | Within the kind |
+|---|---|---|
+| 1 | Sessions blocked on a `gov:question`, with the question | longest blocked first |
+| 2 | Open `gov:question`s nobody is blocked on, with their time to live | oldest first |
+| 3 | Open PRs that aren't drafts, waiting for review or merge | oldest first |
+| 4 | Idle sessions: no event within the idle threshold | longest idle first |
+
+Each item links to its question, PR or session tracking issue. An empty list says "Nothing is waiting on you." The list is built only from the GitHub data below, so it shows nothing that isn't already public (GOV-0002, GOV-0004). Over-cap sessions will be added with the spend cap (#52).
+
 ## What it reads
 
 - **Sessions:** `[heartbeat]` tracking issues (GOV-0003). An issue counts only if its body starts with the heartbeat marker and it was opened by a `productswarm-<role>[bot]` App. Events are read from the first `jsonl` fence of comments **by that same App**; events whose `session_id`, `role` or `repo` don't match the issue, or that carry fields outside the remote schema (such as `prompt`), are dropped. The local spool is never read, so prompt text never reaches the page (GOV-0002).

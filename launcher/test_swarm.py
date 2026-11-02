@@ -361,6 +361,31 @@ class LaunchTest(Base):
         self.assertIsNone(self.l.load()[0].issue)
 
 
+class InboxTest(unittest.TestCase):
+    """`swarm inbox` and the dashboard's first section show the same items in the same order."""
+
+    def test_same_lines_as_the_page(self):
+        import html
+        import re
+        g = swarm.dashboard()
+        sys.path.insert(0, str(Path(g.__file__).parent))
+        import test_needs
+        m = test_needs.model()
+        cli = swarm.inbox_text(g.needs_you(m), m["now"], g).splitlines()
+        self.assertEqual(cli[0], "1. [blocked] #28 GOV-Q: someone waits · builder session blocked- "
+                                 "is blocked on it · 50m ago")
+        self.assertEqual(cli[1], "   https://github.com/open-agentos/productswarm/issues/28")
+        page = g.render(m)
+        section = page[page.index('<ol class="inbox">'):page.index("</ol>")]
+        shown = [html.unescape(re.sub(r"<[^>]+>", "", li)).split(" · session")[0]
+                 for li in re.findall(r"<li[^>]*>(.*?)</li>", section)]
+        self.assertEqual([line.split(". ", 1)[1] for line in cli[0::2]], shown)
+
+    def test_empty(self):
+        g = swarm.dashboard()
+        self.assertEqual(swarm.inbox_text([], None, g), "Nothing is waiting on you.")
+
+
 class LaunchHelpersTest(unittest.TestCase):
     def test_owner_login_from_jurisdictions(self):
         self.assertEqual(swarm.owner_login(), OWNER)
