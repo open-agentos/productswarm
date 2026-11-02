@@ -39,6 +39,16 @@ It refuses, and says why, if:
 
 `--force` overrides only the last of these. GOV-0006 says the launcher starts sessions only on `ready` issues, so no flag skips the label check. Add `ready` to the issue instead.
 
+## Spend cap (warn only)
+
+Set `spend_cap_usd` on a role in `swarm.toml`, and each session of that role gets that cap. There's no cap unless you set one (#45). A session is over cap when its estimated spend, from the dashboard's `spend.py` (API list-price equivalent, not what's billed), passes the cap.
+
+- **`swarm ls`:** the SPEND column shows `$20.00 / $15.00 OVER CAP`.
+- **`swarm inbox` and the dashboard:** the session is listed as `[over cap]`.
+- **Nothing else happens.** Per GOV-0008, the launcher never stops a session. Run `swarm stop <name>` yourself, or raise the cap in `swarm.toml`, which takes effect on the next `ls`, `inbox`, or dashboard build.
+
+Caps apply by role to every live session of that role, including ones you started by hand. The dashboard reads the same committed `swarm.toml`, so the public page and `swarm inbox` stay identical.
+
 ## swarm inbox: what needs you
 
 ```bash
@@ -53,6 +63,7 @@ It prints one numbered list of everything waiting on you, most urgent first, eac
 | 2 | Open `gov:question`s nobody is blocked on, with their time to live | oldest first |
 | 3 | Open PRs that aren't drafts, waiting for review or merge | oldest first |
 | 4 | Idle sessions: no event within the idle threshold | longest idle first |
+| 5 | Sessions over their role's spend cap (warn only, GOV-0008) | furthest over first |
 
 If nothing is waiting, it says "Nothing is waiting on you."
 

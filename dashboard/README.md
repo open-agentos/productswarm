@@ -29,8 +29,9 @@ The page opens with one ordered list of everything waiting on the owner (L5). `l
 | 2 | Open `gov:question`s nobody is blocked on, with their time to live | oldest first |
 | 3 | Open PRs that aren't drafts, waiting for review or merge | oldest first |
 | 4 | Idle sessions: no event within the idle threshold | longest idle first |
+| 5 | Sessions over their role's spend cap (warn only, GOV-0008) | furthest over first |
 
-Each item links to its question, PR or session tracking issue. An empty list says "Nothing is waiting on you." The list is built only from the GitHub data below, so it shows nothing that isn't already public (GOV-0002, GOV-0004). Over-cap sessions will be added with the spend cap (#52).
+Each item links to its question, PR or session tracking issue. An empty list says "Nothing is waiting on you." The list is built only from the GitHub data below, so it shows nothing that isn't already public (GOV-0002, GOV-0004).
 
 ## What it reads
 

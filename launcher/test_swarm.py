@@ -215,10 +215,40 @@ class LsTest(Base):
         ]}
         rows = swarm.ls_rows(model, started, lambda e: "running", now, lambda t, n: "now")
         self.assertEqual(rows, [
-            ["builder-1", "builder", M, "#48", "active", "now", "running", "sid-b"],
-            ["-", "planner", M, "-", "blocked on #43", "now", "not launcher", "sid-x"],
-            ["docs-1", "docs", M, "-", "no heartbeat yet", "-", "running", "sid-d"],
+            ["builder-1", "builder", M, "#48", "active", "now", "-", "running", "sid-b"],
+            ["-", "planner", M, "-", "blocked on #43", "now", "-", "not launcher", "sid-x"],
+            ["docs-1", "docs", M, "-", "no heartbeat yet", "-", "-", "running", "sid-d"],
         ])
+
+    def test_spend_column(self):
+        usd = lambda x: "-" if x is None else f"${x:,.2f}"  # noqa: E731
+        self.assertEqual(swarm.spend_cell({"cost": 3.2, "cap": None}, usd), "$3.20")
+        self.assertEqual(swarm.spend_cell({"cost": 3.2, "cap": 15.0, "over_cap": False}, usd), "$3.20 / $15.00")
+        self.assertEqual(swarm.spend_cell({"cost": 20.0, "cap": 15.0, "over_cap": True}, usd),
+                         "$20.00 / $15.00 OVER CAP")
+        self.assertEqual(swarm.spend_cell({"cost": None, "cap": 15.0}, usd), "- / $15.00")
+
+    def test_over_cap_from_canned_tokens_in_ls_and_inbox(self):
+        g = swarm.dashboard()
+        sys.path.insert(0, str(Path(g.__file__).parent))
+        import test_cap
+        m = test_cap.model({"builder": 15, "reviewer": 5},
+                           [("b-over", "builder", False, [test_cap.spent(test_cap.M)])])
+        (row,) = swarm.ls_rows(m, [], lambda e: "running", m["now"], g.ago, g.spend.usd)
+        self.assertEqual(row[6], "$20.00 / $15.00 OVER CAP")
+        self.assertIn("[over cap] builder session b-over", swarm.inbox_text(g.needs_you(m), m["now"], g))
+
+    def test_only_stop_signals_a_session(self):   # GOV-0008: no automatic stop
+        import ast
+        tree = ast.parse((HERE / "swarm.py").read_text())
+        callers = {f.name for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
+                   for c in ast.walk(f) if isinstance(c, ast.Call)
+                   and isinstance(c.func, ast.Attribute) and c.func.attr == "kill"}
+        self.assertEqual(callers, {"stop"})
+        stop_callers = {f.name for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)
+                        for c in ast.walk(f) if isinstance(c, ast.Call)
+                        and isinstance(c.func, ast.Attribute) and c.func.attr == "stop"}
+        self.assertEqual(stop_callers, {"main"})   # only the owner's `swarm stop` command
 
     def test_table(self):
         self.assertEqual(swarm.table(["A", "BB"], [["xxx", "y"]]), "A    BB\nxxx  y")
