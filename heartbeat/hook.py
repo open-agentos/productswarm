@@ -9,6 +9,7 @@ Agents or the owner can also record a change by hand:
 
     hook.py emit working_on --issue 3
     hook.py emit blocked --gov-question 15 [--issue 3]
+    hook.py sweep               record `stopped` for this role's vanished sessions (below)
 
 What is captured follows GOV-0002 and where it goes follows GOV-0003; the event
 format is heartbeat/SCHEMA.md. Every event is appended to the local spool. Every
@@ -17,6 +18,12 @@ in batches by a detached `hook.py flush <session_id>` process, via `gh`, which i
 swarm session is ops/shims/gh acting as the role's App.
 
 The hook does nothing unless SWARM_ROLE is set (i.e. outside ops/swarm-session).
+A session whose window is closed gets SIGHUP or is killed, so SessionEnd never runs
+and its tracking issue would stay open, idle, forever (#75). So each new session sweeps
+this machine's other sessions of the same role: one that has vanished gets the
+`stopped` event it never posted, and its issue is closed. Same role only, because the
+dashboard accepts a session's events only from that role's App, which is who we act as.
+
 It never prints to stdout (UserPromptSubmit and SessionStart stdout would become
 model context) and always exits 0, so a heartbeat failure never disturbs a session.
 Errors go to ~/.productswarm/heartbeat.log.
@@ -41,6 +48,7 @@ PROMPT_MAX = 2000                  # GOV-0002
 HEARTBEAT_EVERY = 300              # seconds between liveness events while working
 FLUSH_EVERY = 300                  # post queued non-state-change events at least this often
 MAX_EVENTS_PER_COMMENT = 50
+STALE_AFTER = 6 * 3600             # a session we can't see in `ps` counts as gone after this silence
 STATE_CHANGES = {"session_started", "working_on", "pr_opened", "blocked", "stopped"}
 MARKER = "<!-- productswarm-heartbeat schema_version={v} session_id={sid} -->"
 
@@ -235,16 +243,21 @@ def should_flush(state: dict, events: list[dict]) -> bool:
 
 def spawn_flush(state: dict) -> None:
     state["last_flush_at"] = time.time()
+    spawn("flush", state["session_id"])
+
+
+def spawn(*args: str) -> None:
+    """Run `hook.py <args>` detached, so the session never waits on it."""
     if os.environ.get("HEARTBEAT_SYNC_FLUSH"):       # tests
-        flush(state["session_id"])
+        main(list(args))
         return
-    subprocess.Popen([sys.executable, "-I", os.path.abspath(__file__), "flush", state["session_id"]],
+    subprocess.Popen([sys.executable, "-I", os.path.abspath(__file__), *args],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
 
 
 def gh(*args: str, stdin: str | None = None) -> str:
-    r = subprocess.run(["gh", *args], input=stdin, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(["gh", *args], input=stdin or "", capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"gh {args[0]} {args[1]} failed: {r.stderr.strip()[:300]}")
     return r.stdout
@@ -306,6 +319,65 @@ def flush(sid: str) -> None:
                 gh("issue", "close", str(state["tracking_issue"]), "--repo", state["repo"])
             elif existed and "session_started" in kinds:
                 gh("issue", "reopen", str(state["tracking_issue"]), "--repo", state["repo"])
+
+
+# ---------------------------------------------------------------- vanished sessions (#75)
+
+def running_commands() -> str | None:
+    """Every process's command line, or None if `ps` can't be run."""
+    try:
+        r = subprocess.run(["ps", "-axww", "-o", "command="], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def vanished(state: dict, procs: str, now: float) -> bool:
+    """Whether a session that never posted `stopped` is gone.
+
+    Alive while any process's command line names its session id: launcher sessions
+    (`--session-id`) and resumed ones (`--resume`) always do. Otherwise it is gone if
+    the launcher started it (its pid file is there, so it should have been visible),
+    or if it has been silent for STALE_AFTER. A wrong call is undone by the session's
+    next event: a stopped session that does anything posts `session_started` and its
+    issue reopens."""
+    sid = state["session_id"]
+    if sid in procs:
+        return False
+    if (home() / "launcher" / f"{sid}.pid").exists():
+        return True
+    return now - state.get("last_event_at", 0) >= STALE_AFTER
+
+
+def sweep(role: str, keep: str | None = None) -> list[str]:
+    """Record `stopped` for this role's sessions on this machine that have vanished.
+
+    Their queued events and the `stopped` go out through the normal flush, which
+    closes each tracking issue. Returns the swept session ids."""
+    procs = running_commands()
+    if procs is None:
+        log("sweep: can't run ps; skipped")
+        return []
+    swept = []
+    for p in sorted((home() / "state").glob("*.json")):
+        sid = p.stem
+        if sid == keep or not SESSION_ID_RE.match(sid):
+            continue
+        with locked(sid):
+            state = load_state(sid)
+            if (not state or state.get("stopped") or state.get("role") != role
+                    or not vanished(state, procs, time.time())):
+                continue
+            state["stopped"] = True
+            record(state, "stopped")
+            state["last_flush_at"] = time.time()
+            save_state(state)
+        swept.append(sid)
+        if state["repo"]:
+            spawn_flush(state)
+    if swept:
+        log(f"sweep: recorded `stopped` for vanished {role} sessions {', '.join(swept)}")
+    return swept
 
 
 # ---------------------------------------------------------------- hook handlers
@@ -381,6 +453,8 @@ def handle(hook: str, payload: dict, role: str) -> None:
         save_state(state)
     if flush_now:
         spawn_flush(state)
+    if hook == "SessionStart":
+        spawn("sweep", sid)
 
 
 def latest_session(role: str) -> str | None:
@@ -435,6 +509,11 @@ def main(argv: list[str]) -> int:
             return emit(argv[1:], role)
         if argv[:1] == ["flush"] and len(argv) == 2 and SESSION_ID_RE.match(argv[1]):
             flush(argv[1])
+            return 0
+        if argv[:1] == ["sweep"] and len(argv) <= 2:
+            keep = argv[1] if len(argv) == 2 and SESSION_ID_RE.match(argv[1]) else None
+            for sid in sweep(role, keep):
+                print(f"stopped: {sid}", file=sys.stderr)
             return 0
         if len(argv) == 1:
             payload = json.load(sys.stdin)

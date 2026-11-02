@@ -21,6 +21,7 @@ The hook does nothing unless the session was started with `ops/swarm-session`, w
 | `PostToolUse` | collects tool names; `pr_opened` after `gh pr create` prints a PR URL; `blocked` after `gh issue create … gov:blocking` prints an issue URL |
 | `Stop` / `PostToolUse` | `heartbeat` if nothing was recorded for 5 minutes |
 | `SessionEnd` | `stopped` |
+| `SessionStart` (another session) | `stopped` for this role's sessions on this machine that vanished without `SessionEnd` (below) |
 
 To record a change by hand (the hook finds this role's most recent live session):
 
@@ -37,6 +38,22 @@ Token counts are read locally from the session transcript (cumulative, de-duplic
 - **GitHub:** the same events without `prompt`, as comments on a `[heartbeat] <role> <session_id>` issue opened by the role's App through the `gh` shim. State changes post at once; other events are batched and post at least every 5 minutes. The issue is closed after `stopped`.
 
 Posting runs in a detached process, so the session never waits on GitHub. If posting fails, events stay in `~/.productswarm/outbox/` and go out with the next flush.
+
+## Sessions that vanish without `SessionEnd`
+
+Closing a session's Terminal tab or window sends SIGHUP or kills it, so `SessionEnd` never runs and no `stopped` is posted (#75). To catch these, every new session sweeps this machine's other sessions **of the same role** that haven't stopped, and records `stopped` for any that are gone:
+
+- **still running** if any process's command line contains its session id (launcher sessions carry `--session-id`, resumed ones `--resume`): left alone however long it has been quiet;
+- **gone** if the launcher started it (its pid file is in `~/.productswarm/launcher/`) and no such process exists;
+- **gone** otherwise once it has been silent for 6 hours (`STALE_AFTER`). Sessions started by hand don't name their id on the command line, so silence is all there is to go on.
+
+The `stopped` event goes out through the normal flush, which closes the tracking issue. It is posted by the sweeping session's App, which is why only the same role is swept: the dashboard accepts a session's events only from its own role's App. If a swept session was only quiet, its next event posts `session_started` and reopens the issue.
+
+To sweep without starting a session, run inside a swarm session of that role:
+
+```bash
+python3 heartbeat/hook.py sweep
+```
 
 ## When something looks wrong
 
