@@ -37,7 +37,7 @@ Do this once a day, in a single time-boxed sitting:
    - *Consent:* label `gov:deliberating` and note the deadline in a comment.
    - *Committee:* post a convening comment that names the members and their roles. Include a challenger, and use at least two different models or evidence bases.
    - *Vote:* post the eligible list and the deadline.
-3. **Close finished ones.** Write the decision record from the template, add a row to `INDEX.md`, open the PR with `Closes #N`, and merge it. Then comment the one-line ruling on the issue and label it `gov:ruled`.
+3. **Close finished ones.** Answer on the issue and label it `gov:ruled` (and `ready` when the next stage may start, per GOV-0006). If it needs a record, the docs role writes it from the template, adds a row to `INDEX.md` and opens the PR with `Closes #N` (GOV-0007). Check the PR against your answer, merge it, then comment the one-line ruling on the issue.
 4. **Sweep for lapses.** Anything past its TTL becomes `gov:lapsed`.
 
 To run a committee by hand, start each member as a separate session with the issue URL, its role, and the turn format from GOVERNANCE.md §7. Use different models via OpenRouter where you can.
