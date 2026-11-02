@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged, using the manifest (L1), `swarm up / ls / stop` (L2) and `swarm launch` (L3).
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
 
 ## swarm up / ls / stop
 

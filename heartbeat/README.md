@@ -30,7 +30,7 @@ python3 heartbeat/hook.py emit working_on --issue 4
 python3 heartbeat/hook.py emit blocked --gov-question 15
 ```
 
-Token counts are read locally from the session transcript (cumulative, de-duplicated by message id). `cost_usd` is always `null` until #6 decides how to estimate it. Tool commands and outputs are read in memory only to find PR and issue numbers; they are never written anywhere.
+Token counts are read locally from the session transcript (cumulative, de-duplicated by message id). `cost_usd` is always `null`: the dashboard estimates spend from the token counts instead (#6; see [Spend](../dashboard/README.md#spend)). Tool commands and outputs are read in memory only to find PR and issue numbers; they are never written anywhere.
 
 ## Where events go
 

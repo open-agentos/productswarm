@@ -1,6 +1,6 @@
 # Swarm dashboard
 
-A read-only page showing what every agent session is doing. Built by `generate.py`: Python stdlib only, one static HTML file, no JavaScript (the default in gov question #26, pending a ruling).
+A read-only page showing what every agent session is doing. Built by `generate.py`: Python stdlib only, one static HTML file, no JavaScript (option 1 in gov question #26, which the owner chose).
 
 ## Generate it
 
@@ -54,7 +54,7 @@ A session's current issue is the most recent `issue` any of its events carried.
 
 ## Spend
 
-Each session's spend, today's total and the last 7 UTC days are an **API list-price equivalent**, per the default in gov question #28 (pending a ruling). `spend.py` multiplies each session's latest cumulative `token_counts` by the model's list price. Cache writes are priced at the 1-hour rate. A non-null `cost_usd` on an event wins over the estimate. Per day is each session's increase in cost within that UTC day. This isn't what was billed: sessions on a subscription aren't charged per token.
+Each session's spend, today's total and the last 7 UTC days are an **API list-price equivalent**, per the method in gov question #28. The owner asked for tokens to be split by payment plan if a session can tell. It can't without a new heartbeat field (#31), so every session is priced at list price whatever its plan. `spend.py` multiplies each session's latest cumulative `token_counts` by the model's list price. Cache writes are priced at the 1-hour rate. A non-null `cost_usd` on an event wins over the estimate. Per day is each session's increase in cost within that UTC day. This isn't what was billed: sessions on a subscription aren't charged per token.
 
 Prices are in `spend.PRICES`, copied from the [pricing page](https://platform.claude.com/docs/en/about-claude/pricing) on the date in `PRICES_AS_OF`, which the page shows. When prices change, update both. Sessions with no token counts, or on a model missing from the table, show "—", are left out of totals, and are listed under the method note.
 
