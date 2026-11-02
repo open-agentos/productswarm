@@ -2,24 +2,40 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/open-agentos/productswarm/heartbeat/event.schema.json",
   "title": "productswarm heartbeat event",
-  "description": "One event from one agent session. See heartbeat/SCHEMA.md.",
+  "description": "One event from one agent session, as written to the local spool. Events sent off the machine must also match #/$defs/remote. See heartbeat/SCHEMA.md, GOV-0002 and GOV-0003.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["v", "ts", "session_id", "repo", "role", "model", "event"],
+  "required": ["schema_version", "ts", "session_id", "repo", "role", "model", "event"],
   "properties": {
-    "v": { "const": 1 },
+    "schema_version": { "const": 1 },
     "ts": { "type": "string", "format": "date-time", "pattern": "Z$" },
     "session_id": { "type": "string", "minLength": 1, "maxLength": 128 },
     "repo": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
     "role": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
     "model": { "type": "string", "minLength": 1, "maxLength": 128 },
     "event": {
-      "enum": ["session_started", "working_on", "pr_opened", "blocked", "heartbeat", "stopped"]
+      "enum": ["session_started", "prompt_submitted", "working_on", "pr_opened", "blocked", "heartbeat", "stopped"]
     },
     "issue": { "type": ["integer", "null"], "minimum": 1 },
     "pr": { "type": ["integer", "null"], "minimum": 1 },
     "gov_question": { "type": ["integer", "null"], "minimum": 1 },
-    "cost_usd": { "type": ["number", "null"], "minimum": 0 }
+    "cost_usd": { "type": ["number", "null"], "minimum": 0 },
+    "token_counts": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["input", "output", "cache_read", "cache_creation"],
+      "properties": {
+        "input": { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 },
+        "cache_read": { "type": "integer", "minimum": 0 },
+        "cache_creation": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "tools": {
+      "type": ["array", "null"],
+      "items": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$" }
+    },
+    "prompt": { "type": ["string", "null"], "maxLength": 2000 }
   },
   "allOf": [
     {
@@ -36,6 +52,19 @@
     {
       "if": { "properties": { "event": { "const": "blocked" } } },
       "then": { "required": ["gov_question"], "properties": { "gov_question": { "type": "integer" } } }
+    },
+    {
+      "if": { "properties": { "event": { "not": { "const": "prompt_submitted" } } } },
+      "then": { "not": { "required": ["prompt"] } }
     }
-  ]
+  ],
+  "$defs": {
+    "remote": {
+      "description": "An event as sent off the machine (GitHub tracking-issue comments). Prompt text never leaves the machine (GOV-0002).",
+      "allOf": [
+        { "$ref": "#" },
+        { "not": { "required": ["prompt"] } }
+      ]
+    }
+  }
 }
