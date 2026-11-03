@@ -360,9 +360,16 @@ def gather(repo: str, idle_minutes: int, now: dt.datetime) -> World:
         if labels & {"ready", "gov:ruled"} and not g.is_tracking(it):
             w.events[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/events?per_page=100")
     for n, reviews in (data.get("reviews") or {}).items():    # fetch() read them for build()
-        w.reviewed[n] = {r.get("commit_id") for r in reviews
-                         if (r.get("user") or {}).get("login") == REVIEWER}
+        w.reviewed[n] = reviewed_heads(reviews)
     return w
+
+
+def reviewed_heads(reviews: list[dict]) -> set[str]:
+    """The commit SHAs the reviewer App has reviewed on one PR, from its REST reviews. A
+    head in this set is "already reviewed": the [review] trigger and the Actions check
+    (actions_review.py, #214) both use this rule, so they agree."""
+    return {r.get("commit_id") for r in reviews
+            if (r.get("user") or {}).get("login") == REVIEWER and r.get("commit_id")}
 
 
 # ---------------------------------------------------------------- local state
