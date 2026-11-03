@@ -30,7 +30,9 @@ Each session runs in its own git worktree, `.worktrees/<session id>` in this che
 detached at origin/main, so sessions never share a working tree (#93). The launcher
 writes the heartbeat hook entries into the worktree's .claude/settings.local.json,
 pointing at the pinned copy in ~/.productswarm/runtime (heartbeat/install.py), which
-each launcher run first refreshes to origin/main.
+each launcher run first refreshes to origin/main. For a run `swarm watch` started, it
+also writes a Stop hook from the same pinned copy (stophook.py, #148) that keeps the run
+going until its role's done-condition is met.
 Once a session has exited, its worktree is removed if it is clean and its HEAD is on
 origin; otherwise it is kept and `swarm ls` lists it. Work is never deleted.
 
@@ -237,6 +239,7 @@ class Launcher:
             for e in entries:
                 if e not in live:
                     self.pid_file(e.session_id).unlink(missing_ok=True)
+                    (self.dir / f"{e.session_id}.stop.json").unlink(missing_ok=True)   # stophook.py
             self.save(live)
         self.tidy(live)
         return live
@@ -271,7 +274,11 @@ class Launcher:
         wt = self.worktree(s.session_id)
         self.git_ok("-C", str(self.root), "worktree", "add", "-q", "--detach", str(wt), "origin/main")
         base = install.read_settings(self.root / ".claude" / "settings.local.json")
-        install.write_settings(wt / ".claude" / "settings.local.json", install.with_hooks(base, hook=hook))
+        settings = install.with_hooks(base, hook=hook)
+        if s.by == "watch":      # loop-started runs keep going until they're done (#148)
+            import stophook      # here, not at the top: stophook imports this module
+            settings = stophook.with_stop_hook(settings, stophook.script_for(hook))
+        install.write_settings(wt / ".claude" / "settings.local.json", settings)
 
     def removable(self, wt: Path) -> bool:
         """Clean (nothing uncommitted or untracked) and HEAD is on a remote branch."""

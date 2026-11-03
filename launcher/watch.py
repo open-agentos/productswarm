@@ -70,6 +70,9 @@ refusal is logged and the trigger is done. What it has acted on is kept in
 ~/.productswarm/launcher/watch.json, so a restart starts nothing twice. One reviewer
 pass covers every review trigger present when it starts.
 
+Each run it starts gets a Stop hook (stophook.py, #148) that keeps it going until its
+role's done-condition is met; see that module for the conditions and the guards.
+
 It never stops a session (GOV-0008), never adds or removes labels, and never comments,
 approves or merges: its only GitHub calls are reads. Sessions it starts are recorded
 with by="watch", and `swarm ls` shows them as "by watch".
