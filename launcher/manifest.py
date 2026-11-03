@@ -10,7 +10,10 @@ collected and raised together in one ManifestError.
 
 An optional [watch] table holds the limits for `swarm watch` (v2, #90), per the owner's
 answer on #88, GOV-0010: interval_minutes and max_live, both required if the table is there.
-load_watch() returns them, or None if the manifest has no [watch] table.
+max_turns (#147, GOV-0012) is the turn ceiling for the headless runs swarm watch starts: a
+positive whole number. It may be left out here, so `swarm up` still works, but `swarm watch`
+then refuses to start anything. load_watch() returns them, or None if the manifest has no
+[watch] table.
 """
 from __future__ import annotations
 
@@ -24,7 +27,8 @@ DEFAULT_PATH = ROOT / "swarm.toml"
 
 REQUIRED = ("role", "count", "model")
 OPTIONAL = ("spend_cap_usd",)
-WATCH_KEYS = ("interval_minutes", "max_live")
+WATCH_KEYS = ("interval_minutes", "max_live")     # required in [watch]
+WATCH_OPTIONAL = ("max_turns",)                   # swarm watch refuses to start without it
 
 
 class ManifestError(ValueError):
@@ -54,6 +58,7 @@ class WatchLimits:
     """How `swarm watch` is limited (GOV-0010). Changing these is a `spend` decision."""
     interval_minutes: float     # how often it reads GitHub and heartbeat state
     max_live: int               # most live sessions it may have started at once
+    max_turns: int | None = None    # --max-turns for each headless run (GOV-0012); None: watch refuses
 
 
 def _is_number(v) -> bool:
@@ -104,8 +109,9 @@ def _check_entry(i: int, entry, roles_dir: Path, seen: dict[str, int]) -> list[s
 def _check_watch(table) -> list[str]:
     if not isinstance(table, dict):
         return ["watch: must be a [watch] table"]
-    problems = [f"watch: unknown key '{k}' (allowed: {', '.join(WATCH_KEYS)})"
-                for k in sorted(set(table) - set(WATCH_KEYS))]
+    allowed = WATCH_KEYS + WATCH_OPTIONAL
+    problems = [f"watch: unknown key '{k}' (allowed: {', '.join(allowed)})"
+                for k in sorted(set(table) - set(allowed))]
     problems += [f"watch: missing '{k}'" for k in WATCH_KEYS if k not in table]
     if "interval_minutes" in table:
         v = table["interval_minutes"]
@@ -115,6 +121,10 @@ def _check_watch(table) -> list[str]:
         v = table["max_live"]
         if not isinstance(v, int) or isinstance(v, bool) or v < 1:
             problems.append(f"watch: max_live must be a whole number of at least 1, got {v!r}")
+    if "max_turns" in table:
+        v = table["max_turns"]
+        if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+            problems.append(f"watch: max_turns must be a whole number of at least 1, got {v!r}")
     return problems
 
 
@@ -158,7 +168,8 @@ def parse_all(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "ro
             sessions.append(Session(role=entry["role"], index=n, model=entry["model"].strip(),
                                     spend_cap_usd=None if cap is None else float(cap)))
     w = data.get("watch")
-    limits = None if w is None else WatchLimits(float(w["interval_minutes"]), w["max_live"])
+    limits = None if w is None else WatchLimits(float(w["interval_minutes"]), w["max_live"],
+                                                w.get("max_turns"))
     return sessions, limits
 
 
@@ -198,7 +209,8 @@ def main(argv: list[str]) -> int:
         cap = "no cap" if s.spend_cap_usd is None else f"cap ${s.spend_cap_usd:,.2f}"
         print(f"{s.name}\t{s.model}\t{cap}")
     if limits:
-        print(f"watch\tevery {limits.interval_minutes:g} min\tat most {limits.max_live} live")
+        turns = "no max_turns" if limits.max_turns is None else f"max {limits.max_turns} turns a run"
+        print(f"watch\tevery {limits.interval_minutes:g} min\tat most {limits.max_live} live\t{turns}")
     return 0
 
 
