@@ -79,6 +79,9 @@ loop never restarts it by itself; `swarm inbox` lists a run that ended at cap, w
 ref and cost, so the owner can decide whether to restart it, and lists every recorded
 cost from the last RUNS_DAYS days. A kept worktree is tidy()'s job, as for any session.
 
+Each run it starts gets a Stop hook (stophook.py, #148) that keeps it going until its
+role's done-condition is met; see that module for the conditions and the guards.
+
 It never stops a session (GOV-0008), never adds or removes labels, and never comments,
 approves or merges: its only GitHub calls are reads. Sessions it starts are recorded
 with by="watch", and `swarm ls` shows them as "by watch".

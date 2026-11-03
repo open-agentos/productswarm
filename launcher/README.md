@@ -83,6 +83,7 @@ Nothing new is posted to GitHub. What the launcher started is recorded under `~/
 - `.worktrees/<session-id>/` in this checkout is the session's working tree (see `up`).
 - `<session-id>.pid` is written by the window's shell before it hands over to `swarm-session`, so the PID it holds is Claude Code's.
 - `watch.json` holds what `swarm watch` has acted on, what it is holding or skipping, and how each run it started ended (see below).
+- `<session-id>.stop.json` counts how many times the Stop hook has blocked a run `swarm watch` started, and `stophook.log` says why (see below).
 - `<session-id>.result.json` is a headless run's output (see "Headless runs" below). Its first line is `ops/swarm-session`'s banner (`swarm-session: <role> as …`), and its last line is the JSON result from `claude -p --output-format json`.
 
 A PID counts only while that process's command line still contains `--session-id <its id>`. A reused PID is never mistaken for a session, and is never sent a signal. If a session exits by itself, `up` and `ls` remove it from the state file.
@@ -213,6 +214,28 @@ Builders on issues from the same ruling usually change the same files, so their 
 - **Skipped for good.** If a question's "Raised by" names no known role, or more than one, the trigger is logged as skipped and is done.
 - **Failed starts.** If a window can't be opened, the trigger is held, listed in `swarm inbox`, and tried again on the next check.
 - **Records it can't see.** GOV-0007 also counts a question as needing a record when the owner says so in the answer. That's a comment the loop can't read reliably, so only the body's ratings trigger `[record]`: domain `governance`, `one-way`, or blast radius `external`.
+
+### Done-conditions: the Stop hook on runs it starts
+
+A run that `swarm watch` starts keeps going until its role has done its job (#148, from the owner's answer on #125). The launcher writes a Stop hook (`launcher/stophook.py`) into that run's worktree `.claude/settings.local.json`. It runs from the pinned copy of `main` in `~/.productswarm/runtime`, as the heartbeat hook does, so only merged code runs as a hook. Sessions you start with `swarm up` or `swarm launch` don't get it.
+
+When the run is about to stop, the hook reads GitHub as the run's App (only reads) and checks:
+
+| Run | Done when |
+|---|---|
+| builder on an issue (`[build]`) | a PR, open or merged, closes the issue |
+| builder on a PR (`[respond]`) | the reviewer's latest review at the PR's head isn't "changes requested" (a push moved the head, or there was nothing to respond to); or the run commented on the PR; or the PR is closed |
+| reviewer | every open, non-draft PR that existed when the run started has a reviewer review at its current head, or one posted since the run started |
+| docs on a `gov:ruled` question (`[record]`) | a PR, open or merged, closes the question |
+| anything else, e.g. an `[answer]` run | always |
+
+These also count as done, because a run can stop for good reasons without a PR:
+
+- since it started, the run opened or commented on a `gov:question` that names its issue or PR as `#N`. Every session of a role acts as the same App, so the `#N` is how the hook tells this run's question from another session's;
+- the issue fails `swarm launch`'s refusal checks: it's closed, or its latest `ready` (`gov:ruled` for `[record]`) wasn't added by the owner (GOV-0006);
+- a PR, open or merged, already closes the issue.
+
+If the condition isn't met, the hook blocks the stop and gives a short reason naming what's missing, and the run continues. It allows the stop whenever `stop_hook_active` is set (a hook is already continuing the run), after 3 blocks in one run (counted in `~/.productswarm/launcher/<session id>.stop.json`), and whenever GitHub can't be read or anything else fails. It never fails closed: the run's budget (GOV-0012) is what bounds spend. What it blocked, and any read that failed, go to `~/.productswarm/launcher/stophook.log`.
 
 ### What it never does
 
