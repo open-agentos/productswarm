@@ -62,6 +62,37 @@ class Fake:
         self.t += s
 
 
+class FakeGit:
+    """A fake git: `worktree add` makes the directory, `worktree remove` deletes it.
+    Worktrees in `dirty` have uncommitted work; those in `unpushed` have commits on no remote."""
+
+    def __init__(self):
+        self.calls: list[list[str]] = []
+        self.dirty: set[str] = set()
+        self.unpushed: set[str] = set()
+        self.fail: str | None = None          # a subcommand that fails, e.g. "fetch"
+
+    def __call__(self, args):
+        self.calls.append(args)
+        sub = args[2] if args[:1] == ["-C"] else args[0]
+        if sub == self.fail:
+            return 1, f"fatal: {sub} failed"
+        if args[2:4] == ["worktree", "add"]:
+            Path(args[-2]).mkdir(parents=True)
+            (Path(args[-2]) / ".git").write_text("gitdir: x\n")
+        elif args[2:4] == ["worktree", "remove"]:
+            import shutil
+            shutil.rmtree(args[-1])
+        elif sub == "status":
+            return 0, " M x.py" if Path(args[1]).name in self.dirty else ""
+        elif sub == "branch":
+            return 0, "" if Path(args[1]).name in self.unpushed else "  origin/main"
+        return 0, ""
+
+    def subs(self):
+        return [" ".join(a[2:4]) if a[2] == "worktree" else a[2] for a in self.calls]
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -70,9 +101,11 @@ class Base(unittest.TestCase):
         (self.home / "launcher").mkdir()
         self.fake = Fake(self.home / "launcher")
         self.lines: list[str] = []
-        self.l = swarm.Launcher(self.home, root=Path("/repo"), run=self.fake.run, proc=self.fake.proc,
+        self.root = self.home / "repo"
+        self.git = FakeGit()
+        self.l = swarm.Launcher(self.home, root=self.root, run=self.fake.run, proc=self.fake.proc,
                                 kill=self.fake.kill, clock=self.fake.clock, sleep=self.fake.sleep,
-                                out=self.lines.append)
+                                out=self.lines.append, git=self.git)
 
     def names(self):
         return [e.name for e in self.l.live()]
@@ -154,12 +187,111 @@ class CommandTest(Base):
         import shlex
         (script,) = shlex.split(inner)
         argv = shlex.split(script.split("&& exec ", 1)[1])
-        self.assertEqual(argv, ["/repo/ops/swarm-session", "builder", "--model", "claude-sonnet-5-5",
+        wt = self.root / ".worktrees" / e.session_id
+        self.assertTrue(script.startswith(f"cd {wt} && "))
+        self.assertEqual(argv, [f"{wt}/ops/swarm-session", "builder", "--model", "claude-sonnet-5-5",
                                 "--session-id", e.session_id, swarm.opener("builder")])
         self.assertIn(f"echo $$ >| {self.home}/launcher/{e.session_id}.pid", script)
 
     def test_applescript_string_escapes(self):
         self.assertEqual(swarm.applescript_string('a "b" \\c'), '"a \\"b\\" \\\\c"')
+
+
+class WorktreeTest(Base):
+    """Each session gets its own worktree (#93); exited ones go only if nothing would be lost."""
+
+    def test_each_session_gets_a_worktree_at_origin_main(self):
+        self.l.up([S("builder"), S("docs")])
+        # One fetch, the pinned hook copy, then a worktree per session.
+        self.assertEqual(self.git.subs(), ["fetch", "worktree add", "worktree add", "worktree add"])
+        self.assertEqual(self.git.calls[1][-2], str(self.home / "runtime"))
+        for e in self.l.load():
+            wt = self.root / ".worktrees" / e.session_id
+            self.assertIn(["-C", str(self.root), "worktree", "add", "-q", "--detach", str(wt), "origin/main"],
+                          self.git.calls)
+            self.assertTrue(any(c.startswith(f"exec /bin/bash -c 'cd {wt} && ") for c in self.fake.commands))
+
+    def test_hook_settings_are_written_and_other_settings_kept(self):
+        (self.root / ".claude").mkdir(parents=True)
+        (self.root / ".claude" / "settings.local.json").write_text(json.dumps(
+            {"permissions": {"allow": ["Bash(ls)"]}}))
+        self.l.up([S("builder")])
+        (e,) = self.l.load()
+        got = json.loads((self.root / ".worktrees" / e.session_id / ".claude" / "settings.local.json").read_text())
+        self.assertEqual(got["permissions"], {"allow": ["Bash(ls)"]})
+        self.assertEqual(sorted(got["hooks"]), sorted(["SessionStart", "UserPromptSubmit", "PostToolUse",
+                                                       "Stop", "SessionEnd"]))
+
+    def test_hooks_run_from_the_pinned_copy(self):
+        self.l.up([S("builder")])
+        (e,) = self.l.load()
+        got = (self.root / ".worktrees" / e.session_id / ".claude" / "settings.local.json").read_text()
+        self.assertIn(f'python3 -I \\"{self.home}/runtime/heartbeat/hook.py\\" SessionStart', got)
+        self.assertNotIn("CLAUDE_PROJECT_DIR", got)
+
+    def test_existing_pinned_copy_is_moved_to_origin_main(self):
+        rt = self.home / "runtime"
+        rt.mkdir()
+        (rt / ".git").write_text("gitdir: x\n")
+        self.l.up([S("builder")])
+        self.assertIn(["-C", str(rt), "checkout", "-q", "--detach", "--force", "origin/main"], self.git.calls)
+
+    def test_pinned_copy_failure_starts_nothing(self):
+        self.git.fail = "worktree"
+        self.assertEqual(self.l.up([S("builder")]), 1)
+        self.assertEqual(self.fake.commands, [])
+        self.assertIn("can't refresh the pinned hook copy", self.lines[-1])
+
+    def test_git_failure_starts_nothing(self):
+        self.git.fail = "fetch"
+        self.assertEqual(self.l.up([S("builder")]), 1)
+        self.assertEqual(self.fake.commands, [])
+        self.assertEqual(self.l.load(), [])
+        self.assertIn("failed to start builder-1: git", self.lines[-1])
+
+    def test_window_failure_removes_the_new_worktree(self):
+        self.fake.fail_for = {"builder"}
+        self.assertEqual(self.l.up([S("builder")]), 1)
+        self.assertEqual(self.git.subs()[-1], "worktree remove")
+        self.assertIn("--force", self.git.calls[-1])
+        self.assertEqual(list((self.root / ".worktrees").iterdir()), [])
+
+    def test_dry_run_creates_no_worktree(self):
+        self.l.up([S("builder")], dry_run=True)
+        self.assertEqual(self.git.calls, [])
+        self.assertFalse((self.root / ".worktrees").exists())
+        self.assertIn("git worktree add --detach", self.lines[-1])
+
+    def test_exited_sessions_worktrees_removed_only_when_nothing_would_be_lost(self):
+        self.l.up([S("builder"), S("docs"), S("planner")])
+        sids = {e.role: e.session_id for e in self.l.load()}
+        self.git.dirty.add(sids["docs"])
+        self.git.unpushed.add(sids["planner"])
+        hand = self.root / ".worktrees" / "my-review"         # made by hand: never touched
+        hand.mkdir()
+        self.fake.procs.clear()                              # every window closed
+        self.fake.t += swarm.START_GRACE + 1
+        self.assertEqual(self.l.live(), [])
+        wts = self.root / ".worktrees"
+        self.assertFalse((wts / sids["builder"]).exists())
+        self.assertEqual(self.l.kept, [wts / sids["docs"], wts / sids["planner"]] if sids["docs"] < sids["planner"]
+                         else [wts / sids["planner"], wts / sids["docs"]])
+        self.assertTrue(hand.exists())
+        self.assertEqual(self.git.subs()[-1], "worktree prune")
+
+    def test_live_sessions_worktree_is_never_touched(self):
+        self.l.up([S("builder")])
+        self.l.live()
+        self.assertNotIn("worktree remove", self.git.subs())
+        self.assertNotIn("status", self.git.subs())
+
+    def test_stop_says_when_a_worktree_is_kept(self):
+        self.l.up([S("builder")])
+        (e,) = self.l.load()
+        self.git.dirty.add(e.session_id)
+        self.assertEqual(self.l.stop("builder-1"), 0)
+        self.assertIn(f"worktree kept: {self.root / '.worktrees' / e.session_id} (uncommitted or unpushed work)",
+                      self.lines)
 
 
 class StopTest(Base):
@@ -442,31 +574,76 @@ class RealShellTest(unittest.TestCase):
     that just sleeps: checks the pid file names the process that carries --session-id,
     and that stop() ends it. No Terminal, no Claude Code."""
 
-    def test_pid_chain_and_stop(self):
+    def git(self, *args, cwd=None):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd,
+                       check=True, capture_output=True)
+
+    def repo(self, tmp: Path) -> Path:
+        """A real checkout whose origin's main has a stand-in ops/swarm-session that sleeps."""
+        origin, seed, root = tmp / "origin.git", tmp / "seed", tmp / "repo"
+        self.git("init", "-q", "--bare", "-b", "main", str(origin))
+        self.git("clone", "-q", str(origin), str(seed))
+        (seed / "ops").mkdir()
+        fake = seed / "ops" / "swarm-session"
+        fake.write_text('#!/bin/bash\nexec python3 -c "import time; time.sleep(30)" "$@"\n')
+        fake.chmod(0o755)
+        (seed / ".gitignore").write_text(".worktrees/\n.claude/settings.local.json\n")
+        self.git("add", "-A", cwd=seed)
+        self.git("commit", "-q", "-m", "seed", cwd=seed)
+        self.git("push", "-q", "origin", "HEAD:main", cwd=seed)
+        self.git("clone", "-q", str(origin), str(root))
+        return root
+
+    def wait_running(self, l, e):
+        for _ in range(50):
+            if l.state(e) == "running":
+                break
+            time.sleep(0.1)
+        self.assertEqual(l.state(e), "running")
+
+    def test_pid_chain_worktree_and_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root, home = Path(tmp) / "repo", Path(tmp) / "home"
-            (root / "ops").mkdir(parents=True)
-            fake = root / "ops" / "swarm-session"
-            fake.write_text('#!/bin/bash\nexec python3 -c "import time; time.sleep(30)" "$@"\n')
-            fake.chmod(0o755)
-            procs = []
-            l = swarm.Launcher(home, root=root, out=lambda s: None,
+            tmp = Path(tmp).resolve()
+            root, home = self.repo(tmp), tmp / "home"
+            procs, lines = [], []
+            l = swarm.Launcher(home, root=root, out=lines.append,
                                run=lambda cmd: procs.append(subprocess.Popen(["/bin/sh", "-c", cmd])))
             try:
                 self.assertEqual(l.up([S("builder")]), 0)
                 e = l.load()[0]
-                for _ in range(50):
-                    if l.state(e) == "running":
-                        break
-                    time.sleep(0.1)
-                self.assertEqual(l.state(e), "running")
+                wt = root / ".worktrees" / e.session_id
+                self.wait_running(l, e)
                 self.assertEqual(l.pid(e), procs[0].pid)       # both exec's kept the pid
+                self.assertIn(f"cd {wt} && ", procs[0].args[2])
+                settings = json.loads((wt / ".claude" / "settings.local.json").read_text())
+                self.assertIn(f"{home}/runtime/heartbeat/hook.py", json.dumps(settings["hooks"]["SessionStart"]))
+                rev = lambda d, r: subprocess.run(["git", "-C", str(d), "rev-parse", r],
+                                                  capture_output=True, text=True).stdout
+                self.assertEqual(rev(home / "runtime", "HEAD"), rev(root, "origin/main"))   # pinned copy
+                self.assertEqual(subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                                                capture_output=True, text=True).stdout, "")
                 self.assertEqual(l.up([S("builder")]), 0)      # already running
                 self.assertEqual(len(procs), 1)
                 l.clock = time.time
                 self.assertEqual(l.stop("builder-1"), 0)
                 self.assertIsNotNone(procs[0].wait(timeout=5))
                 self.assertEqual(l.load(), [])
+                self.assertFalse(wt.exists())                  # clean and on origin: removed
+
+                # A session that leaves a commit nobody pushed: its worktree is kept and listed.
+                self.assertEqual(l.up([S("builder")]), 0)
+                e = l.load()[0]
+                wt = root / ".worktrees" / e.session_id
+                self.wait_running(l, e)
+                (wt / "work.txt").write_text("x")
+                self.git("add", "work.txt", cwd=wt)
+                self.git("commit", "-q", "-m", "unpushed", cwd=wt)
+                self.assertEqual(l.stop("builder-1"), 0)
+                procs[1].wait(timeout=5)
+                self.assertTrue(wt.exists())
+                self.assertIn(f"worktree kept: {wt} (uncommitted or unpushed work)", lines)
+                self.assertEqual(l.live(), [])
+                self.assertEqual(l.kept, [wt])
             finally:
                 for p in procs:
                     if p.poll() is None:

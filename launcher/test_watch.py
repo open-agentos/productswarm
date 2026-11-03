@@ -16,7 +16,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import swarm  # noqa: E402
 import watch  # noqa: E402
-from test_swarm import Fake  # noqa: E402
+from test_swarm import Fake, FakeGit  # noqa: E402
 
 G = swarm.dashboard()
 REPO = "open-agentos/productswarm"
@@ -99,7 +99,8 @@ class WatchTest(unittest.TestCase):
         self.fake = Fake(self.home / "launcher")
         self.lines = []
         self.l = swarm.Launcher(self.home, run=self.fake.run, proc=self.fake.proc, kill=self.fake.kill,
-                                clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append)
+                                clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append,
+                                root=self.home / "repo", git=FakeGit())
         self.scene = Scene()
         self.w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read)
 

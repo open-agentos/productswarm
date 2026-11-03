@@ -12,6 +12,14 @@ This adds the hook to `.claude/settings.local.json` (per machine, not committed)
 
 The hook does nothing unless the session was started with `ops/swarm-session`, which sets `SWARM_ROLE`. Your own sessions in this checkout are unaffected.
 
+**Sessions the launcher starts need no install.** The launcher writes the same entries into each session's own worktree (launcher/README.md).
+
+### Hooks run from a pinned copy of `main`
+
+The hook entries don't run `heartbeat/hook.py` from the session's own files. They run it from `~/.productswarm/runtime` (or `$PRODUCTSWARM_HOME/runtime`), a detached git worktree checked out at `origin/main` (#93). Only merged code ever runs as a hook. A session editing the hook on a branch tests it with `python3 -m unittest`, but its own heartbeat still runs `main`'s hook, so its unreviewed code never posts to GitHub as its App.
+
+`install.py` fetches `origin` and refreshes the copy, and so does every `swarm up` and `swarm launch`. A hook change therefore takes effect for sessions started after it merges and the copy is refreshed. Sessions already running pick up the new files on their next hook call.
+
 ## What it records
 
 | Claude Code hook | Event(s) |
