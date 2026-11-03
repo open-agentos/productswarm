@@ -29,7 +29,7 @@ applies_to:
 
 The Actions reviewer is one workflow, `.github/workflows/reviewer.yml`:
 
-- **Events:** `pull_request` (`opened`, `synchronize`, `reopened`, `ready_for_review`), plus `workflow_dispatch` with a PR number for re-runs.
+- **Events:** `pull_request` (`opened`, `synchronize`, `reopened`, `ready_for_review`), plus `workflow_dispatch` with a PR number for re-runs. This is the one exception to GOV-0017's "only on `pull_request`", allowed by the owner on #229: dispatch needs write access through a person or `actions: write`, so in practice only the owner can start it (the swarm Apps don't have `actions: write`, and must not be given it). A dispatched run still goes through GOV-0017's no-secrets check job on the named PR (author, same repo, not a draft) before the job with secrets runs.
 - **Concurrency:** group `reviewer-pr-<number>` with `cancel-in-progress: true`, so a new push replaces a review of a stale head. There is no cross-PR ceiling; each run is bounded by GOV-0012's budget and turns.
 - **No self-triggering:** the workflow does not listen to `pull_request_review` or `issue_comment`, the events the reviewer's own output fires. A run skips if the reviewer has already reviewed the PR's current head (the same rule as the `[review]` trigger).
 - **Coexistence:** a `swarm.toml` switch (for example `[watch] review_in_actions = true`) makes `swarm watch` leave `[review]` to Actions. Turning it off, or disabling the workflow, puts the local loop back in charge. `[respond]`, `[build]`, `[answer]` and `[record]` stay local.
