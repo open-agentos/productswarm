@@ -73,7 +73,7 @@ It prints one numbered list of everything waiting on you, most urgent first, eac
 
 If nothing is waiting, it says "Nothing is waiting on you."
 
-Below the list, `inbox` adds what `swarm watch` is holding or skipping, with the reason and when it last checked (see below). That part comes from local state, so the dashboard doesn't show it.
+Below the list, `inbox` adds what `swarm watch` is holding or skipping, with the reason and when it last checked, and the runs it started that ended at cap, plus each recorded run's cost (see "How each run ended" below). That part comes from local state, so the dashboard doesn't show it.
 
 ### Local state
 
@@ -82,7 +82,7 @@ Nothing new is posted to GitHub. What the launcher started is recorded under `~/
 - `sessions.json` holds each session's name, role, model, session ID and start time.
 - `.worktrees/<session-id>/` in this checkout is the session's working tree (see `up`).
 - `<session-id>.pid` is written by the window's shell before it hands over to `swarm-session`, so the PID it holds is Claude Code's.
-- `watch.json` holds what `swarm watch` has acted on, and what it is holding or skipping (see below).
+- `watch.json` holds what `swarm watch` has acted on, what it is holding or skipping, and how each run it started ended (see below).
 - `<session-id>.stop.json` counts how many times the Stop hook has blocked a run `swarm watch` started, and `stophook.log` says why (see below).
 - `<session-id>.result.json` is a headless run's output (see "Headless runs" below). Its first line is `ops/swarm-session`'s banner (`swarm-session: <role> as …`), and its last line is the JSON result from `claude -p --output-format json`.
 
@@ -132,7 +132,7 @@ The launcher adds these to the usual `ops/swarm-session <role> --model <model> -
 | `--max-turns` | `[watch] max_turns` | catches a run that is looping (GOV-0012) |
 | `--output-format` | `json` | stdout goes to `~/.productswarm/launcher/<session-id>.result.json` |
 
-The run still opens in its own Terminal window, so the pid file, `swarm ls` and `swarm stop` work as before, and the heartbeat hook still records `started` and `stopped`. Before the run starts, the window prints one line saying it is headless and where its result goes. After that the window shows only stderr. #149 reads the result file.
+The run still opens in its own Terminal window, so the pid file, `swarm ls` and `swarm stop` work as before, and the heartbeat hook still records `started` and `stopped`. Before the run starts, the window prints one line saying it is headless and where its result goes. After that the window shows only stderr. The loop reads the result file once the run has ended (see "How each run ended" below).
 
 The deny patterns back up auto mode's classifier for the two rules governance cares about most: agents never merge (GOV-0011), and agents never add or remove labels such as `ready` and `gov:ruled` (GOV-0006):
 
@@ -147,6 +147,34 @@ Bash(gh api *labels*)                  Bash(gh api *merge*)
 ```
 
 As GOV-0013 accepts, this is a backstop and not a complete fence. The `=` forms are there because `--add-label=ready` doesn't match `--add-label *`. `gh api *merge*` also denies reads that mention "merge", such as `gh api repos/…/pulls/5 --jq .merged`. `gh pr view --json mergeable` and `gh issue view --json labels` still work.
+
+### How each run ended
+
+Once a run the loop started is no longer live, the next check reads its result file and records, against the trigger, in `"runs"` in `watch.json` (#149):
+
+```json
+"build:49:11": {"session_id": "…", "name": "builder-issue-49", "kind": "build", "ref": "#49",
+                "started": "2026-11-03T12:00:00+00:00", "ended": "2026-11-03T12:45:00+00:00",
+                "ending": "ended at cap", "detail": "budget (--max-budget-usd)",
+                "cost_usd": 15.02, "subtype": "error_max_budget_usd"}
+```
+
+`ending` comes from the result's `subtype` (the `SDKResultMessage` type in the [Agent SDK reference](https://code.claude.com/docs/en/agent-sdk/typescript#sdkresultmessage), checked against real Claude Code 2.1.317 runs):
+
+| `ending` | When |
+|---|---|
+| `done` | `subtype` is `success` and `is_error` is false |
+| `ended at cap` | `subtype` is `error_max_budget_usd` (`--max-budget-usd`) or `error_max_turns` (`--max-turns`) |
+| `error` | any other `subtype`, or `success` with `is_error` set; `detail` holds the result's `errors` |
+| `no result` | no result file, a file that can't be read, or no JSON result on its last line, for example after `swarm stop` |
+
+`cost_usd` is the result's `total_cost_usd`: Claude Code's client-side estimate. It stays on this machine. GOV-0002, GOV-0003 and GOV-0004 still govern what reaches GitHub, and nothing new is posted.
+
+- **The trigger stays done.** The loop never restarts a run by itself, whatever its ending (GOV-0012).
+- **`swarm inbox` lists a run that ended at cap**, with its ref, which limit it reached and its cost, so you can decide whether to restart it, for example by adding `ready` again. It drops off the list once a later run on the same ref has started, or after 7 days (`watch.RUNS_DAYS`).
+- **`swarm inbox` lists each recorded run's cost** from the last 7 days, newest first. Records older than that are dropped from `watch.json`.
+- **Unpushed work is kept.** As for any session, `tidy()` keeps an exited run's worktree if it has uncommitted or unpushed work, and `swarm ls` names it.
+- **The dashboard doesn't show these.** It is built and published by a GitHub Action, which can't read this machine's `watch.json`, and publishing the costs would send them to GitHub.
 
 ### Limits
 

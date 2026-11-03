@@ -41,7 +41,8 @@ What the launcher started is recorded locally, never on GitHub:
     ~/.productswarm/launcher/<id>.pid        written by the window's shell before exec
     ~/.productswarm/launcher/<id>.result.json  a headless run's stdout: ops/swarm-session's
                                              one-line banner, then the JSON result (#147)
-    ~/.productswarm/launcher/watch.json      triggers `swarm watch` acted on or is holding
+    ~/.productswarm/launcher/watch.json      triggers `swarm watch` acted on or is holding,
+                                             and how each run it started ended (#149)
 (PRODUCTSWARM_HOME moves ~/.productswarm, as for the heartbeat.)
 
 `stop` sends SIGTERM. Claude Code then runs its SessionEnd hook, so the heartbeat
@@ -534,22 +535,34 @@ def inbox(launcher: Launcher, repo: str, idle_minutes: int) -> int:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     items = g.needs_you(heartbeat(repo, idle_minutes, now))
     import watch
-    launcher.out(inbox_text(items, now, g, watch.waiting(launcher)))
+    launcher.out(inbox_text(items, now, g, watch.waiting(launcher), watch.runs(launcher)))
     return 0
 
 
-def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None) -> str:
-    """The needs-you list, then any triggers `swarm watch` is holding or skipping (#90).
+def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None,
+               runs: list[dict] | None = None) -> str:
+    """The needs-you list, then runs `swarm watch` started that ended at cap (#149), then
+    any triggers it is holding or skipping (#90), then each recorded run's cost (#149).
 
-    held is watch.waiting(): (when swarm watch last checked, its waiting triggers). Those
-    come from local state, not GitHub, so the dashboard doesn't show them."""
+    held is watch.waiting(): (when swarm watch last checked, its waiting triggers); runs
+    is watch.runs(). Both come from local state, not GitHub, so the dashboard (built and
+    published by a GitHub Action) doesn't show them, and the costs never leave this machine
+    (GOV-0002, GOV-0003, GOV-0004)."""
+    import watch
     checked, waiting = held or (None, [])
-    if not items and not waiting:
-        return g.NEEDS_EMPTY
+    capped, recent = watch.runs_text(runs or [], now, g.ago) if runs else ([], [])
     out = [f"{n}. {g.needs_line(i, now)}\n   {i['url']}" for n, i in enumerate(items, 1)]
+    if not items and not waiting and not capped:
+        out.append(g.NEEDS_EMPTY)
+    if capped:
+        out.append("\nswarm watch runs that ended at cap (restart one if its work should go on):")
+        out += capped
     if waiting:
         out.append(f"\nswarm watch is holding (last check {g.ago(checked, now)}):")
         out += [f"- [{w['kind']}] {w['ref']} {w['why']} · {w['reason']}" for w in waiting]
+    if recent:
+        out.append(f"\nswarm watch runs in the last {watch.RUNS_DAYS} days (cost is Claude Code's local estimate):")
+        out += recent
     return "\n".join(out).lstrip("\n")
 
 
