@@ -100,8 +100,8 @@ class ReviewerStateTest(unittest.TestCase):
     """GOV-0011 (#113): the reviewer's reviews on a PR, as swarm watch and needs_you read them."""
     HEAD = "h" * 40
 
-    def detail(self, reviews):
-        p = {**pr(40, 30, closes=[4]), "headRefOid": self.HEAD}
+    def detail(self, reviews, author="app/productswarm-builder"):
+        p = {**pr(40, 30, closes=[4]), "headRefOid": self.HEAD, "author": {"login": author}}
         m = g.build({"repo": "open-agentos/productswarm", "issues": [issue(4, "x")], "comments": {},
                      "prs": [p], "reviews": {40: reviews}}, NOW, g.dt.timedelta(minutes=15))
         (item,) = g.needs_you(m)
@@ -127,6 +127,17 @@ class ReviewerStateTest(unittest.TestCase):
             _, detail = self.detail([review(state, self.HEAD, authority="fail")])
             self.assertEqual(detail, "overstep: needs the owner, closes #4")
         _, detail = self.detail([review("COMMENTED", "old", authority="fail")])  # an older head
+        self.assertEqual(detail, "awaiting review, closes #4")
+
+    def test_changes_on_a_pr_the_builder_did_not_open_need_the_owner(self):
+        """#178: the builder responds only on its own PR (GOV-0011)."""
+        for author, who in [("app/productswarm-docs", "docs"), ("productswarm-docs[bot]", "docs"),
+                            ("mattmcalister", "non-swarm")]:
+            _, detail = self.detail([review("CHANGES_REQUESTED", self.HEAD)], author)
+            self.assertEqual(detail, f"changes requested on a {who} PR: needs the owner, closes #4")
+            _, detail = self.detail([review("COMMENTED", self.HEAD)], author)
+            self.assertEqual(detail, "awaiting review, closes #4")
+        _, detail = self.detail([review("CHANGES_REQUESTED", self.HEAD)], "productswarm-builder[bot]")
         self.assertEqual(detail, "awaiting review, closes #4")
 
     def test_comment_or_approve_is_not_the_owners(self):

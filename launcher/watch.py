@@ -17,13 +17,15 @@ it has none (for example, the role has no spend_cap_usd).
 | record | gov:question whose most recent `gov:ruled` was added by the owner, that | docs on the question |
 |        | needs a record (GOV-0007), with no open PR closing it                   |                      |
 | answer | gov:question whose most recent `ready` was added by the owner           | its "Raised by" role |
-| respond| open, non-draft PR whose latest reviewer review at its head is          | builder on the PR    |
-|        | CHANGES_REQUESTED, with Authority not `fail`, for at most 2 rounds      | (GOV-0011)           |
+| respond| open, non-draft PR the builder App opened, whose latest reviewer review | builder on the PR    |
+|        | at its head is CHANGES_REQUESTED, with Authority not `fail`, for at     | (GOV-0011)           |
+|        | most 2 rounds                                                           |                      |
 
 [respond] counts the reviewer's CHANGES_REQUESTED reviews on the PR from GitHub's review
 history, so the count holds across restarts. A third request starts nothing, and an
-Authority: fail review at the head starts nothing either: `needs_you()` lists both PRs
-as needing the owner. A PR that doesn't close exactly one issue is skipped with a reason.
+Authority: fail review at the head starts nothing either, and nor do requested changes
+on a PR another App opened, such as a docs ruling PR (#178): the builder responds only on
+its own PR (GOV-0011). `needs_you()` lists all three as needing the owner. A PR that doesn't close exactly one issue is skipped with a reason.
 
 An issue or question with a live session on it prints nothing (`swarm launch`'s refusal
 rule), so it can fire later, once that session has stopped. Each trigger has an identity,
@@ -273,7 +275,8 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
 def respond(p: dict, busy: Callable[[int], bool]) -> Trigger | None:
     """GOV-0011's [respond] trigger for one open, non-draft PR, or None.
 
-    Oversteps and a third request are the owner's: needs_you() lists those PRs instead."""
+    Oversteps, a third request and requested changes on a PR the builder didn't open (#178)
+    are the owner's: needs_you() lists those PRs instead."""
     g = swarm.dashboard()
     r, n, head = p["reviewer"], p["number"], p["head"]
     if r["at_head"] != g.CHANGES or p["needs_owner"]:

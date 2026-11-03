@@ -137,12 +137,13 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respo
 | `[build]` An open issue whose most recent `ready` label was added by the owner (GOV-0006), with no open PR closing it | `builder` on #N, as `swarm launch builder --issue N` would |
 | `[record]` A `gov:question` whose most recent `gov:ruled` was added by the owner and that needs a record (GOV-0007), with no open PR closing it | `docs` on the question |
 | `[answer]` A `gov:question` whose most recent `ready` was added by the owner | the role in its "Raised by" field, on the question |
-| `[respond]` An open, non-draft PR whose latest `productswarm-reviewer[bot]` review at its current head is "changes requested", and whose **Authority** line isn't `fail`, for at most 2 rounds (GOV-0011) | `builder` on the PR, as `swarm launch builder --issue N --pr M` would, where #N is the one issue the PR closes |
+| `[respond]` An open, non-draft PR that `productswarm-builder[bot]` opened, whose latest `productswarm-reviewer[bot]` review at its current head is "changes requested", and whose **Authority** line isn't `fail`, for at most 2 rounds (GOV-0011) | `builder` on the PR, as `swarm launch builder --issue N --pr M` would, where #N is the one issue the PR closes |
 
 `[respond]` is GOV-0011's bounded review loop. The builder's push starts a fresh `[review]`, and if the reviewer requests changes again, a fresh `[respond]`:
 
 - **Round bound.** The loop counts the reviewer's "changes requested" reviews on the PR, on any head, from GitHub's review history, so the count holds across restarts and machines. At the third, it starts nothing, and `swarm inbox` and the dashboard list the PR as "changes requested 3 times: needs the owner".
 - **Oversteps.** If the reviewer's latest review at the head has `- **Authority:** fail` (the rubric line in `roles/reviewer.md`), whatever its state, the loop starts nothing, and the PR is listed as "overstep: needs the owner".
+- **Other authors' PRs.** The builder responds only on its own PR (GOV-0011). Requested changes on a PR another App or a person opened, such as a docs ruling PR, start nothing, and the PR is listed as "changes requested on a docs PR: needs the owner" (#178).
 - A comment or an approval at the head, or a request on an older head, starts nothing. A PR that doesn't close exactly one issue is logged as skipped.
 - `[respond]` starts count toward `max_live` and need the builder's `spend_cap_usd`, like any loop start. Its refusal checks run on the issue the PR closes.
 

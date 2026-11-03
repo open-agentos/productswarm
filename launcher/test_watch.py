@@ -740,6 +740,14 @@ class RespondTest(unittest.TestCase):
             self.assertEqual(self.needs_you(), ["overstep: needs the owner, closes #73"])
         self.assertEqual(self.fake.commands, [])
 
+    def test_changes_on_another_apps_pr_start_nothing_and_list_the_pr(self):
+        """#178: a docs ruling PR with requested changes goes to the owner, not the builder."""
+        self.scene.prs[0]["author"] = {"login": "app/productswarm-docs"}
+        self.request(SHA1)
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.assertEqual(self.fake.commands, [])
+        self.assertEqual(self.needs_you(), ["changes requested on a docs PR: needs the owner, closes #73"])
+
     def test_comment_or_approve_starts_nothing(self):
         for state in ("COMMENTED", "APPROVED"):
             self.scene.reviews = {}
