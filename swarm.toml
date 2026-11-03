@@ -25,11 +25,13 @@ max_live = 2
 role = "planner"
 count = 1
 model = "claude-opus-5-5"
+spend_cap_usd = 5
 
 [[session]]
 role = "builder"
 count = 1
 model = "claude-opus-5-5"
+spend_cap_usd = 15
 
 # The reviewer runs by default (L6): each session reviews every open, non-draft PR
 # once per push, then stops. Its loop is in roles/reviewer.md.
@@ -37,8 +39,10 @@ model = "claude-opus-5-5"
 role = "reviewer"
 count = 1
 model = "claude-opus-5-5"
+spend_cap_usd = 5
 
 [[session]]
 role = "docs"
 count = 1
 model = "claude-opus-5-5"
+spend_cap_usd = 5
