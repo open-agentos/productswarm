@@ -308,3 +308,7 @@ From Python, `manifest.load()` returns a list of `Session(role, index, model, sp
 ```bash
 python3 -m unittest discover -s launcher
 ```
+
+## actions_review.py: the reviewer in GitHub Actions (v3 C stage 1)
+
+`python3 launcher/actions_review.py check` (#214) is the reviewer workflow's first, secret-free job: it decides whether a pull-request event should start a reviewer run. It reads `$GITHUB_EVENT_PATH` and says run only for a `pull_request` event (or `workflow_dispatch` with a `pr` input) on an open, non-draft PR that a swarm App (planner, builder or docs) or the owner opened (the owner's answer on #206), whose head is in this repo, not a fork, and whose head SHA the reviewer hasn't reviewed. That last rule is `watch.reviewed_heads()`, the one `swarm watch`'s `[review]` trigger uses, so the two agree (#209). It writes `run=true|false` and `pr=<N>` to `$GITHUB_OUTPUT` and prints one line saying why, never PR text. It only reads GitHub, with the job's default token, and reads no secrets. If it can't decide, it writes `run=false` and exits 1.
