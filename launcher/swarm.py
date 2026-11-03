@@ -7,6 +7,7 @@
     launcher/swarm launch <role> --issue N [--model M] [--force] [--dry-run]
                                     start one session on issue N (L3)
     launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
+    launcher/swarm watch --dry-run  print what the v2 wake-up loop would start (#89; watch.py)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
 unchanged, in a new Terminal window: the owner's answer on #43. That runtime is kept
@@ -163,6 +164,10 @@ class Launcher:
             return "starting" if self.clock() - s.started < START_GRACE else "exited"
         cmd = self.proc(pid)
         return "running" if cmd and f"--session-id {s.session_id}" in cmd else "exited"
+
+    def running(self) -> list[Started]:
+        """Entries still running or starting, without touching the state file (for dry runs)."""
+        return [e for e in self.load() if self.state(e) != "exited"]
 
     def live(self) -> list[Started]:
         """Entries still running or starting. Exited ones are dropped from the state file."""
@@ -322,14 +327,19 @@ def dashboard():
     return generate
 
 
-def heartbeat(repo: str, idle_minutes: int, now: dt.datetime) -> dict:
-    """Live heartbeat state, exactly as the dashboard builds it. Raises RuntimeError."""
+def snapshot(repo: str, idle_minutes: int, now: dt.datetime) -> tuple[dict, dict]:
+    """The dashboard's raw GitHub data and the model it builds from it. Raises RuntimeError."""
     g = dashboard()
     try:
         data = g.fetch(repo, now, days=1)
     except (OSError, subprocess.SubprocessError, ValueError) as e:
         raise RuntimeError(str(e)) from None
-    return g.build(data, now, dt.timedelta(minutes=idle_minutes), caps=g.load_caps())
+    return data, g.build(data, now, dt.timedelta(minutes=idle_minutes), caps=g.load_caps())
+
+
+def heartbeat(repo: str, idle_minutes: int, now: dt.datetime) -> dict:
+    """Live heartbeat state, exactly as the dashboard builds it. Raises RuntimeError."""
+    return snapshot(repo, idle_minutes, now)[1]
 
 
 def ls(launcher: Launcher, repo: str, idle_minutes: int) -> int:
@@ -373,11 +383,17 @@ def owner_login(path: Path = JURISDICTIONS) -> str:
     return m.group(1)
 
 
+def label_event(events: list[dict], name: str) -> dict | None:
+    """The most recent `labeled` event for label `name` (GOV-0006 counts only that one)."""
+    labeled = [e for e in events if e.get("event") == "labeled"
+               and (e.get("label") or {}).get("name") == name]
+    return labeled[-1] if labeled else None
+
+
 def ready_by(events: list[dict]) -> str | None:
     """Who added `ready` most recently (GOV-0006: the most recent `labeled` event for it)."""
-    labeled = [e for e in events if e.get("event") == "labeled"
-               and (e.get("label") or {}).get("name") == "ready"]
-    return (labeled[-1].get("actor") or {}).get("login") if labeled else None
+    e = label_event(events, "ready")
+    return (e.get("actor") or {}).get("login") if e else None
 
 
 def issue_refusals(n: int, issue: dict | None, events: list[dict], owner: str) -> list[str]:
@@ -496,11 +512,21 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_launch.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_launch.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_launch.add_argument("--idle-minutes", type=int, default=15)
+    p_watch = sub.add_parser("watch", help="print what the wake-up loop would start (--dry-run only)")
+    p_watch.add_argument("--dry-run", action="store_true", help="print triggers; start nothing")
+    p_watch.add_argument("--interval", type=float, default=None,
+                         help="minutes between checks (default: 5, until #88 sets one)")
+    p_watch.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_watch.add_argument("--idle-minutes", type=int, default=15)
     args = ap.parse_args(argv)
 
     launcher = launcher or Launcher(home())
+    if args.cmd == "watch" and not args.dry_run:
+        launcher.out("swarm watch: refused: starting sessions waits on the spend limits in #88 "
+                     "(W2, #90); use --dry-run")
+        return 1
     repo = None
-    if args.cmd in ("ls", "launch", "inbox"):
+    if args.cmd in ("ls", "launch", "inbox", "watch"):
         repo = args.repo or dashboard().default_repo()
         if not repo:
             launcher.out(f"swarm {args.cmd}: can't tell the repo; pass --repo owner/name")
@@ -531,6 +557,11 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return ls(launcher, repo, args.idle_minutes)
         if args.cmd == "inbox":
             return inbox(launcher, repo, args.idle_minutes)
+        if args.cmd == "watch":
+            import watch
+            w = watch.Watch(launcher, repo, owner_login(), watch.roles_in(launcher.root),
+                            idle_minutes=args.idle_minutes)
+            return w.run(args.interval or watch.DEFAULT_INTERVAL)
         return launcher.stop(args.session)
     except RuntimeError as e:   # GitHub unreachable, or an unreadable state file
         launcher.out(f"swarm {args.cmd}: {e}")
