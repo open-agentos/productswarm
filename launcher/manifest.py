@@ -9,7 +9,7 @@ gives two Sessions, numbered 1 and 2 within the role. Every problem in the file 
 collected and raised together in one ManifestError.
 
 An optional [watch] table holds the limits for `swarm watch` (v2, #90), per the owner's
-answer on #88: interval_minutes and max_live, both required if the table is there.
+answer on #88, GOV-0010: interval_minutes and max_live, both required if the table is there.
 load_watch() returns them, or None if the manifest has no [watch] table.
 """
 from __future__ import annotations
@@ -51,7 +51,7 @@ class Session:
 
 @dataclass(frozen=True)
 class WatchLimits:
-    """How `swarm watch` is limited (#88, option 1). Changing these is a `spend` decision."""
+    """How `swarm watch` is limited (GOV-0010). Changing these is a `spend` decision."""
     interval_minutes: float     # how often it reads GitHub and heartbeat state
     max_live: int               # most live sessions it may have started at once
 

@@ -99,7 +99,7 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts). It runs in the f
 | Trigger | Starts |
 |---|---|
 | `[review]` An open, non-draft PR whose current head `productswarm-reviewer[bot]` hasn't reviewed (the check in `roles/reviewer.md` step 2) | a reviewer pass: one reviewer session with its usual opener |
-| `[build]` An open issue whose most recent `ready` label was added by the owner (GOV-0006) | `builder` on #N, as `swarm launch builder --issue N` would |
+| `[build]` An open issue whose most recent `ready` label was added by the owner (GOV-0006), with no open PR closing it | `builder` on #N, as `swarm launch builder --issue N` would |
 | `[record]` A `gov:question` whose most recent `gov:ruled` was added by the owner and that needs a record (GOV-0007), with no open PR closing it | `docs` on the question |
 | `[answer]` A `gov:question` whose most recent `ready` was added by the owner | the role in its "Raised by" field, on the question |
 
@@ -107,7 +107,7 @@ Each start is a fresh session in a new Terminal window, as `swarm launch` makes.
 
 ### Limits
 
-These are the owner's answer on #88 (option 1). They live in `swarm.toml`'s `[watch]` table, so changing them is a reviewed change and a `spend` decision:
+These are GOV-0010, the owner's answer on #88. They live in `swarm.toml`'s `[watch]` table, so changing them is a reviewed change and a `spend` decision:
 
 ```toml
 [watch]

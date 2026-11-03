@@ -181,6 +181,14 @@ class WatchTest(unittest.TestCase):
         self.scene.tracking[0]["state"] = "closed"         # ...and stops
         self.assertEqual(self.kinds(self.w.tick(NOW)), [("build", "#60")])
 
+    def test_build_skips_an_issue_an_open_pr_closes(self):
+        # The PR's session has stopped, so nothing is live on #49, but its work waits on a merge.
+        self.scene.prs.append(pr(93, SHA2, closes=(49,)))
+        self.scene.reviewed[93] = {SHA2}
+        self.assertNotIn("#49", [t.ref for t in self.w.tick(NOW)])
+        self.scene.prs.pop()                               # PR closed unmerged: the issue fires
+        self.assertEqual(self.kinds(self.w.tick(NOW)), [("build", "#49")])
+
     def test_record_needs_one_and_no_open_pr(self):
         self.scene.issues[2]["body"] = question_body(domain="spend")         # two-way, repo: no record
         self.assertNotIn("record", [t.kind for t in self.w.tick(NOW)])
@@ -314,7 +322,7 @@ class StartTest(unittest.TestCase):
         w = self.watcher()
         self.assertEqual([t.ref for t in w.tick(NOW)], ["PR #70", "#87"])
         self.assertIn("[answer] #88 ready by the owner -> held: 2 of 2 sessions swarm watch started "
-                      "are live (#88)", self.lines)
+                      "are live (GOV-0010)", self.lines)
         inbox = self.inbox()
         self.assertIn("swarm watch is holding", inbox)
         self.assertIn("- [answer] #88 ready by the owner · held: 2 of 2", inbox)
@@ -340,7 +348,7 @@ class StartTest(unittest.TestCase):
         self.assertNotIn("#49", [t.ref for t in w.tick(NOW)])
         self.assertNotIn("builder", [e.role for e in self.l.load()])
         self.assertIn("- [build] #49 ready by the owner · skipped: builder has no spend_cap_usd in "
-                      "swarm.toml, and swarm watch starts only capped roles (#88)", self.inbox())
+                      "swarm.toml, and swarm watch starts only capped roles (GOV-0010)", self.inbox())
         self.manifest(ALL_CAPPED)                      # the owner adds a cap; read on the next check
         self.assertEqual([t.ref for t in w.tick(NOW)], ["#49"])
 
@@ -417,7 +425,7 @@ class StartTest(unittest.TestCase):
         self.manifest(ALL_CAPPED, watch_table=False)
         self.watcher().run(1, ticks=2, sleep=lambda s: None)
         self.assertEqual(self.fake.commands, [])
-        self.assertEqual(sum("has no [watch] table; starting nothing (#88)" in x for x in self.lines), 2)
+        self.assertEqual(sum("has no [watch] table; starting nothing (GOV-0010)" in x for x in self.lines), 2)
 
     def test_ls_shows_sessions_started_by_watch(self):
         self.watcher().tick(NOW)
@@ -491,14 +499,14 @@ class CliTest(unittest.TestCase):
         path = write_manifest(Path(tempfile.mkdtemp()), ALL_CAPPED, watch_table=False)
         self.assertEqual(swarm.main(["watch", "--repo", REPO, "--manifest", str(path)], self.l), 1)
         self.assertIn("no [watch] table", self.lines[0])
-        self.assertIn("#88", self.lines[0])
+        self.assertIn("GOV-0010", self.lines[0])
 
     def test_script_refuses_interval_without_dry_run(self):
         r = subprocess.run([str(HERE / "swarm"), "watch", "--interval", "1", "--repo", REPO],
                            capture_output=True, text=True, timeout=30,
                            env={**os.environ, "PRODUCTSWARM_HOME": tempfile.mkdtemp()})
         self.assertEqual(r.returncode, 2)
-        self.assertIn("#88", r.stdout + r.stderr)
+        self.assertIn("GOV-0010", r.stdout + r.stderr)
 
 
 if __name__ == "__main__":

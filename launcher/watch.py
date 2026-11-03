@@ -9,7 +9,8 @@ out each trigger below. --dry-run prints them and starts nothing.
 | kind   | trigger                                                                 | would start          |
 |--------|-------------------------------------------------------------------------|----------------------|
 | review | open, non-draft PR whose head the reviewer App hasn't reviewed          | a reviewer pass      |
-| build  | issue whose most recent `ready` was added by the owner (GOV-0006)       | builder on the issue |
+| build  | issue whose most recent `ready` was added by the owner (GOV-0006),      | builder on the issue |
+|        | with no open PR closing it                                              |                      |
 | record | gov:question whose most recent `gov:ruled` was added by the owner, that | docs on the question |
 |        | needs a record (GOV-0007), with no open PR closing it                   |                      |
 | answer | gov:question whose most recent `ready` was added by the owner           | its "Raised by" role |
@@ -25,7 +26,7 @@ listed the PRs before this push, so the trigger waits for it to stop rather than
 covered by it.
 
 Without --dry-run, each new trigger starts one fresh session (one Terminal window, as
-`swarm launch` does), within the limits the owner chose on #88 (option 1):
+`swarm launch` does), within the limits in GOV-0010 (the owner's answer on #88):
 
 - at most [watch] max_live live sessions that the loop started; past that, a trigger is
   held, listed in `swarm inbox`, and started in order once a slot frees up;
@@ -194,12 +195,13 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
                                command=launch_cmd(role, n) if role else None,
                                skipped=None if role else why_not))
 
-    # Builds: ready, open, non-question, non-tracking issues.
+    # Builds: ready, open, non-question, non-tracking issues with no open PR closing them
+    # (that work is done and waits on the owner's merge).
     for it in sorted(w.issues, key=lambda i: i["number"]):
         n = it["number"]
         labels = {lb.get("name") for lb in it.get("labels") or []}
         if (it.get("state") != "open" or "pull_request" in it or "ready" not in labels
-                or "gov:question" in labels or is_tracking(it)):
+                or "gov:question" in labels or is_tracking(it) or n in closing):
             continue
         ready = owner_label(w.events.get(n, []), "ready", owner)
         if ready and not busy(n):
@@ -315,14 +317,14 @@ class Watch:
         return new
 
     def start_tick(self, now: dt.datetime) -> list[Trigger]:
-        """Start a session for each new trigger, within the [watch] limits (#88)."""
+        """Start a session for each new trigger, within the [watch] limits (GOV-0010)."""
         g, out = swarm.dashboard(), self.launcher.out
         try:
             sessions, limits = manifest.load_all(self.manifest_path)
         except manifest.ManifestError as e:
             raise RuntimeError(str(e)) from None
         if limits is None:
-            raise RuntimeError(f"{self.manifest_path} has no [watch] table; starting nothing (#88)")
+            raise RuntimeError(f"{self.manifest_path} has no [watch] table; starting nothing (GOV-0010)")
         by_role = {s.role: s for s in sessions}
         w = self.read(self.repo, self.idle_minutes, now)
         live = self.launcher.live()
@@ -363,10 +365,10 @@ class Watch:
                 continue
             if s.spend_cap_usd is None:
                 hold(t, f"skipped: {t.role} has no spend_cap_usd in swarm.toml, and swarm watch "
-                        f"starts only capped roles (#88)")
+                        f"starts only capped roles (GOV-0010)")
                 continue
             if mine >= limits.max_live:
-                hold(t, f"held: {mine} of {limits.max_live} sessions swarm watch started are live (#88)")
+                hold(t, f"held: {mine} of {limits.max_live} sessions swarm watch started are live (GOV-0010)")
                 continue
             refused, wait = self.refusal(t, live, now)
             if wait:
@@ -422,7 +424,7 @@ class Watch:
         else:
             self.launcher.out(f"swarm watch: checking every {interval_minutes:g} min; starts sessions "
                               f"within swarm.toml's [watch] limits and only for roles with a "
-                              f"spend_cap_usd (#88); never stops one; Ctrl-C to stop")
+                              f"spend_cap_usd (GOV-0010); never stops one; Ctrl-C to stop")
         n = 0
         try:
             while ticks is None or n < ticks:

@@ -9,7 +9,7 @@
     launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
     launcher/swarm watch [--dry-run]
                                     the v2 wake-up loop: start sessions on triggers, within
-                                    the [watch] limits in swarm.toml (#90, #88; watch.py)
+                                    the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
 unchanged, in a new Terminal window: the owner's answer on #43. That runtime is kept
@@ -632,7 +632,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     launcher = launcher or Launcher(home())
     if args.cmd == "watch" and not args.dry_run and args.interval is not None:
         launcher.out("swarm watch: --interval works only with --dry-run; the interval for real "
-                     "starts is interval_minutes in swarm.toml's [watch] table (#88)")
+                     "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")
         return 2
     repo = None
     if args.cmd in ("ls", "launch", "inbox", "watch"):
@@ -672,7 +672,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                 return 1
             if limits is None and not args.dry_run:
                 launcher.out(f"swarm watch: refused: {args.manifest} has no [watch] table, so there "
-                             f"are no limits to start sessions within (#88); use --dry-run")
+                             f"are no limits to start sessions within (GOV-0010); use --dry-run")
                 return 1
             w = watch.Watch(launcher, repo, owner_login(), watch.roles_in(launcher.root),
                             idle_minutes=args.idle_minutes, dry_run=args.dry_run,
