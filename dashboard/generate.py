@@ -49,6 +49,7 @@ QUIET_EVENTS = {"heartbeat", "prompt_submitted"}
 STATUS_ORDER = {"blocked": 0, "active": 1, "idle": 2, "stopped": 3}
 
 REVIEWER = "productswarm-reviewer[bot]"
+BUILDER = "productswarm-builder"   # the App GOV-0011's [respond] starts; `gh` shows it as app/<slug>
 CHANGES = "CHANGES_REQUESTED"
 ROUNDS = 2         # builder rounds per PR before the owner steps in (GOV-0011)
 # The rubric line roles/reviewer.md asks for: "- **Authority:** pass|fail".
@@ -108,12 +109,25 @@ def reviewer_state(reviews: list[dict], head: str | None) -> dict:
             "authority": m.group(1).lower() if m else None}
 
 
-def needs_owner(r: dict) -> str | None:
-    """Why GOV-0011 hands this PR to the owner instead of the builder, else None."""
+def pr_role(author: str) -> str | None:
+    """The productswarm role whose App opened a PR, from its author login: `gh` shows an App
+    as app/productswarm-<role>, the REST API as productswarm-<role>[bot]. None for others."""
+    m = re.fullmatch(r"(?:app/)?productswarm-([a-z0-9-]+?)(?:\[bot\])?", author or "")
+    return m.group(1) if m else None
+
+
+def needs_owner(r: dict, author: str) -> str | None:
+    """Why GOV-0011 hands this PR to the owner instead of the builder, else None.
+
+    The builder responds only on its own PR (GOV-0011), so requested changes on a PR
+    another author opened (a docs ruling PR, say) go to the owner too (#178)."""
     if r["at_head"] is None:
         return None
     if r["authority"] == "fail":
         return "overstep: needs the owner"
+    role = pr_role(author)
+    if r["at_head"] == CHANGES and f"productswarm-{role}" != BUILDER:
+        return f"changes requested on a {role or 'non-swarm'} PR: needs the owner"
     if r["at_head"] == CHANGES and r["changes_requested"] > ROUNDS:
         return f"changes requested {r['changes_requested']} times: needs the owner"
     return None
@@ -265,7 +279,7 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
                     "closes": closes, "head": p.get("headRefOid")})
         prs[-1]["reviewer"] = rv = reviewer_state((data.get("reviews") or {}).get(p["number"], []),
                                                   p.get("headRefOid"))
-        prs[-1]["needs_owner"] = needs_owner(rv)
+        prs[-1]["needs_owner"] = needs_owner(rv, prs[-1]["author"])
 
     today = now.date()
     days = [today - dt.timedelta(days=i) for i in range(SPEND_DAYS)]
