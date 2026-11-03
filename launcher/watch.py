@@ -29,9 +29,11 @@ which is the PR head SHA (for [review] and [respond]) or the id of the owner's l
 identity, so a new push or a fresh owner label is a new trigger. In dry-run the memory
 lives only in the process, and nothing is written to disk.
 
-A review trigger is also quiet while any reviewer session is live: that pass may have
-listed the PRs before this push, so the trigger waits for it to stop rather than being
-covered by it.
+A review trigger is also quiet while a reviewer that swarm watch started is live: that
+pass may have listed the PRs before this push, so the trigger waits for it to stop rather
+than being covered by it. Reviewers the owner started (`swarm up`, `swarm launch`) don't
+keep it quiet (#132): they are the owner's to steer, and GOV-0010 already leaves sessions
+the owner starts out of the loop's counts.
 
 Without --dry-run, each new trigger starts one fresh session (one Terminal window, as
 `swarm launch` does), within the limits in GOV-0010 (the owner's answer on #88):
@@ -244,13 +246,18 @@ def respond(p: dict, busy: Callable[[int], bool]) -> Trigger | None:
 
 
 def reviewers(model: dict, started: list) -> list[str]:
-    """Live reviewer sessions: on the heartbeat and not stopped, or started by the launcher
-    and not yet heard from."""
-    seen = {s["session_id"] for s in model["sessions"]}
-    out = [f"reviewer ({s['status']}, session {s['session_id']})"
-           for s in model["sessions"] if s["role"] == "reviewer" and s["status"] != "stopped"]
-    out += [f"{e.name} (starting, session {e.session_id})"
-            for e in started if e.role == "reviewer" and e.session_id not in seen]
+    """Live reviewer sessions that swarm watch started (#132): live launcher entries with
+    by="watch" whose heartbeat isn't stopped, or that have no heartbeat yet. Reviewers the
+    owner started don't count. triggers() and Watch.refusal() both use this rule."""
+    mine = {e.session_id: e.name for e in started if e.role == "reviewer" and e.by == "watch"}
+    beats = {s["session_id"]: s for s in model["sessions"]}
+    out = []
+    for sid, name in mine.items():
+        s = beats.get(sid)
+        if s is None:
+            out.append(f"{name} (starting, session {sid})")
+        elif s["status"] != "stopped":
+            out.append(f"{name} ({s['status']}, session {sid})")
     return out
 
 
