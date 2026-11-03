@@ -78,7 +78,8 @@ def fetch(repo: str, now: dt.datetime, days: int) -> dict:
     comments = {s["issue"]: gh_items(f"repos/{repo}/issues/{s['issue']}/comments?per_page=100")
                 for s in tracking_issues(issues.values())}
     prs = gh_json("pr", "list", "--repo", repo, "--state", "open", "--limit", "100", "--json",
-                  "number,title,url,author,isDraft,createdAt,reviewDecision,closingIssuesReferences")
+                  "number,title,url,author,isDraft,createdAt,reviewDecision,closingIssuesReferences,"
+                  "headRefOid")
     return {"repo": repo, "issues": list(issues.values()), "comments": comments, "prs": prs or []}
 
 
@@ -227,7 +228,7 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
         prs.append({"number": p["number"], "title": p["title"], "url": p["url"],
                     "author": (p.get("author") or {}).get("login", ""), "draft": p.get("isDraft"),
                     "review": p.get("reviewDecision") or "", "created_ts": parse_ts(p["createdAt"]),
-                    "closes": closes})
+                    "closes": closes, "head": p.get("headRefOid")})
 
     today = now.date()
     days = [today - dt.timedelta(days=i) for i in range(SPEND_DAYS)]

@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch --dry-run` is the first part of v2. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
 
 ## swarm up / ls / stop
 
@@ -75,6 +75,28 @@ Nothing new is posted to GitHub. What the launcher started is recorded under `~/
 - `<session-id>.pid` is written by the window's shell before it hands over to `swarm-session`, so the PID it holds is Claude Code's.
 
 A PID counts only while that process's command line still contains `--session-id <its id>`. A reused PID is never mistaken for a session, and is never sent a signal. If a session exits by itself, `up` and `ls` remove it from the state file.
+
+## swarm watch --dry-run: what the wake-up loop would start
+
+```bash
+launcher/swarm watch --dry-run                # check every 5 minutes; Ctrl-C to stop
+launcher/swarm watch --dry-run --interval 1
+```
+
+This is the first part of v2, the wake-up loop (#87, option 1; W1 is #89). It runs in the foreground. On every check it reads the same GitHub and heartbeat state as `swarm inbox` and prints one line for each **new** trigger, with what it would start. **It starts nothing.** It never stops a session, never adds or removes labels, and never comments, approves or merges. Starting sessions for real waits on the spend limits in #88 (W2, #90), so `swarm watch` without `--dry-run` refuses.
+
+| Trigger | Would start |
+|---|---|
+| `[review]` An open, non-draft PR whose current head `productswarm-reviewer[bot]` hasn't reviewed (the check in `roles/reviewer.md` step 2) | a reviewer pass |
+| `[build]` An open issue whose most recent `ready` label was added by the owner (GOV-0006) | `swarm launch builder --issue N` |
+| `[record]` A `gov:question` whose most recent `gov:ruled` was added by the owner and that needs a record (GOV-0007), with no open PR closing it | `swarm launch docs --issue N` |
+| `[answer]` A `gov:question` whose most recent `ready` was added by the owner | `swarm launch <role> --issue N`, where the role comes from its "Raised by" field |
+
+- **No session already on it.** An issue or question with a live session prints nothing, by the same rule `swarm launch` refuses on. It can print later, once that session stops.
+- **Each trigger prints once.** A trigger is identified by the PR's head SHA, or by the id of the owner's label event. A new push to a reviewed PR, or the owner adding `ready` again, is a new trigger. The memory lasts only as long as the process, and nothing is written to disk.
+- **Skipped, with a reason.** If "Raised by" names no known role, or more than one, the trigger is printed as skipped and says why.
+- **Records it can't see.** GOV-0007 also counts a question as needing a record when the owner says so in the answer. That's a comment the loop can't read reliably, so only the body's ratings trigger `[record]`: domain `governance`, `one-way`, or blast radius `external`.
+- **What it reads.** The PR and question lists come from `needs_you()` (the same list as `swarm inbox`), sessions come from the dashboard's heartbeat reader, and the live-session and label checks are `swarm launch`'s own. If GitHub can't be read, it says so and tries again on the next check.
 
 ## The swarm manifest
 
