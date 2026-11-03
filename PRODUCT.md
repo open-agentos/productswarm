@@ -1,6 +1,6 @@
 # Product brief: productswarm
 
-**Owner:** @mattmcalister · **Status:** v0 (swarm dashboard) done · v1 (local launcher) in scope per GOV-0005
+**Owner:** @mattmcalister · **Status:** v0 (swarm dashboard) done · v1 (local launcher) done
 
 ## Problem
 
@@ -41,14 +41,14 @@ GOV-0005 makes v1 a lightweight launcher that runs on Matt's machine. It calls `
 
 ### What we're building
 
-| # | Issue | What |
-|---|---|---|
-| L1 | #47 | Swarm manifest: a committed file listing roles, how many of each, the model per role and an optional per-session spend cap |
-| L2 | #48 | `swarm up / ls / stop`: start every session in the manifest, list live sessions from heartbeat data, stop one |
-| L3 | #49 | Issue handoff: start a session on a given issue; refuse if a live session is already working on it |
-| L4 | #52 | Spend cap per session |
-| L5 | #50 | "Needs you" list: one ordered list of what's waiting on Matt (PRs to merge, open `gov:question`s, blocked or idle sessions), as `swarm inbox` and at the top of the dashboard |
-| L6 | #51 | The reviewer runs by default and reviews each open PR once |
+| # | Issue | What | PR |
+|---|---|---|---|
+| L1 | #47 | Swarm manifest: a committed file listing roles, how many of each, the model per role and an optional per-session spend cap | #64 |
+| L2 | #48 | `swarm up / ls / stop`: start every session in the manifest, list live sessions from heartbeat data, stop one | #65 |
+| L3 | #49 | Issue handoff: start a session on a given issue; refuse if a live session is already working on it | #70 |
+| L4 | #52 | Spend cap per session | #74 |
+| L5 | #50 | "Needs you" list: one ordered list of what's waiting on Matt (PRs to merge, open `gov:question`s, blocked or idle sessions), as `swarm inbox` and at the top of the dashboard | #71 |
+| L6 | #51 | The reviewer runs by default and reviews each open PR once | #72 |
 
 Order: L1 → L2 → L3, then L5 and L6, then L4.
 
@@ -77,6 +77,53 @@ The owner answered each of these on its question:
 - #44 Manifest format and location: `swarm.toml` at the repo root, read with stdlib `tomllib`.
 - #45 Default spend cap: none for v1; a session has a cap only if the manifest sets one.
 - #46 Whether the launcher may stop a session without the owner: no; for v1 the cap only warns (record GOV-0008).
+
+## v2: wake-up loop
+
+GOV-0009 makes v2 a wake-up loop: `launcher/swarm watch`. It runs on Matt's machine in the foreground and stops with Ctrl-C. Every few minutes it reads the same GitHub and heartbeat state as `swarm inbox` and starts the right session for each new trigger. It only ever starts sessions. It reuses `needs_you()`, `swarm launch` and the launcher's refusal checks.
+
+### Triggers
+
+The loop acts only on labels the owner added (checked in the issue's events, per GOV-0006) and on new PR heads. Each trigger counts once.
+
+| Trigger | Session it starts |
+|---|---|
+| An open, non-draft PR whose head the reviewer hasn't reviewed | a reviewer pass |
+| An issue whose latest `ready` the owner added, with no live session on it | `swarm launch builder --issue N` (or the issue's role) |
+| A `gov:question` the owner labelled `gov:ruled` that needs a record and has no ruling PR | docs, on that question (GOV-0007) |
+| A `gov:question` the owner labelled `ready` | the role that asked it, on that question |
+
+### What we're building
+
+| # | Issue | What |
+|---|---|---|
+| W1 | #89 | `swarm watch --dry-run`: works out the triggers and prints the `swarm launch …` command it would run for each, but starts nothing (merged in #94) |
+| W2 | #90 | `swarm watch` starts sessions, within the limits from #88 |
+
+Order: W1 → W2. W2 waits on #88.
+
+### Goals for v2
+
+- An owner signal (`ready`, `gov:ruled` or a new PR push) starts the right session without Matt starting it by hand.
+- Spend while nobody is watching stays bounded by limits Matt sets.
+- Still lightweight: local, with no new infrastructure.
+
+### Non-goals for v2
+
+Each of these needs its own `product-scope` question:
+
+- a cloud or GitHub Actions trigger;
+- re-prompting a session that is already running;
+- stopping a session automatically (GOV-0008 still holds: the cap only warns);
+- any trigger or action not in the table above. The loop never adds or removes labels, and never comments, approves or merges.
+
+### v2 design decisions
+
+GOV-0009 names three design questions:
+
+- How a nudge reaches a session: the loop starts a fresh session per trigger and never re-prompts a running one (in #90's scope).
+- #88 The interval, concurrency ceiling and cap rule: the owner chose option 1. The interval is 5 minutes, and at most 2 loop-started sessions run at once. The loop starts only roles that have a `spend_cap_usd`, and says why it skipped any other. The numbers live in `swarm.toml`, and changing them is a `spend` change. Sessions Matt starts by hand don't count towards the ceiling.
+- Whether the reviewer's "don't poll on a timer" rule changes: it doesn't. The loop does the polling, and a reviewer it starts runs one pass and stops (in #90's scope).
 
 ## Open decisions
 
