@@ -321,12 +321,15 @@ class HelpersTest(unittest.TestCase):
 
 
 def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = True,
-                   max_turns: int | None = 50) -> Path:
+                   max_turns: int | None = 50, review_in_actions: bool | None = None) -> Path:
     """A swarm.toml with every role, the given caps, and a [watch] table."""
     text = ""
     if watch_table:
         text = "[watch]\ninterval_minutes = 5\nmax_live = %d\n" % max_live
-        text += ("max_turns = %d\n" % max_turns if max_turns is not None else "") + "\n"
+        text += "max_turns = %d\n" % max_turns if max_turns is not None else ""
+        if review_in_actions is not None:
+            text += f"review_in_actions = {str(review_in_actions).lower()}\n"
+        text += "\n"
     for role in sorted(ROLES):
         text += f'[[session]]\nrole = "{role}"\ncount = 1\nmodel = "m-{role}"\n'
         if role in caps:
@@ -610,7 +613,8 @@ class ManifestWatchTest(unittest.TestCase):
         with self.assertRaises(manifest.ManifestError) as c:
             manifest.parse_all(text)
         self.assertEqual(c.exception.problems, [
-            "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live, max_turns)",
+            "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live, max_turns, "
+            "review_in_actions)",
             "watch: interval_minutes must be a positive number, got 0",
             "watch: max_live must be a whole number of at least 1, got 1.5"])
         with self.assertRaises(manifest.ManifestError) as c:
@@ -673,6 +677,78 @@ class CliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewInActionsTest(unittest.TestCase):
+    """[watch] review_in_actions (#216, GOV-0019): when on, swarm watch leaves [review] to
+    the Actions reviewer; the other triggers are unchanged."""
+
+    setUp_start = StartTest.setUp
+    manifest, watcher, started, exit = StartTest.manifest, StartTest.watcher, StartTest.started, StartTest.exit
+    LEFT = ("[review] PR #70 head aaaaaaa not reviewed by the reviewer -> skipped: left to Actions: "
+            "review_in_actions = true in swarm.toml, so the GitHub Actions reviewer reviews this "
+            "head (GOV-0019)")
+
+    def setUp(self):
+        self.setUp_start()
+        self.manifest(ALL_CAPPED, review_in_actions=True)
+
+    def test_on_starts_no_review_and_the_rest_as_before(self):
+        w = self.watcher()
+        self.assertEqual([(t.kind, t.ref) for t in w.tick(NOW)],
+                         [("record", "#87"), ("answer", "#88"), ("build", "#49")])
+        self.assertEqual([x[0] for x in self.started()],
+                         ["docs-issue-87", "planner-issue-88", "builder-issue-49"])
+        self.assertEqual(self.lines.count(self.LEFT), 1)
+        w.tick(NOW)
+        self.assertEqual(self.lines.count(self.LEFT), 1)                   # logged once per head
+        self.assertNotIn("review:70:" + SHA1, watch.load_state(self.l)["acted"])
+        self.assertEqual(watch.waiting(self.l)[1], [])                     # not listed as held
+
+    def test_off_or_missing_starts_the_review(self):
+        for value in (False, None):
+            with self.subTest(review_in_actions=value):
+                (self.home / "launcher" / "watch.json").unlink(missing_ok=True)
+                self.l.save([])
+                self.manifest(ALL_CAPPED, review_in_actions=value)
+                self.assertEqual(self.watcher().tick(NOW)[0].kind, "review")
+                self.assertEqual(self.l.load()[0].name, "reviewer-watch")
+
+    def test_turning_it_off_puts_the_local_loop_back_in_charge(self):
+        self.watcher().tick(NOW)
+        self.assertNotIn("reviewer-watch", [x[0] for x in self.started()])
+        self.manifest(ALL_CAPPED, review_in_actions=False)
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["review"])   # same head
+        self.assertIn("reviewer-watch", [x[0] for x in self.started()])
+
+    def test_respond_is_unchanged(self):
+        sc = self.scene
+        sc.issues, sc.events = [issue(73, ["ready"])], {73: [ev("ready", eid=15)]}
+        sc.prs, sc.reviewed = [pr(72, SHA1, closes=[73])], {}
+        sc.reviews = {72: [review("CHANGES_REQUESTED", SHA1)]}
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["respond"])
+        self.assertEqual(self.started(), [("builder-pr-72", "builder", "m-builder", 73, "watch")])
+
+    def test_dry_run_lists_review_as_left_to_actions_with_no_command(self):
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=self.path)
+        self.assertEqual([t.kind for t in w.tick(NOW)], ["review", "record", "answer", "build"])
+        i = self.lines.index(self.LEFT)
+        self.assertFalse(self.lines[i + 1].startswith("  "))               # no headless command
+        self.assertEqual(sum(x.startswith("  ") for x in self.lines), 3)   # the other three keep theirs
+        self.assertEqual(self.fake.commands, [])
+
+    def test_dry_run_with_a_bad_manifest_treats_it_as_off(self):
+        self.path.write_text("[watch\n")
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=self.path)
+        w.tick(NOW)
+        self.assertIn("[review] PR #70 head aaaaaaa not reviewed by the reviewer -> would start a "
+                      "reviewer pass", self.lines)
+
+    def test_triggers_is_pure_and_defaults_off(self):
+        w = self.scene.read(REPO, 15, NOW)
+        args = (w, OWNER, [], ROLES, G.needs_you, G.is_tracking)
+        self.assertIsNone(watch.triggers(*args)[0].skipped)
+        self.assertEqual(watch.triggers(*args, review_in_actions=True)[0].skipped, watch.LEFT_TO_ACTIONS)
 
 
 class RespondTest(unittest.TestCase):

@@ -12,8 +12,10 @@ An optional [watch] table holds the limits for `swarm watch` (v2, #90), per the 
 answer on #88, GOV-0010: interval_minutes and max_live, both required if the table is there.
 max_turns (#147, GOV-0012) is the turn ceiling for the headless runs swarm watch starts: a
 positive whole number. It may be left out here, so `swarm up` still works, but `swarm watch`
-then refuses to start anything. load_watch() returns them, or None if the manifest has no
-[watch] table.
+then refuses to start anything. review_in_actions (#216, GOV-0019) is an optional true or
+false, default false: when true, `swarm watch` leaves every [review] trigger to the GitHub
+Actions reviewer and starts nothing for it. load_watch() returns them, or None if the
+manifest has no [watch] table.
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ DEFAULT_PATH = ROOT / "swarm.toml"
 REQUIRED = ("role", "count", "model")
 OPTIONAL = ("spend_cap_usd",)
 WATCH_KEYS = ("interval_minutes", "max_live")     # required in [watch]
-WATCH_OPTIONAL = ("max_turns",)                   # swarm watch refuses to start without it
+WATCH_OPTIONAL = ("max_turns", "review_in_actions")   # watch refuses to start without max_turns
 
 
 class ManifestError(ValueError):
@@ -55,10 +57,12 @@ class Session:
 
 @dataclass(frozen=True)
 class WatchLimits:
-    """How `swarm watch` is limited (GOV-0010). Changing these is a `spend` decision."""
+    """How `swarm watch` is limited (GOV-0010). Changing the limits is a `spend` decision;
+    changing review_in_actions is a `ci-and-workflows` one (GOV-0019)."""
     interval_minutes: float     # how often it reads GitHub and heartbeat state
     max_live: int               # most live sessions it may have started at once
     max_turns: int | None = None    # --max-turns for each headless run (GOV-0012); None: watch refuses
+    review_in_actions: bool = False  # leave [review] to the Actions reviewer (GOV-0019)
 
 
 def _is_number(v) -> bool:
@@ -125,6 +129,10 @@ def _check_watch(table) -> list[str]:
         v = table["max_turns"]
         if not isinstance(v, int) or isinstance(v, bool) or v < 1:
             problems.append(f"watch: max_turns must be a whole number of at least 1, got {v!r}")
+    if "review_in_actions" in table:
+        v = table["review_in_actions"]
+        if not isinstance(v, bool):
+            problems.append(f"watch: review_in_actions must be true or false, got {v!r}")
     return problems
 
 
@@ -169,7 +177,7 @@ def parse_all(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "ro
                                     spend_cap_usd=None if cap is None else float(cap)))
     w = data.get("watch")
     limits = None if w is None else WatchLimits(float(w["interval_minutes"]), w["max_live"],
-                                                w.get("max_turns"))
+                                                w.get("max_turns"), w.get("review_in_actions", False))
     return sessions, limits
 
 
@@ -210,7 +218,9 @@ def main(argv: list[str]) -> int:
         print(f"{s.name}\t{s.model}\t{cap}")
     if limits:
         turns = "no max_turns" if limits.max_turns is None else f"max {limits.max_turns} turns a run"
-        print(f"watch\tevery {limits.interval_minutes:g} min\tat most {limits.max_live} live\t{turns}")
+        reviews = "[review] left to Actions" if limits.review_in_actions else "[review] local"
+        print(f"watch\tevery {limits.interval_minutes:g} min\tat most {limits.max_live} live\t{turns}"
+              f"\t{reviews}")
     return 0
 
 

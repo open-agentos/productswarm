@@ -530,20 +530,38 @@ def ls(launcher: Launcher, repo: str, idle_minutes: int) -> int:
     return 0
 
 
-def inbox(launcher: Launcher, repo: str, idle_minutes: int) -> int:
+REVIEW_IN_ACTIONS = ("swarm watch leaves [review] to the GitHub Actions reviewer "
+                     "(review_in_actions = true in swarm.toml, GOV-0019): the local fallback for "
+                     "reviews is off. Set it to false to bring it back.")
+
+
+def review_in_actions(path: Path | str) -> bool:
+    """swarm.toml's [watch] review_in_actions (#216), or False if it can't be read: inbox
+    still lists what needs the owner when swarm.toml is broken."""
+    try:
+        limits = manifest.load_watch(path)
+    except manifest.ManifestError:
+        return False
+    return bool(limits and limits.review_in_actions)
+
+
+def inbox(launcher: Launcher, repo: str, idle_minutes: int,
+          manifest_path: Path | str = manifest.DEFAULT_PATH) -> int:
     """The dashboard's "Needs you" list, from the same function (generate.needs_you)."""
     g = dashboard()
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     items = g.needs_you(heartbeat(repo, idle_minutes, now))
     import watch
-    launcher.out(inbox_text(items, now, g, watch.waiting(launcher), watch.runs(launcher)))
+    launcher.out(inbox_text(items, now, g, watch.waiting(launcher), watch.runs(launcher),
+                            review_in_actions(manifest_path)))
     return 0
 
 
 def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None,
-               runs: list[dict] | None = None) -> str:
-    """The needs-you list, then runs `swarm watch` started that ended at cap (#149), then
-    any triggers it is holding or skipping (#90), then each recorded run's cost (#149).
+               runs: list[dict] | None = None, review_in_actions: bool = False) -> str:
+    """The needs-you list, then a line if swarm watch leaves [review] to Actions (#216),
+    then runs `swarm watch` started that ended at cap (#149), then any triggers it is
+    holding or skipping (#90), then each recorded run's cost (#149).
 
     held is watch.waiting(): (when swarm watch last checked, its waiting triggers); runs
     is watch.runs(). Both come from local state, not GitHub, so the dashboard (built and
@@ -555,6 +573,8 @@ def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None
     out = [f"{n}. {g.needs_line(i, now)}\n   {i['url']}" for n, i in enumerate(items, 1)]
     if not items and not waiting and not capped:
         out.append(g.NEEDS_EMPTY)
+    if review_in_actions:
+        out.append(f"\n{REVIEW_IN_ACTIONS}")
     if capped:
         out.append("\nswarm watch runs that ended at cap (restart one if its work should go on):")
         out += capped
@@ -703,6 +723,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_inbox = sub.add_parser("inbox", help="what's waiting on the owner, most urgent first")
     p_inbox.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_inbox.add_argument("--idle-minutes", type=int, default=15)
+    p_inbox.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_cost = sub.add_parser("cost", help="cost per PR of the runs swarm watch recorded (local only)")
     p_cost.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
@@ -759,7 +780,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
         if args.cmd == "ls":
             return ls(launcher, repo, args.idle_minutes)
         if args.cmd == "inbox":
-            return inbox(launcher, repo, args.idle_minutes)
+            return inbox(launcher, repo, args.idle_minutes, args.manifest)
         if args.cmd == "cost":
             return cost(launcher, repo)
         if args.cmd == "watch":

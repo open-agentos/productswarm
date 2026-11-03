@@ -6,6 +6,7 @@ import io
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -152,6 +153,43 @@ class LoadTest(Base):
         with redirect_stderr(err):
             self.assertEqual(m.main(["manifest.py", str(path)]), 1)
         self.assertIn("unknown role 'nobody'", err.getvalue())
+
+
+class ReviewInActionsTest(Base):
+    """[watch] review_in_actions (#216, GOV-0019): optional, default false, true or false only."""
+    WATCH = "[watch]\ninterval_minutes = 5\nmax_live = 2\nmax_turns = 200\n"
+
+    def limits(self, extra=""):
+        return m.parse_all(self.WATCH + extra + session(), Path("swarm.toml"), self.roles)[1]
+
+    def test_missing_is_false(self):
+        self.assertIs(self.limits().review_in_actions, False)
+
+    def test_true_and_false(self):
+        self.assertIs(self.limits("review_in_actions = true\n").review_in_actions, True)
+        self.assertIs(self.limits("review_in_actions = false\n").review_in_actions, False)
+
+    def test_wrong_type(self):
+        for bad in ('"true"', "1", "0", "1.0", "[]"):
+            with self.subTest(value=bad):
+                with self.assertRaises(m.ManifestError) as cm:
+                    self.limits(f"review_in_actions = {bad}\n")
+                self.assertEqual(len(cm.exception.problems), 1)
+                self.assertIn("watch: review_in_actions must be true or false",
+                              cm.exception.problems[0])
+
+    def test_cli_shows_it(self):
+        path = self.dir / "swarm.toml"
+        for value, shown in (("true", "[review] left to Actions"), ("false", "[review] local")):
+            path.write_text(self.WATCH + f"review_in_actions = {value}\n" + session())
+            out = io.StringIO()
+            with redirect_stdout(out), unittest.mock.patch.object(m, "ROOT", self.dir):
+                self.assertEqual(m.main(["manifest.py", str(path)]), 0)
+            self.assertTrue(out.getvalue().splitlines()[-1].endswith(shown))
+
+    def test_repo_manifest_leaves_it_off(self):
+        # Off by default, so building it changes nothing until the owner turns it on (#216).
+        self.assertIs(m.load_watch().review_in_actions, False)
 
 
 if __name__ == "__main__":
