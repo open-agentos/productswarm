@@ -126,7 +126,7 @@ max_live = 2           # the most live sessions swarm watch may have started at 
 ```
 
 - **Ceiling.** Only sessions the loop started count toward `max_live`. Sessions you start with `swarm up` or `swarm launch` don't. At the ceiling, further triggers are **held**: `swarm inbox` lists them, and they start in the order they were first held once a loop-started session stops.
-- **Cap required.** The loop starts only roles that set `spend_cap_usd` in `swarm.toml`. A trigger for any other role is **skipped**: `swarm inbox` lists it with the reason, and it starts on a later check once the role has a cap. **No role in `swarm.toml` sets a cap yet, so until the owner adds caps the loop starts nothing and lists every trigger as skipped.** The cap is still warn-only (GOV-0008).
+- **Cap required.** The loop starts only roles that set `spend_cap_usd` in `swarm.toml`. A trigger for any other role is **skipped**: `swarm inbox` lists it with the reason, and it starts on a later check once the role has a cap. Every role in `swarm.toml` sets a cap (since #110), so the loop can start any of them. The cap is still warn-only (GOV-0008).
 - **Interval.** `interval_minutes` sets how often it checks. `--interval` works only with `--dry-run`, so the real interval can't be changed by a flag.
 - `swarm.toml` is read again on every check, so a new cap or limit applies without a restart. Without a `[watch]` table, `swarm watch` refuses to start anything, but `--dry-run` still works and checks every 5 minutes.
 
