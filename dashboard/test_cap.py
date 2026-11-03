@@ -96,8 +96,12 @@ class LoadCapsTest(unittest.TestCase):
         self.assertEqual(g.load_caps(self.write("[[session]\n")), {})
         self.assertEqual(g.load_caps(Path("/nonexistent/swarm.toml")), {})
 
-    def test_repo_manifest_sets_no_caps_by_default(self):   # #45
-        self.assertEqual(g.load_caps(), {})
+    def test_repo_manifest_caps_load(self):   # #45, #110
+        sys.path.insert(0, str(HERE.parent / "launcher"))
+        import manifest
+        want = {s.role: s.spend_cap_usd for s in manifest.load() if s.spend_cap_usd is not None}
+        self.assertTrue(want, "swarm.toml sets per-role caps since #110")
+        self.assertEqual(g.load_caps(), want)
 
 
 if __name__ == "__main__":
