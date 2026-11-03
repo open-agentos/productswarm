@@ -1,3 +1,3 @@
 #!/bin/sh
-# swarm up | ls | stop <session>: see launcher/README.md.
+# swarm up | ls | stop | launch | inbox | watch | cost: see launcher/README.md.
 exec python3 "$(dirname "$0")/swarm.py" "$@"

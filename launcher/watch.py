@@ -82,6 +82,10 @@ cost from the last RUNS_DAYS days. A kept worktree is tidy()'s job, as for any s
 Each run it starts gets a Stop hook (stophook.py, #148) that keeps it going until its
 role's done-condition is met; see that module for the conditions and the guards.
 
+`swarm cost` (#176, cost_text()) prints those recorded costs grouped by the PR each run
+served, with a read-only `gh pr list` to find the PR that closes a run's issue. It only
+prints: no cost goes to GitHub or the repo.
+
 It never stops a session (GOV-0008), never adds or removes labels, and never comments,
 approves or merges: its only GitHub calls are reads. Sessions it starts are recorded
 with by="watch", and `swarm ls` shows them as "by watch".
@@ -473,6 +477,81 @@ def runs_text(runs: list[dict], now: dt.datetime, ago: Callable) -> tuple[list[s
 
 def iso(t: dt.datetime) -> str:
     return t.isoformat()
+
+
+# ---------------------------------------------------------------- swarm cost (#176)
+
+PR_STATES = {"MERGED": "merged", "OPEN": "open", "CLOSED": "closed"}
+
+
+def gh_prs(repo: str) -> list[dict]:
+    """Every recent PR, merged, open or closed, with the issues it closes. A read only."""
+    g = swarm.dashboard()
+    return g.gh_json("pr", "list", "--repo", repo, "--state", "all", "--limit", "300", "--json",
+                     "number,state,mergedAt,closingIssuesReferences") or []
+
+
+def served_pr(r: dict, prs: list[dict]) -> int | None:
+    """The PR a run ended up serving: the trigger's PR for [review] and [respond]; for a
+    run on an issue ([build], [record], [answer]), the PR that closes it, merged first,
+    then open, then closed, newest first. None if no PR closes it."""
+    m = REF_RE.search(r.get("ref") or "")
+    if not m:
+        return None
+    n = int(m.group(1))
+    if (r.get("ref") or "").startswith("PR "):
+        return n
+    rank = {"MERGED": 0, "OPEN": 1, "CLOSED": 2}
+    closing = [p for p in prs if n in {c.get("number") for c in p.get("closingIssuesReferences") or []}]
+    if not closing:
+        return None
+    return min(closing, key=lambda p: (rank.get(p.get("state"), 3), -p["number"]))["number"]
+
+
+def cost_text(runs: list[dict], prs: list[dict]) -> str:
+    """`swarm cost` (#176): each recorded run's total_cost_usd, grouped by the PR it served.
+
+    runs is watch.runs(); prs is gh_prs(). Only prints: the costs stay on this machine
+    (GOV-0002, GOV-0003, GOV-0004, GOV-0014)."""
+    limits = ["Only runs swarm watch started have a cost: sessions you start by hand have none.",
+              f"watch.json keeps runs for {RUNS_DAYS} days (watch.RUNS_DAYS), so older runs aren't counted.",
+              "Costs are Claude Code's local estimate and stay on this machine."]
+    if not runs:
+        return "\n".join(["no runs recorded in watch.json"] + limits)
+    state = {p["number"]: PR_STATES.get(p.get("state"), (p.get("state") or "?").lower()) for p in prs}
+    groups: dict[tuple, dict] = {}
+    for r in runs:
+        n = served_pr(r, prs)
+        if n is not None:
+            key, label, st = (0, n, ""), f"PR #{n}", state.get(n, "?")
+        else:
+            key, label, st = (1, 0, r.get("ref") or ""), f"{r.get('ref')} (no PR)", "-"
+        g = groups.setdefault(key, {"pr": n, "label": label, "state": st, "runs": 0, "cost": 0.0,
+                                    "none": 0})
+        g["runs"] += 1
+        if isinstance(r.get("cost_usd"), (int, float)):
+            g["cost"] += r["cost_usd"]
+        else:
+            g["none"] += 1
+    rows = [[g["label"], g["state"], str(g["runs"]), usd(g["cost"]) if g["runs"] > g["none"] else "-",
+             str(g["none"])] for _, g in sorted(groups.items())]
+    total = sum(g["cost"] for g in groups.values())
+    nruns, nnone = len(runs), sum(g["none"] for g in groups.values())
+    starts = sorted(r["started"] for r in runs if r.get("started"))
+    ends = sorted(r.get("ended") or r["started"] for r in runs if r.get("started"))
+    span = f"{starts[0][:10]} to {ends[-1][:10]}" if starts else "unknown dates"
+    out = [swarm.table(["PR", "STATE", "RUNS", "COST (EST.)", "NO COST"], rows), "",
+           f"total: {usd(total)} over {nruns} run{'s' * (nruns != 1)}, runs started {span}"
+           + (f"; {nnone} run{'s' * (nnone != 1)} with no cost recorded (still running, or no result)"
+              if nnone else "")]
+    if starts:
+        seen = {g["pr"] for g in groups.values()}
+        unrecorded = sorted(p["number"] for p in prs if p.get("state") == "MERGED" and p.get("mergedAt")
+                            and p["mergedAt"] >= starts[0][:19] and p["number"] not in seen)
+        out.append(f"{len(unrecorded)} PR{'s' * (len(unrecorded) != 1)} merged since {starts[0][:10]} "
+                   f"{'have' if len(unrecorded) != 1 else 'has'} no run recorded"
+                   + (f": {', '.join(f'#{n}' for n in unrecorded)}" if unrecorded else ""))
+    return "\n".join(out + [""] + limits)
 
 
 # ---------------------------------------------------------------- the loop
