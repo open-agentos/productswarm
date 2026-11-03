@@ -84,6 +84,7 @@ Nothing new is posted to GitHub. What the launcher started is recorded under `~/
 - `<session-id>.pid` is written by the window's shell before it hands over to `swarm-session`, so the PID it holds is Claude Code's.
 - `watch.json` holds what `swarm watch` has acted on, and what it is holding or skipping (see below).
 - `<session-id>.stop.json` counts how many times the Stop hook has blocked a run `swarm watch` started, and `stophook.log` says why (see below).
+- `<session-id>.result.json` is a headless run's output (see "Headless runs" below). Its first line is `ops/swarm-session`'s banner (`swarm-session: <role> as …`), and its last line is the JSON result from `claude -p --output-format json`.
 
 A PID counts only while that process's command line still contains `--session-id <its id>`. A reused PID is never mistaken for a session, and is never sent a signal. If a session exits by itself, `up` and `ls` remove it from the state file.
 
@@ -114,7 +115,38 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respo
 
 `swarm launch builder --issue N --pr M` starts the same session by hand. `--pr` only changes the opener, which names the PR and the issue; the refusal checks are still on #N.
 
-Each start is a fresh session in a new Terminal window, as `swarm launch` makes. The loop never re-prompts a running session. `--dry-run` prints `would start …` for each trigger and starts nothing. It keeps its memory only while it runs and writes nothing to disk.
+Each start is a fresh **headless** run in a new Terminal window (see below). The loop never re-prompts a running session. `--dry-run` prints `would start …` for each trigger, then the full headless command it would run on the next line, indented, and starts nothing. If there is no command to show (the role has no `spend_cap_usd`, or `[watch]` has no `max_turns`), that line says why. It keeps its memory only while it runs and writes nothing to disk.
+
+### Headless runs
+
+Every session `swarm watch` starts is a one-shot `claude -p` run (#147, from the owner's answer on #125, GOV-0012 and GOV-0013). It ends when it is done, or when it reaches its budget or its turn ceiling, whichever comes first. Sessions you start with `swarm up` and `swarm launch` stay interactive and don't change.
+
+The launcher adds these to the usual `ops/swarm-session <role> --model <model> --session-id <id>` call (`ops/` passes them on to `claude` unchanged):
+
+| Flag | Value | Why |
+|---|---|---|
+| `-p` | the usual opener, as the prompt | headless, one shot (#125) |
+| `--permission-mode` | `auto` | the mode interactive sessions use (GOV-0013) |
+| `--disallowedTools` | the patterns in `swarm.DENY` (below) | a backstop for merging and label edits (GOV-0013) |
+| `--max-budget-usd` | the role's `spend_cap_usd` | Claude Code ends the run at it (GOV-0012) |
+| `--max-turns` | `[watch] max_turns` | catches a run that is looping (GOV-0012) |
+| `--output-format` | `json` | stdout goes to `~/.productswarm/launcher/<session-id>.result.json` |
+
+The run still opens in its own Terminal window, so the pid file, `swarm ls` and `swarm stop` work as before, and the heartbeat hook still records `started` and `stopped`. Before the run starts, the window prints one line saying it is headless and where its result goes. After that the window shows only stderr. #149 reads the result file.
+
+The deny patterns back up auto mode's classifier for the two rules governance cares about most: agents never merge (GOV-0011), and agents never add or remove labels such as `ready` and `gov:ruled` (GOV-0006):
+
+```
+Bash(gh pr merge *)
+Bash(gh issue edit * --add-label *)    Bash(gh issue edit * --remove-label *)
+Bash(gh issue edit * --add-label=*)    Bash(gh issue edit * --remove-label=*)
+Bash(gh pr edit * --add-label *)       Bash(gh pr edit * --remove-label *)
+Bash(gh pr edit * --add-label=*)       Bash(gh pr edit * --remove-label=*)
+Bash(gh label *)
+Bash(gh api *labels*)                  Bash(gh api *merge*)
+```
+
+As GOV-0013 accepts, this is a backstop and not a complete fence. The `=` forms are there because `--add-label=ready` doesn't match `--add-label *`. `gh api *merge*` also denies reads that mention "merge", such as `gh api repos/…/pulls/5 --jq .merged`. `gh pr view --json mergeable` and `gh issue view --json labels` still work.
 
 ### Limits
 
@@ -124,12 +156,14 @@ These are GOV-0010, the owner's answer on #88. They live in `swarm.toml`'s `[wat
 [watch]
 interval_minutes = 5   # how often it checks
 max_live = 2           # the most live sessions swarm watch may have started at once
+max_turns = 200        # the turn ceiling for each headless run (#147, GOV-0012)
 ```
 
 - **Ceiling.** Only sessions the loop started count toward `max_live`. Sessions you start with `swarm up` or `swarm launch` don't. At the ceiling, further triggers are **held**: `swarm inbox` lists them, and they start in the order they were first held once a loop-started session stops.
-- **Cap required.** The loop starts only roles that set `spend_cap_usd` in `swarm.toml`. A trigger for any other role is **skipped**: `swarm inbox` lists it with the reason, and it starts on a later check once the role has a cap. Every role in `swarm.toml` sets a cap (since #110), so the loop can start any of them. The cap is still warn-only (GOV-0008).
+- **Cap required.** The loop starts only roles that set `spend_cap_usd` in `swarm.toml`. A trigger for any other role is **skipped**: `swarm inbox` lists it with the reason, and it starts on a later check once the role has a cap. Every role in `swarm.toml` sets a cap (since #110), so the loop can start any of them. For a run the loop starts, the cap is also its `--max-budget-usd`, so Claude Code ends the run there (GOV-0012). For sessions you start, it is still warn-only (GOV-0008).
+- **Turn ceiling.** `max_turns` is the `--max-turns` for every headless run. The budget is the main bound; the ceiling only catches a run that is looping. Setting the number is the owner's call (a `spend` change, GOV-0010); 200 is the planner's suggestion. It must be a whole number of at least 1.
 - **Interval.** `interval_minutes` sets how often it checks. `--interval` works only with `--dry-run`, so the real interval can't be changed by a flag.
-- `swarm.toml` is read again on every check, so a new cap or limit applies without a restart. Without a `[watch]` table, `swarm watch` refuses to start anything, but `--dry-run` still works and checks every 5 minutes.
+- `swarm.toml` is read again on every check, so a new cap or limit applies without a restart. Without a `[watch]` table, or with one that has no `max_turns`, `swarm watch` refuses to start anything, but `--dry-run` still works (with no `[watch]` table, it checks every 5 minutes). `swarm up` and `swarm launch` don't need `max_turns`.
 
 ### Overlapping builds
 
@@ -177,7 +211,7 @@ If the condition isn't met, the hook blocks the stop and gives a short reason na
 
 ### What it never does
 
-It never stops a session (GOV-0008). It never adds or removes labels, and never comments, approves or merges. Its only GitHub calls are reads. Sessions it starts are recorded with `by: watch` in `sessions.json`, and `swarm ls` shows them as `running, by watch`. To end one, run `swarm stop <name>` yourself. If GitHub can't be read, or `swarm.toml` is invalid, it says so and tries again on the next check.
+It never stops a session itself (GOV-0008): a headless run ends at its budget or turn ceiling because Claude Code ends it (GOV-0012). It never adds or removes labels, and never comments, approves or merges. Its only GitHub calls are reads. Sessions it starts are recorded with `by: watch` in `sessions.json`, and `swarm ls` shows them as `running, by watch`. To end one, run `swarm stop <name>` yourself. If GitHub can't be read, or `swarm.toml` is invalid, it says so and tries again on the next check.
 
 ## The swarm manifest
 

@@ -310,14 +310,16 @@ class SettingsTest(Base):
         self.assertFalse(any(stophook.MARK in c for c in self.stop_commands(e)))
 
     def test_watch_worktrees_get_it_from_the_pinned_copy(self):
-        e = swarm.Started("builder-issue-7", "builder", "m", SID, 0, issue=7, by="watch")
+        e = swarm.Started("builder-issue-7", "builder", "m", SID, 0, issue=7, by="watch",
+                          budget_usd=15.0, max_turns=200)
         self.assertTrue(self.l.start(e, []))
         cmds = self.stop_commands(e)
         self.assertIn(f'python3 -I "{self.home}/runtime/launcher/stophook.py"', cmds)
         self.assertTrue(any("heartbeat/hook.py" in c for c in cmds))    # the heartbeat's Stop kept
 
     def test_block_count_goes_when_the_run_exits(self):
-        e = swarm.Started("builder-issue-7", "builder", "m", SID, 0, issue=7, by="watch")
+        e = swarm.Started("builder-issue-7", "builder", "m", SID, 0, issue=7, by="watch",
+                          budget_usd=15.0, max_turns=200)
         self.l.save([e])                                 # no pid file and long past START_GRACE
         count = self.home / "launcher" / f"{SID}.stop.json"
         count.write_text('{"blocks": 1}\n')

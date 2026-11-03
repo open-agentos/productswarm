@@ -15,11 +15,18 @@
 # (option 1). Sessions you start with `swarm up` or `swarm launch` don't count.
 #   interval_minutes  how often swarm watch reads GitHub and heartbeat state
 #   max_live          the most live sessions swarm watch may have started at once
+#   max_turns         the turn ceiling for each headless run swarm watch starts (#147,
+#                     GOV-0012): Claude Code ends a run at it, or at the role's
+#                     spend_cap_usd (--max-budget-usd), whichever comes first. The budget is
+#                     the main bound; this only catches a run that is looping. Required for
+#                     swarm watch to start anything. 200 is the planner's suggested value:
+#                     the owner sets it.
 # swarm watch also starts only roles that set spend_cap_usd below, and lists any other
 # trigger as skipped in `swarm inbox`. Changing any of this is a `spend` decision.
 [watch]
 interval_minutes = 5
 max_live = 2
+max_turns = 200
 
 [[session]]
 role = "planner"

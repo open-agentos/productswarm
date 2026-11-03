@@ -5,7 +5,9 @@
     launcher/swarm watch --dry-run [--interval MINUTES]   print what it would start
 
 Every interval it reads the same GitHub and heartbeat state as `swarm inbox` and works
-out each trigger below. --dry-run prints them and starts nothing.
+out each trigger below. --dry-run prints them and starts nothing. For each one it would
+start, it also prints the full headless command on the next line, indented (#147), or why
+it has none (for example, the role has no spend_cap_usd).
 
 | kind   | trigger                                                                 | would start          |
 |--------|-------------------------------------------------------------------------|----------------------|
@@ -35,14 +37,21 @@ than being covered by it. Reviewers the owner started (`swarm up`, `swarm launch
 keep it quiet (#132): they are the owner's to steer, and GOV-0010 already leaves sessions
 the owner starts out of the loop's counts.
 
-Without --dry-run, each new trigger starts one fresh session (one Terminal window, as
-`swarm launch` does), within the limits in GOV-0010 (the owner's answer on #88):
+Without --dry-run, each new trigger starts one fresh headless run (#147): `claude -p`
+with the opener as its prompt, auto mode and explicit denies for merging and label edits
+(GOV-0013), `--max-budget-usd` from the role's spend_cap_usd and `--max-turns` from
+[watch] max_turns (GOV-0012), and its JSON result written to
+~/.productswarm/launcher/<session id>.result.json (swarm.Launcher.command()). It ends when
+it is done or at either limit; Claude Code ends it, not the loop. It still opens in its
+own Terminal window, as `swarm launch` does, so `swarm ls` and `swarm stop` work as before.
+Every start is within the limits in GOV-0010 (the owner's answer on #88):
 
 - at most [watch] max_live live sessions that the loop started; past that, a trigger is
   held, listed in `swarm inbox`, and started in order once a slot frees up;
 - only roles that set spend_cap_usd in swarm.toml; any other trigger is skipped and
   listed in `swarm inbox`, and starts once the role has a cap;
-- every [watch] interval_minutes. swarm.toml is read again on every check.
+- every [watch] interval_minutes. swarm.toml is read again on every check, and a [watch]
+  table with no max_turns starts nothing, as a missing [watch] table doesn't.
 
 A [build] trigger is also held while other work from the same GOV record is in flight
 (#136, the owner's answer on #127; direction, not a ruling). An issue's GOV records are
@@ -404,7 +413,32 @@ class Watch:
         for t in new:
             self.seen.add(t.key)
             self.launcher.out(t.line())
+            if not t.skipped:
+                self.launcher.out(f"  {self.headless(t)}")
         return new
+
+    def headless(self, t: Trigger) -> str:
+        """For --dry-run: the full command a real start would run for t (#147), or why
+        there isn't one. Reads swarm.toml as a real start would; never raises."""
+        try:
+            sessions, limits = manifest.load_all(self.manifest_path)
+        except manifest.ManifestError as e:
+            return f"(no headless command: {e})"
+        s = {x.role: x for x in sessions}.get(t.role)
+        if s is None or s.spend_cap_usd is None:
+            return f"(no headless command: {t.role} has no spend_cap_usd in swarm.toml)"
+        if limits is None or limits.max_turns is None:
+            return "(no headless command: swarm.toml's [watch] table has no max_turns)"
+        entry = self.entry(t, s, limits, self.launcher.running())
+        return self.launcher.command(entry)
+
+    def entry(self, t: Trigger, s: "manifest.Session", limits: "manifest.WatchLimits",
+              live: list) -> "swarm.Started":
+        """The launcher entry for a headless run on t, with its budget and turn ceiling."""
+        return swarm.Started(name=self.name(t, live), role=t.role, model=s.model,
+                             session_id=str(uuid.uuid4()), started=self.launcher.clock(),
+                             issue=t.issue, pr=t.pr, by="watch",
+                             budget_usd=s.spend_cap_usd, max_turns=limits.max_turns)
 
     def start_tick(self, now: dt.datetime) -> list[Trigger]:
         """Start a session for each new trigger, within the [watch] limits (GOV-0010)."""
@@ -415,6 +449,9 @@ class Watch:
             raise RuntimeError(str(e)) from None
         if limits is None:
             raise RuntimeError(f"{self.manifest_path} has no [watch] table; starting nothing (GOV-0010)")
+        if limits.max_turns is None:
+            raise RuntimeError(f"{self.manifest_path}'s [watch] table has no max_turns; starting "
+                               f"nothing (GOV-0012)")
         by_role = {s.role: s for s in sessions}
         w = self.read(self.repo, self.idle_minutes, now)
         live = self.launcher.live()
@@ -471,9 +508,7 @@ class Watch:
                 out(f"[{t.kind}] {t.ref} {t.why} -> refused: {refused}")
                 finish(t, f"refused: {refused}")
                 continue
-            entry = swarm.Started(name=self.name(t, live), role=t.role, model=s.model,
-                                  session_id=str(uuid.uuid4()), started=self.launcher.clock(),
-                                  issue=t.issue, pr=t.pr, by="watch")
+            entry = self.entry(t, s, limits, live)
             out(f"[{t.kind}] {t.ref} {t.why} -> starting {entry.name}")
             if self.launcher.start(entry, live):
                 if t.kind == "review":

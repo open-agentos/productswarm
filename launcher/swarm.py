@@ -13,7 +13,16 @@
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
-unchanged, in a new Terminal window: the owner's answer on #43. That runtime is kept
+unchanged, in a new Terminal window: the owner's answer on #43.
+
+A run that `swarm watch` starts (by="watch") is headless instead (#147): the same call
+with `-p <opener>`, `--permission-mode auto` and `--disallowedTools` for merging and label
+edits (GOV-0013, patterns in DENY), `--max-budget-usd <the role's spend_cap_usd>` and
+`--max-turns <[watch] max_turns>` (GOV-0012), and `--output-format json`, with stdout
+written to ~/.productswarm/launcher/<session id>.result.json. It still opens its own
+window, so the pid file, `ls` and `stop` work unchanged; the window prints one line
+saying the run is headless and where its result goes, then shows only stderr. The run
+ends when it is done or at either limit. `swarm up` and `swarm launch` stay interactive. That runtime is kept
 behind one function, open_terminal(). Choosing the session id up front is what ties a
 window to its heartbeat tracking issue: the hook uses Claude Code's session id.
 
@@ -30,6 +39,8 @@ origin; otherwise it is kept and `swarm ls` lists it. Work is never deleted.
 What the launcher started is recorded locally, never on GitHub:
     ~/.productswarm/launcher/sessions.json   name, role, model, session id, start time
     ~/.productswarm/launcher/<id>.pid        written by the window's shell before exec
+    ~/.productswarm/launcher/<id>.result.json  a headless run's stdout: ops/swarm-session's
+                                             one-line banner, then the JSON result (#147)
     ~/.productswarm/launcher/watch.json      triggers `swarm watch` acted on or is holding
 (PRODUCTSWARM_HOME moves ~/.productswarm, as for the heartbeat.)
 
@@ -64,6 +75,18 @@ import install  # noqa: E402
 SWARM_SESSION = ROOT / "ops" / "swarm-session"
 WORKTREES = ".worktrees"   # under the checkout root; gitignored
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# GOV-0013's backstop for headless runs: agents never merge (GOV-0011) and never add or
+# remove labels (GOV-0006). Auto mode's classifier covers the rest; this is not a fence.
+# The `=` forms are here because `--add-label=ready` doesn't match `--add-label *`.
+DENY = (
+    "Bash(gh pr merge *)",
+    "Bash(gh issue edit * --add-label *)", "Bash(gh issue edit * --remove-label *)",
+    "Bash(gh issue edit * --add-label=*)", "Bash(gh issue edit * --remove-label=*)",
+    "Bash(gh pr edit * --add-label *)", "Bash(gh pr edit * --remove-label *)",
+    "Bash(gh pr edit * --add-label=*)", "Bash(gh pr edit * --remove-label=*)",
+    "Bash(gh label *)",
+    "Bash(gh api *labels*)", "Bash(gh api *merge*)",
+)
 START_GRACE = 60      # seconds a session may take to write its pid file before it counts as failed
 STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
@@ -131,11 +154,14 @@ class Started:
     issue: int | None = None  # set by `swarm launch --issue`
     by: str | None = None     # "watch" if `swarm watch` started it (counts toward its ceiling)
     pr: int | None = None     # set by `swarm launch --pr`: respond on this PR (GOV-0011)
+    budget_usd: float | None = None   # by="watch": --max-budget-usd, the role's spend_cap_usd (GOV-0012)
+    max_turns: int | None = None      # by="watch": --max-turns, [watch] max_turns (GOV-0012)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Started":
         return cls(**{k: d[k] for k in ("name", "role", "model", "session_id", "started")},
-                   issue=d.get("issue"), by=d.get("by"), pr=d.get("pr"))
+                   issue=d.get("issue"), by=d.get("by"), pr=d.get("pr"),
+                   budget_usd=d.get("budget_usd"), max_turns=d.get("max_turns"))
 
 
 @dataclass
@@ -163,6 +189,10 @@ class Launcher:
 
     def pid_file(self, sid: str) -> Path:
         return self.dir / f"{sid}.pid"
+
+    def result_file(self, sid: str) -> Path:
+        """Where a headless run's stdout goes: the banner, then its JSON result (#147)."""
+        return self.dir / f"{sid}.result.json"
 
     def load(self) -> list[Started]:
         try:
@@ -285,15 +315,39 @@ class Launcher:
         ops/swarm-session, unchanged. It cd's to its own root, so the session runs there.
 
         Run through /bin/bash so `$$` means the same whatever the owner's login shell is;
-        both exec's keep that pid, so it ends up being claude's."""
+        both exec's keep that pid, so it ends up being claude's.
+
+        A run `swarm watch` started (by="watch") is headless (#147): see headless_args()."""
         wt = self.worktree(s.session_id)
+        session = ["exec", shlex.quote(str(wt / "ops" / "swarm-session")), shlex.quote(s.role),
+                   "--model", shlex.quote(s.model), "--session-id", s.session_id]
+        prompt = shlex.quote(opener(s.role, s.issue, s.pr))
+        if s.by == "watch":
+            result = shlex.quote(str(self.result_file(s.session_id)))
+            note = shlex.quote(f"swarm: headless run (claude -p); it ends when done or at its budget, "
+                               f"and its result is written to {self.result_file(s.session_id)}")
+            tail = ["echo", note, "&&", *session, "-p", prompt, *self.headless_args(s), ">|", result]
+        else:
+            tail = [*session, prompt]
         inner = " ".join([
             "cd", shlex.quote(str(wt)), "&&",
-            "echo $$ >|", shlex.quote(str(self.pid_file(s.session_id))), "&&",
-            "exec", shlex.quote(str(wt / "ops" / "swarm-session")), shlex.quote(s.role),
-            "--model", shlex.quote(s.model), "--session-id", s.session_id, shlex.quote(opener(s.role, s.issue, s.pr)),
+            "echo $$ >|", shlex.quote(str(self.pid_file(s.session_id))), "&&", *tail,
         ])
         return "exec /bin/bash -c " + shlex.quote(inner)
+
+    @staticmethod
+    def headless_args(s: Started) -> list[str]:
+        """The flags after `-p <opener>` for a loop-started run, shell-quoted (#147).
+
+        --disallowedTools takes several values, so another flag must follow it: otherwise
+        claude would read the next word as one more pattern."""
+        if s.budget_usd is None or s.max_turns is None:
+            raise RuntimeError(f"{s.name}: a run swarm watch starts needs a budget and a turn "
+                               f"ceiling (GOV-0012)")
+        return ["--permission-mode", "auto",
+                "--disallowedTools", *(shlex.quote(d) for d in DENY),
+                "--max-budget-usd", f"{s.budget_usd:g}", "--max-turns", str(s.max_turns),
+                "--output-format", "json"]
 
     def plan(self, sessions: list[manifest.Session], live: list[Started]) -> list[manifest.Session]:
         """Manifest sessions with no live launcher session of the same name: the shortfall."""
@@ -690,6 +744,10 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             if limits is None and not args.dry_run:
                 launcher.out(f"swarm watch: refused: {args.manifest} has no [watch] table, so there "
                              f"are no limits to start sessions within (GOV-0010); use --dry-run")
+                return 1
+            if limits and limits.max_turns is None and not args.dry_run:
+                launcher.out(f"swarm watch: refused: {args.manifest}'s [watch] table has no max_turns, "
+                             f"so runs would have no turn ceiling (GOV-0012); use --dry-run")
                 return 1
             w = watch.Watch(launcher, repo, owner_login(), watch.roles_in(launcher.root),
                             idle_minutes=args.idle_minutes, dry_run=args.dry_run,
