@@ -84,27 +84,37 @@ GOV-0009 makes v2 a wake-up loop: `launcher/swarm watch`. It runs on Matt's mach
 
 ### Triggers
 
-The loop acts only on labels the owner added (checked in the issue's events, per GOV-0006) and on new PR heads. Each trigger counts once.
+The loop acts only on labels the owner added (checked in the issue's events, per GOV-0006), on new PR heads and on the reviewer's requested changes. Each trigger counts once.
 
 | Trigger | Session it starts |
 |---|---|
-| An open, non-draft PR whose head the reviewer hasn't reviewed | a reviewer pass |
-| An issue whose latest `ready` the owner added, with no live session on it | `swarm launch builder --issue N` (or the issue's role) |
-| A `gov:question` the owner labelled `gov:ruled` that needs a record and has no ruling PR | docs, on that question (GOV-0007) |
-| A `gov:question` the owner labelled `ready` | the role that asked it, on that question |
+| `[review]` An open, non-draft PR whose head the reviewer hasn't reviewed | a reviewer pass |
+| `[build]` An issue whose latest `ready` the owner added, with no live session on it | `swarm launch builder --issue N` (or the issue's role) |
+| `[record]` A `gov:question` the owner labelled `gov:ruled` that needs a record and has no ruling PR | docs, on that question (GOV-0007) |
+| `[answer]` A `gov:question` the owner labelled `ready` | the role that asked it, on that question |
+| `[respond]` An open, non-draft PR whose latest reviewer review at its current head is "changes requested", with no `Overstep:` finding, for at most 2 rounds | the builder, on that PR (GOV-0011) |
 
 ### What we're building
 
-| # | Issue | What |
-|---|---|---|
-| W1 | #89 | `swarm watch --dry-run`: works out the triggers and prints the `swarm launch …` command it would run for each, but starts nothing (merged in #94) |
-| W2 | #90 | `swarm watch` starts sessions, within the limits from #88 |
+| # | Issue | What | PR |
+|---|---|---|---|
+| W1 | #89 | `swarm watch --dry-run`: works out the triggers and prints the `swarm launch …` command it would run for each, but starts nothing | #94 |
+| W2 | #90 | `swarm watch` starts sessions, within GOV-0010's limits | #104 |
+| R1 | #111 | The reviewer uses review states as a stoplight (request changes / comment / approve), with rubric lines; approve means "rubric passed at this head", never a merge decision (GOV-0011) | #117 |
+| R2 | #112 | The builder responds to requested changes on its own PR (GOV-0011) | #116 |
+| R3 | #113 | The `[respond]` trigger, at most 2 rounds per PR, then the owner (GOV-0011) | #120 |
+| H1 | #147 | Loop-started runs are one-shot `claude -p` runs (GOV-0014) with auto permission mode and explicit denies (GOV-0013) and a hard per-run budget and turn ceiling (GOV-0012) | #153 |
+| H2 | #148 | A Stop hook keeps a loop-started run going until its role's done-condition is met (GOV-0014) | #152 |
+| H3 | #149 | The loop records each run's result and cost in `watch.json`, and `swarm inbox` lists runs that ended at cap (GOV-0012, GOV-0014) | #156 |
+| — | #132 | Only reviewers the loop started keep `[review]` triggers quiet; an idle owner-started reviewer doesn't hold reviews up | #143 |
+| — | #136 | A `[build]` is held while a live builder or open PR shares its GOV record (the owner's answer on #127) | #144 |
 
-Order: W1 → W2. W2 waits on #88.
+Order: W1 → W2, then R1–R3, then H1–H3.
 
 ### Goals for v2
 
 - An owner signal (`ready`, `gov:ruled` or a new PR push) starts the right session without Matt starting it by hand.
+- A reviewer's requested changes reach the builder without Matt relaying them, and the review loop is bounded so it ends with Matt.
 - Spend while nobody is watching stays bounded by limits Matt sets.
 - Still lightweight: local, with no new infrastructure.
 
@@ -114,16 +124,21 @@ Each of these needs its own `product-scope` question:
 
 - a cloud or GitHub Actions trigger;
 - re-prompting a session that is already running;
-- stopping a session automatically (GOV-0008 still holds: the cap only warns);
+- the loop stopping a session itself. A loop-started run ends at its budget or turn ceiling because Claude Code ends it (GOV-0012); sessions Matt starts stay warn-only (GOV-0008);
 - any trigger or action not in the table above. The loop never adds or removes labels, and never comments, approves or merges.
 
 ### v2 design decisions
 
-GOV-0009 names three design questions:
+GOV-0009 named three design questions. The owner has answered each, and later questions added more rulings:
 
-- How a nudge reaches a session: the loop starts a fresh session per trigger and never re-prompts a running one (in #90's scope).
-- #88 The interval, concurrency ceiling and cap rule: the owner chose option 1. The interval is 5 minutes, and at most 2 loop-started sessions run at once. The loop starts only roles that have a `spend_cap_usd`, and says why it skipped any other. The numbers live in `swarm.toml`, and changing them is a `spend` change. Sessions Matt starts by hand don't count towards the ceiling.
-- Whether the reviewer's "don't poll on a timer" rule changes: it doesn't. The loop does the polling, and a reviewer it starts runs one pass and stops (in #90's scope).
+- #101 How a nudge reaches a session: a fresh session per trigger; the loop never re-prompts a running one. GOV-0014 then made each loop-started run one-shot, so there is no idle session to re-prompt.
+- #88 / GOV-0010 Interval, concurrency ceiling and cap rule: the interval is 5 minutes, and at most 2 loop-started sessions run at once. The loop starts only roles that have a `spend_cap_usd`, and says why it skipped any other. The numbers live in `swarm.toml`, and changing them is a `spend` change. Sessions Matt starts by hand don't count towards the ceiling.
+- #102 Whether the reviewer's "don't poll on a timer" rule changes: it doesn't. The loop does the polling, and a reviewer it starts runs one pass and stops.
+- #105 / GOV-0011 Bounded review loop: the reviewer uses request changes, comment and approve as a stoplight, and approve means only that the rubric passed at that head. The builder responds to requested changes on its own PR, and the loop starts it through `[respond]` for at most 2 rounds per PR. A third request, or an `Overstep:` finding, goes to the owner.
+- #125 / GOV-0014 How loop-started sessions run: each is a one-shot `claude -p` run that exits when its role is done, kept going by a Stop hook, with its result and cost recorded in `watch.json`. Sessions Matt starts stay interactive.
+- #126 / GOV-0012 Hard budget: a loop-started run gets `--max-budget-usd` from its role's `spend_cap_usd`, plus a `--max-turns` ceiling, and ends at either. Sessions Matt starts stay warn-only (GOV-0008).
+- #131 / GOV-0013 Headless permissions: loop-started runs use `--permission-mode auto`, plus `--disallowedTools` for `gh pr merge` and label edits.
+- #127 Overlapping builders: hold a `[build]` while a live builder or open PR shares its GOV record. This is the owner's direction on that question, not a ruling (GOV-0006).
 
 ## Open decisions
 
