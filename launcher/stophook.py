@@ -30,6 +30,8 @@ Also done, because a run can stop for good reasons without that (#125, point 2):
   it started, naming its issue or PR as #N: it is blocked on it. Every session of a
   role acts as the same App, so the #N is what tells this run's question from another
   session's;
+- the run commented on its own issue since it started, naming another open issue as #M:
+  it is blocked on an unfinished prerequisite (#184);
 - the issue fails `swarm launch`'s refusal checks: it is closed, or its latest `ready`
   (`gov:ruled` for [record]) wasn't added by the owner (GOV-0006);
 - the work is already done: a PR, open or merged, already closes the issue.
@@ -173,6 +175,25 @@ def blocked_on_question(g: GitHub, repo: str, e: swarm.Started, login: str) -> i
     return None
 
 
+def blocked_on_prerequisite(g: GitHub, repo: str, e: swarm.Started, login: str) -> int | None:
+    """An open issue (not a PR, not the run's own issue) that the run's App named as #M in
+    a comment on the run's issue since the run started, else None (#184). The comment on
+    its own issue is what tells this run's "blocked" from another session's."""
+    seen: set[int] = set()
+    for c in g.items(f"repos/{repo}/issues/{e.issue}/comments?since={iso(e.started)}&per_page=100"):
+        if not mine(c, login) or not since_start(c, e.started):
+            continue
+        for m in re.findall(r"(?<![\w/])#(\d+)\b", c.get("body") or ""):
+            n = int(m)
+            if n == e.issue or n in seen:
+                continue
+            seen.add(n)
+            it = g.get(f"repos/{repo}/issues/{n}") or {}
+            if it.get("state") == "open" and "pull_request" not in it:
+                return n
+    return None
+
+
 def closed_by(g: GitHub, repo: str, n: int) -> list[int]:
     return [p["number"] for p in g.closing_prs(repo, n)]
 
@@ -230,8 +251,11 @@ def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
         events = g.items(f"repos/{repo}/issues/{e.issue}/events?per_page=100")
         if swarm.issue_refusals(e.issue, issue, events, owner, "gov:ruled" if record else "ready"):
             return None      # it was right to refuse the issue (GOV-0006)
+        if blocked_on_prerequisite(g, repo, e, login):
+            return None      # said on its issue which unfinished issue it waits for (#184)
         what = (f"No PR closes #{e.issue} yet. Open the {'record ' if record else ''}PR for "
-                f"#{e.issue}, then stop.")
+                f"#{e.issue}, then stop. If an unfinished issue the work depends on blocks it, "
+                f"comment on #{e.issue} naming that issue, and stop.")
     else:
         return None
     if what and blocked_on_question(g, repo, e, login):

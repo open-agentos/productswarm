@@ -266,6 +266,7 @@ When the run is about to stop, the hook reads GitHub as the run's App (only read
 These also count as done, because a run can stop for good reasons without a PR:
 
 - since it started, the run opened or commented on a `gov:question` that names its issue or PR as `#N`. Every session of a role acts as the same App, so the `#N` is how the hook tells this run's question from another session's;
+- since it started, the run commented on its own issue naming another open issue as `#M` (not a PR): it's blocked on an unfinished prerequisite, e.g. a `[build]` whose file another issue creates (#184). Only a comment on the run's own issue counts, so another session's comment elsewhere doesn't;
 - the issue fails `swarm launch`'s refusal checks: it's closed, or its latest `ready` (`gov:ruled` for `[record]`) wasn't added by the owner (GOV-0006);
 - a PR, open or merged, already closes the issue.
 
