@@ -14,6 +14,12 @@ unchanged, in a new Terminal window: the owner's answer on #43. That runtime is 
 behind one function, open_terminal(). Choosing the session id up front is what ties a
 window to its heartbeat tracking issue: the hook uses Claude Code's session id.
 
+Each session runs in its own git worktree, `.worktrees/<session id>` in this checkout,
+detached at origin/main, so sessions never share a working tree (#93). The launcher
+writes the heartbeat hook entries into the worktree's .claude/settings.local.json.
+Once a session has exited, its worktree is removed if it is clean and its HEAD is on
+origin; otherwise it is kept and `swarm ls` lists it. Work is never deleted.
+
 What the launcher started is recorded locally, never on GitHub:
     ~/.productswarm/launcher/sessions.json   name, role, model, session id, start time
     ~/.productswarm/launcher/<id>.pid        written by the window's shell before exec
@@ -35,7 +41,7 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -44,8 +50,12 @@ ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 import manifest  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "heartbeat"))
+import install  # noqa: E402
+
 SWARM_SESSION = ROOT / "ops" / "swarm-session"
-HOOK_SETTINGS = ROOT / ".claude" / "settings.local.json"
+WORKTREES = ".worktrees"   # under the checkout root; gitignored
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 START_GRACE = 60      # seconds a session may take to write its pid file before it counts as failed
 STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
@@ -93,6 +103,15 @@ def process_command(pid: int) -> str | None:
     return r.stdout.strip() or None
 
 
+def run_git(args: list[str]) -> tuple[int, str]:
+    """Run git; (exit code, combined output)."""
+    try:
+        r = subprocess.run(["git", *args], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
 # ---------------------------------------------------------------- local state
 
 @dataclass
@@ -121,6 +140,9 @@ class Launcher:
     clock: Callable[[], float] = time.time
     sleep: Callable[[float], None] = time.sleep
     out: Callable[[str], None] = print
+    git: Callable[[list[str]], tuple[int, str]] = run_git
+    kept: list[Path] = field(default_factory=list)   # exited sessions' worktrees with work in them
+    fetched: bool = False
 
     @property
     def dir(self) -> Path:
@@ -170,7 +192,8 @@ class Launcher:
         return [e for e in self.load() if self.state(e) != "exited"]
 
     def live(self) -> list[Started]:
-        """Entries still running or starting. Exited ones are dropped from the state file."""
+        """Entries still running or starting. Exited ones are dropped from the state file,
+        and their worktrees removed if nothing would be lost (tidy)."""
         entries = self.load()
         live = [e for e in entries if self.state(e) != "exited"]
         if len(live) != len(entries):
@@ -178,19 +201,79 @@ class Launcher:
                 if e not in live:
                     self.pid_file(e.session_id).unlink(missing_ok=True)
             self.save(live)
+        self.tidy(live)
         return live
+
+    # ------------------------------------------------------------ worktrees (#93)
+
+    def worktree(self, sid: str) -> Path:
+        return self.root / WORKTREES / sid
+
+    def hook_path(self) -> str:
+        """The hook command's script path, written into each session's settings."""
+        return install.PROJECT_HOOK
+
+    def git_ok(self, *args: str) -> str:
+        rc, out = self.git(list(args))
+        if rc:
+            raise RuntimeError(f"git {' '.join(a for a in args if not a.startswith('/'))[:80]} failed: {out[:300]}")
+        return out
+
+    def fetch_main(self) -> None:
+        if not self.fetched:
+            self.git_ok("-C", str(self.root), "fetch", "-q", "origin", "main")
+            self.fetched = True
+
+    def prepare(self, s: Started) -> None:
+        """Create the session's worktree at origin/main and write its hook settings."""
+        self.fetch_main()
+        wt = self.worktree(s.session_id)
+        self.git_ok("-C", str(self.root), "worktree", "add", "-q", "--detach", str(wt), "origin/main")
+        base = install.read_settings(self.root / ".claude" / "settings.local.json")
+        install.write_settings(wt / ".claude" / "settings.local.json",
+                               install.with_hooks(base, hook=self.hook_path()))
+
+    def removable(self, wt: Path) -> bool:
+        """Clean (nothing uncommitted or untracked) and HEAD is on a remote branch."""
+        rc, status = self.git(["-C", str(wt), "status", "--porcelain"])
+        if rc or status:
+            return False
+        rc, remote = self.git(["-C", str(wt), "branch", "-r", "--contains", "HEAD"])
+        return rc == 0 and bool(remote)
+
+    def tidy(self, live: list[Started]) -> list[Path]:
+        """Remove exited sessions' worktrees that hold no unpushed work; keep the rest.
+
+        Only touches `.worktrees/<uuid>` with no live entry, so a worktree someone made
+        by hand, or a session still starting, is never removed."""
+        d = self.root / WORKTREES
+        alive = {e.session_id for e in live}
+        kept, removed = [], False
+        for wt in sorted(d.iterdir()) if d.is_dir() else []:
+            if not wt.is_dir() or not UUID_RE.match(wt.name) or wt.name in alive:
+                continue
+            if self.removable(wt) and self.git(["-C", str(self.root), "worktree", "remove", str(wt)])[0] == 0:
+                removed = True
+            else:
+                kept.append(wt)
+        if removed:
+            self.git(["-C", str(self.root), "worktree", "prune"])
+        self.kept = kept
+        return kept
 
     # ------------------------------------------------------------ up
 
     def command(self, s: Started) -> str:
-        """The shell command a window runs: record the pid, then exec swarm-session unchanged.
+        """The shell command a window runs: record the pid, then exec the worktree's
+        ops/swarm-session, unchanged. It cd's to its own root, so the session runs there.
 
         Run through /bin/bash so `$$` means the same whatever the owner's login shell is;
         both exec's keep that pid, so it ends up being claude's."""
+        wt = self.worktree(s.session_id)
         inner = " ".join([
-            "cd", shlex.quote(str(self.root)), "&&",
+            "cd", shlex.quote(str(wt)), "&&",
             "echo $$ >|", shlex.quote(str(self.pid_file(s.session_id))), "&&",
-            "exec", shlex.quote(str(self.root / "ops" / "swarm-session")), shlex.quote(s.role),
+            "exec", shlex.quote(str(wt / "ops" / "swarm-session")), shlex.quote(s.role),
             "--model", shlex.quote(s.model), "--session-id", s.session_id, shlex.quote(opener(s.role, s.issue)),
         ])
         return "exec /bin/bash -c " + shlex.quote(inner)
@@ -220,13 +303,22 @@ class Launcher:
         """Open one session's window and record it. Returns False if it couldn't start."""
         on = f"  on #{entry.issue}" if entry.issue else ""
         if dry_run:
-            self.out(f"would start: {entry.name}  {entry.model}{on}\n  {self.command(entry)}")
+            self.out(f"would start: {entry.name}  {entry.model}{on}\n"
+                     f"  git worktree add --detach {self.worktree(entry.session_id)} origin/main\n"
+                     f"  {self.command(entry)}")
             return True
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            self.prepare(entry)
+        except (RuntimeError, OSError) as e:
+            self.out(f"failed to start {entry.name}: {e}")
+            return False
         try:
             self.run(self.command(entry))
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             self.out(f"failed to start {entry.name}: {e}")
+            self.git(["-C", str(self.root), "worktree", "remove", "--force",
+                      str(self.worktree(entry.session_id))])   # new and unused: nothing to lose
             return False
         live.append(entry)
         self.save(live)   # after each start, so a later failure doesn't lose it
@@ -271,7 +363,10 @@ class Launcher:
                      f"check its Terminal window")
             return 1
         self.pid_file(s.session_id).unlink(missing_ok=True)
-        self.save([e for e in live if e is not s])
+        rest = [e for e in live if e is not s]
+        self.save(rest)
+        if self.worktree(s.session_id) in self.tidy(rest):
+            self.out(f"worktree kept: {self.worktree(s.session_id)} (uncommitted or unpushed work)")
         if self.heartbeat_stopped(s.session_id):
             self.out(f"stopped: {s.name}; the heartbeat recorded `stopped`")
         else:
@@ -349,8 +444,11 @@ def ls(launcher: Launcher, repo: str, idle_minutes: int) -> int:
     rows = ls_rows(model, launcher.live(), launcher.state, now, g.ago, g.spend.usd)
     if not rows:
         launcher.out("no live sessions")
-        return 0
-    launcher.out(table(["NAME", "ROLE", "MODEL", "ISSUE", "STATUS", "LAST", "SPEND (EST.)", "PROCESS", "SESSION"], rows))
+    else:
+        launcher.out(table(["NAME", "ROLE", "MODEL", "ISSUE", "STATUS", "LAST", "SPEND (EST.)", "PROCESS",
+                            "SESSION"], rows))
+    for wt in launcher.kept:
+        launcher.out(f"worktree kept: {wt} (uncommitted or unpushed work)")
     return 0
 
 
@@ -481,13 +579,6 @@ def model_for(role: str, given: str | None, path: str) -> str:
 
 # ---------------------------------------------------------------- CLI
 
-def hook_installed() -> bool:
-    try:
-        return "heartbeat/hook.py" in HOOK_SETTINGS.read_text()
-    except OSError:
-        return False
-
-
 def main(argv: list[str], launcher: Launcher | None = None) -> int:
     ap = argparse.ArgumentParser(prog="swarm", description="Start, list and stop the swarm in swarm.toml.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -549,9 +640,6 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             except manifest.ManifestError as e:
                 launcher.out(f"swarm up: {e}")
                 return 1
-            if not hook_installed():
-                launcher.out("warning: the heartbeat hook isn't installed, so `swarm ls` won't see "
-                             "these sessions (python3 heartbeat/install.py)")
             return launcher.up(sessions, dry_run=args.dry_run)
         if args.cmd == "ls":
             return ls(launcher, repo, args.idle_minutes)

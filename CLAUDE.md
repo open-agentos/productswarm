@@ -5,7 +5,7 @@ productswarm is built by a swarm of manually started agent sessions. Read `PRODU
 ## Working rules
 
 - Every PR targets `main` and closes exactly one issue. Write `Closes #N` once, for one issue.
-- Never switch branches or leave edits in the shared checkout: other sessions run from it. Do branch work in a `git worktree add` directory, and leave the shared checkout on `main`. Sessions the launcher starts already run in their own worktree (`.worktrees/<session_id>`).
+- Never switch branches or leave edits in the shared checkout: other sessions run from it. Do branch work in a `git worktree add` directory outside the checkout (e.g. a temporary directory), and leave the shared checkout on `main`. Sessions the launcher starts already run in their own worktree (`.worktrees/<session_id>`).
 - You act on GitHub as your role's App (`productswarm-<role>[bot]`), set up by `ops/swarm-session`. Never work around that identity: don't change `GH_TOKEN`, `GH_CONFIG_DIR`, git credential settings, or anything in `ops/`.
 - **Never merge a PR**, and never approve one. Merging is the owner's act alone.
 - Create new issues **unlabelled**. The owner triages them. The one exception is `gov:question`, which the Governance question template applies.
