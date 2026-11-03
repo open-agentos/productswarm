@@ -7,6 +7,10 @@ Python stdlib only (tomllib, 3.11+). Format and location per the owner's answer 
 load() returns one Session per session to start: a [[session]] table with count = 2
 gives two Sessions, numbered 1 and 2 within the role. Every problem in the file is
 collected and raised together in one ManifestError.
+
+An optional [watch] table holds the limits for `swarm watch` (v2, #90), per the owner's
+answer on #88: interval_minutes and max_live, both required if the table is there.
+load_watch() returns them, or None if the manifest has no [watch] table.
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ DEFAULT_PATH = ROOT / "swarm.toml"
 
 REQUIRED = ("role", "count", "model")
 OPTIONAL = ("spend_cap_usd",)
+WATCH_KEYS = ("interval_minutes", "max_live")
 
 
 class ManifestError(ValueError):
@@ -42,6 +47,13 @@ class Session:
     @property
     def name(self) -> str:
         return f"{self.role}-{self.index}"
+
+
+@dataclass(frozen=True)
+class WatchLimits:
+    """How `swarm watch` is limited (#88, option 1). Changing these is a `spend` decision."""
+    interval_minutes: float     # how often it reads GitHub and heartbeat state
+    max_live: int               # most live sessions it may have started at once
 
 
 def _is_number(v) -> bool:
@@ -89,15 +101,40 @@ def _check_entry(i: int, entry, roles_dir: Path, seen: dict[str, int]) -> list[s
     return problems
 
 
+def _check_watch(table) -> list[str]:
+    if not isinstance(table, dict):
+        return ["watch: must be a [watch] table"]
+    problems = [f"watch: unknown key '{k}' (allowed: {', '.join(WATCH_KEYS)})"
+                for k in sorted(set(table) - set(WATCH_KEYS))]
+    problems += [f"watch: missing '{k}'" for k in WATCH_KEYS if k not in table]
+    if "interval_minutes" in table:
+        v = table["interval_minutes"]
+        if not _is_number(v) or not v > 0 or v == float("inf"):
+            problems.append(f"watch: interval_minutes must be a positive number, got {v!r}")
+    if "max_live" in table:
+        v = table["max_live"]
+        if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+            problems.append(f"watch: max_live must be a whole number of at least 1, got {v!r}")
+    return problems
+
+
 def parse(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "roles") -> list[Session]:
     """Validate manifest text and expand it into sessions. Raises ManifestError."""
+    return parse_all(text, path, roles_dir)[0]
+
+
+def parse_all(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "roles"
+              ) -> tuple[list[Session], WatchLimits | None]:
+    """Validate manifest text: its sessions, and its [watch] limits or None. Raises ManifestError."""
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise ManifestError(path, [f"not valid TOML: {e}"]) from None
 
-    problems = [f"unknown top-level key '{k}' (only [[session]] tables are allowed)"
-                for k in sorted(set(data) - {"session"})]
+    problems = [f"unknown top-level key '{k}' (only [[session]] tables and [watch] are allowed)"
+                for k in sorted(set(data) - {"session", "watch"})]
+    if "watch" in data:
+        problems += _check_watch(data["watch"])
     entries = data.get("session")
     if entries is None:
         problems.append("no [[session]] tables")
@@ -120,12 +157,25 @@ def parse(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "roles"
         for n in range(1, entry["count"] + 1):
             sessions.append(Session(role=entry["role"], index=n, model=entry["model"].strip(),
                                     spend_cap_usd=None if cap is None else float(cap)))
-    return sessions
+    w = data.get("watch")
+    limits = None if w is None else WatchLimits(float(w["interval_minutes"]), w["max_live"])
+    return sessions, limits
 
 
 def load(path: Path | str = DEFAULT_PATH, roles_dir: Path | str | None = None) -> list[Session]:
     """Read and validate a manifest file. Roles are checked against roles/ next to the
     repo root unless roles_dir is given. Raises ManifestError."""
+    return load_all(path, roles_dir)[0]
+
+
+def load_watch(path: Path | str = DEFAULT_PATH, roles_dir: Path | str | None = None) -> WatchLimits | None:
+    """The manifest's [watch] limits, or None if it has none. Raises ManifestError."""
+    return load_all(path, roles_dir)[1]
+
+
+def load_all(path: Path | str = DEFAULT_PATH, roles_dir: Path | str | None = None
+             ) -> tuple[list[Session], WatchLimits | None]:
+    """Read and validate a manifest file: (sessions, [watch] limits or None). Raises ManifestError."""
     path = Path(path)
     roles_dir = Path(roles_dir) if roles_dir is not None else ROOT / "roles"
     try:
@@ -134,19 +184,21 @@ def load(path: Path | str = DEFAULT_PATH, roles_dir: Path | str | None = None) -
         raise ManifestError(path, ["file not found"]) from None
     except (OSError, UnicodeDecodeError) as e:
         raise ManifestError(path, [f"can't read it: {e}"]) from None
-    return parse(text, path, roles_dir)
+    return parse_all(text, path, roles_dir)
 
 
 def main(argv: list[str]) -> int:
     path = Path(argv[1]) if len(argv) > 1 else DEFAULT_PATH
     try:
-        sessions = load(path)
+        sessions, limits = load_all(path)
     except ManifestError as e:
         print(f"swarm manifest: {e}", file=sys.stderr)
         return 1
     for s in sessions:
         cap = "no cap" if s.spend_cap_usd is None else f"cap ${s.spend_cap_usd:,.2f}"
         print(f"{s.name}\t{s.model}\t{cap}")
+    if limits:
+        print(f"watch\tevery {limits.interval_minutes:g} min\tat most {limits.max_live} live")
     return 0
 
 

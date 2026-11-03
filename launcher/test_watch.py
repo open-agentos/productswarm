@@ -1,4 +1,5 @@
-"""Tests for launcher/watch.py (`swarm watch --dry-run`, #89). Canned GitHub data only.
+"""Tests for launcher/watch.py (`swarm watch`: --dry-run #89, real starts #90). Canned
+GitHub data only; no test opens a Terminal window or starts Claude Code.
 
 Run: python3 -m unittest discover -s launcher
 """
@@ -8,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -82,14 +84,44 @@ class Scene:
         self.comments = {200: t_comments}
         self.reads = 0
 
+    def data(self):
+        return {"repo": REPO, "issues": self.issues + self.tracking, "comments": self.comments,
+                "prs": self.prs}
+
     def read(self, repo, idle, now):
         self.reads += 1
-        data = {"repo": REPO, "issues": self.issues + self.tracking, "comments": self.comments,
-                "prs": self.prs}
-        model = G.build(data, NOW, dt.timedelta(minutes=idle))
+        model = G.build(self.data(), NOW, dt.timedelta(minutes=idle))
         return watch.World(model=model, issues=self.issues + self.tracking,
                            events={k: list(v) for k, v in self.events.items()},
                            reviewed={k: set(v) for k, v in self.reviewed.items()})
+
+    # The fresh reads `swarm watch` makes before each start (swarm launch's refusal checks).
+    def heartbeat(self, repo, idle, now):
+        return G.build(self.data(), NOW, dt.timedelta(minutes=idle))
+
+    def get_issue(self, repo, n):
+        found = [i for i in self.issues if i["number"] == n]
+        return (found[0] if found else None), list(self.events.get(n, []))
+
+    # The same data as `gh` output, for the test that runs the real readers.
+    def gh(self, argv):
+        if argv[1] == "pr":
+            return json.dumps(self.prs)
+        path = argv[3] if argv[2] == "--paginate" else argv[2]
+        path = path.split(f"repos/{REPO}/", 1)[1].split("?")[0]
+        parts = path.split("/")
+        if path == "issues":
+            items = self.issues + self.tracking if "state=open" in argv[3] else []
+        elif parts[-1] == "comments":
+            items = self.comments.get(int(parts[1]), [])
+        elif parts[-1] == "events":
+            items = self.events.get(int(parts[1]), [])
+        elif parts[-1] == "reviews":
+            items = [{"user": {"login": watch.REVIEWER}, "commit_id": c}
+                     for c in self.reviewed.get(int(parts[1]), set())]
+        else:                                    # issues/N: gh_json, one object
+            return json.dumps(self.get_issue(REPO, int(parts[1]))[0])
+        return "\n".join(json.dumps(i) for i in items)
 
 
 class WatchTest(unittest.TestCase):
@@ -112,8 +144,7 @@ class WatchTest(unittest.TestCase):
         self.assertEqual(self.kinds(first), [("review", "PR #70"), ("record", "#87"), ("answer", "#88"),
                                              ("build", "#49")])
         self.assertEqual(self.lines, [
-            "[review] PR #70 head aaaaaaa not reviewed by the reviewer -> would start a reviewer pass "
-            "(`swarm launch` has no PR form yet; #90)",
+            "[review] PR #70 head aaaaaaa not reviewed by the reviewer -> would start a reviewer pass",
             "[record] #87 gov:ruled by the owner, needs a record (domain governance) -> would start "
             "`launcher/swarm launch docs --issue 87`",
             "[answer] #88 ready by the owner -> would start `launcher/swarm launch planner --issue 88`",
@@ -204,18 +235,269 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(watch.needs_record(question_body(blast="external")), "blast radius external")
 
 
-class CliTest(unittest.TestCase):
-    def test_without_dry_run_refuses_and_names_88(self):
-        lines = []
-        l = swarm.Launcher(Path(tempfile.mkdtemp()), out=lines.append,
-                           run=lambda c: self.fail("started"))
-        self.assertEqual(swarm.main(["watch", "--repo", REPO], l), 1)
-        self.assertIn("#88", lines[0])
+def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = True) -> Path:
+    """A swarm.toml with every role, the given caps, and a [watch] table."""
+    text = ("[watch]\ninterval_minutes = 5\nmax_live = %d\n\n" % max_live) if watch_table else ""
+    for role in sorted(ROLES):
+        text += f'[[session]]\nrole = "{role}"\ncount = 1\nmodel = "m-{role}"\n'
+        if role in caps:
+            text += f"spend_cap_usd = {caps[role]}\n"
+        text += "\n"
+    path = d / "swarm.toml"
+    path.write_text(text)
+    return path
 
-    def test_script_refuses_without_dry_run(self):
-        r = subprocess.run([str(HERE / "swarm"), "watch"], capture_output=True, text=True, timeout=30,
+
+ALL_CAPPED = {r: 10 for r in ROLES}
+
+
+class StartTest(unittest.TestCase):
+    """`swarm watch` without --dry-run (#90)."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        (self.home / "launcher").mkdir()
+        self.fake = Fake(self.home / "launcher")
+        self.lines = []
+        self.l = swarm.Launcher(self.home, run=self.fake.run, proc=self.fake.proc, kill=self.fake.kill,
+                                clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append,
+                                root=self.home / "repo", git=FakeGit())
+        self.scene = Scene()
+        self.manifest(ALL_CAPPED)
+
+    def manifest(self, caps, max_live=10, **kw):
+        self.path = write_manifest(self.home, caps, max_live, **kw)
+
+    def watcher(self):
+        return watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=False, manifest_path=self.path,
+                           read=self.scene.read, get_issue=self.scene.get_issue,
+                           get_heartbeat=self.scene.heartbeat)
+
+    def started(self):
+        return [(e.name, e.role, e.model, e.issue, e.by) for e in self.l.load()]
+
+    def exit(self, name):
+        """The session called `name` exits by itself."""
+        (e,) = [e for e in self.l.load() if e.name == name]
+        self.fake.procs.pop(self.l.pid(e))
+
+    def inbox(self):
+        return swarm.inbox_text([], NOW, G, watch.waiting(self.l))
+
+    def test_each_trigger_starts_one_session_and_a_restart_starts_none(self):
+        done = self.watcher().tick(NOW)
+        self.assertEqual([(t.kind, t.ref) for t in done],
+                         [("review", "PR #70"), ("record", "#87"), ("answer", "#88"), ("build", "#49")])
+        self.assertEqual(self.started(), [
+            ("reviewer-watch", "reviewer", "m-reviewer", None, "watch"),
+            ("docs-issue-87", "docs", "m-docs", 87, "watch"),
+            ("planner-issue-88", "planner", "m-planner", 88, "watch"),
+            ("builder-issue-49", "builder", "m-builder", 49, "watch"),
+        ])
+        self.assertEqual(len(self.fake.commands), 4)
+        self.assertIn("work on issue #49.", self.fake.commands[3])
+        self.assertEqual(self.watcher().tick(NOW), [])              # same process, next check
+        for name in ("reviewer-watch", "docs-issue-87", "planner-issue-88", "builder-issue-49"):
+            self.exit(name)                                          # all stop; nothing is busy now
+        self.assertEqual(self.watcher().tick(NOW), [])              # a restart over the same state
+        self.assertEqual(len(self.fake.commands), 4)
+
+    def test_a_fresh_owner_label_starts_again(self):
+        self.watcher().tick(NOW)
+        self.exit("builder-issue-49")
+        self.scene.events[49] += [ev("ready", eid=20, kind="unlabeled"), ev("ready", eid=21)]
+        self.assertEqual([t.ref for t in self.watcher().tick(NOW)], ["#49"])
+        self.assertEqual(len(self.fake.commands), 5)
+
+    def test_ceiling_holds_then_starts_in_order_when_a_slot_frees(self):
+        self.manifest(ALL_CAPPED, max_live=2)
+        w = self.watcher()
+        self.assertEqual([t.ref for t in w.tick(NOW)], ["PR #70", "#87"])
+        self.assertIn("[answer] #88 ready by the owner -> held: 2 of 2 sessions swarm watch started "
+                      "are live (#88)", self.lines)
+        inbox = self.inbox()
+        self.assertIn("swarm watch is holding", inbox)
+        self.assertIn("- [answer] #88 ready by the owner · held: 2 of 2", inbox)
+        self.assertIn("- [build] #49 ready by the owner · held: 2 of 2", inbox)
+        n = len(self.lines)
+        self.assertEqual(w.tick(NOW), [])                    # still full: nothing new, nothing re-logged
+        self.assertEqual(len(self.lines), n)
+        # Sessions started by hand don't count towards the ceiling.
+        self.l.start(swarm.Started("docs-1", "docs", "m", "by-hand", self.fake.t), self.l.live())
+        self.assertEqual(w.tick(NOW), [])
+        self.exit("docs-issue-87")
+        self.assertEqual([t.ref for t in w.tick(NOW)], ["#88"])     # held longest, in order
+        self.assertNotIn("[answer] #88", self.inbox())
+        self.assertIn("[build] #49", self.inbox())
+        self.exit("reviewer-watch")
+        self.assertEqual([t.ref for t in w.tick(NOW)], ["#49"])
+        self.assertEqual(self.inbox(), "Nothing is waiting on you.")
+        self.assertEqual(len(self.fake.commands), 5)                  # 4 by watch, 1 by hand
+
+    def test_a_role_with_no_cap_is_skipped_and_listed_until_it_has_one(self):
+        self.manifest({r: 10 for r in ROLES if r != "builder"})
+        w = self.watcher()
+        self.assertNotIn("#49", [t.ref for t in w.tick(NOW)])
+        self.assertNotIn("builder", [e.role for e in self.l.load()])
+        self.assertIn("- [build] #49 ready by the owner · skipped: builder has no spend_cap_usd in "
+                      "swarm.toml, and swarm watch starts only capped roles (#88)", self.inbox())
+        self.manifest(ALL_CAPPED)                      # the owner adds a cap; read on the next check
+        self.assertEqual([t.ref for t in w.tick(NOW)], ["#49"])
+
+    def test_refusal_on_fresh_data_is_logged_and_the_trigger_is_done(self):
+        # Between the tick's read and the start, someone starts a session on #49 by hand.
+        t_issue, t_comments = tracking(201, "hand-sid", "builder", 49)
+        real = self.scene.heartbeat
+
+        def fresh(*a):
+            self.scene.tracking.append(t_issue)
+            self.scene.comments[201] = t_comments
+            return real(*a)
+        self.scene.heartbeat = fresh
+        w = self.watcher()
+        self.assertNotIn("#49", [e.issue for e in self.l.load()])
+        w.tick(NOW)
+        self.assertNotIn(49, [e.issue for e in self.l.load()])
+        self.assertTrue(any(x.startswith("[build] #49 ready by the owner -> refused: #49 already has a "
+                                         "live session: builder (active, session hand-sid)")
+                            for x in self.lines), self.lines)
+        self.scene.tracking.remove(t_issue)                   # that session stops...
+        self.scene.heartbeat = real
+        self.assertEqual(w.tick(NOW), [])                     # ...and the trigger stays done
+
+    def test_label_changed_before_the_start_is_refused(self):
+        # The tick saw the owner's `ready`; by the fresh re-check, a bot has re-added it.
+        real = self.scene.get_issue
+
+        def fresh(repo, n):
+            issue, events = real(repo, n)
+            return issue, events + ([ev("ready", "productswarm-planner[bot]", eid=30)] if n == 49 else [])
+        self.scene.get_issue = fresh
+        self.watcher().tick(NOW)
+        self.assertNotIn(49, [e.issue for e in self.l.load()])
+        self.assertTrue(any("#49's `ready` label was added by productswarm-planner[bot]" in x
+                            for x in self.lines), self.lines)
+
+    def test_record_rechecks_gov_ruled_not_ready(self):
+        self.watcher().tick(NOW)
+        self.assertIn(("docs-issue-87", "docs", "m-docs", 87, "watch"), self.started())
+
+    def test_one_reviewer_pass_covers_every_pr_and_waits_for_a_live_reviewer(self):
+        self.scene.prs.append(pr(72, SHA2))
+        self.scene.reviewed[72] = set()
+        t_issue, t_comments = tracking(202, "rev-sid", "reviewer", None)
+        self.scene.tracking.append(t_issue)
+        self.scene.comments[202] = t_comments
+        w = self.watcher()
+        self.assertEqual([t.kind for t in w.tick(NOW)], ["record", "answer", "build"])   # reviewer live
+        self.scene.tracking.remove(t_issue)                                               # it stops
+        self.assertEqual([t.ref for t in w.tick(NOW)], ["PR #70", "PR #72"])
+        self.assertEqual([e.name for e in self.l.load() if e.role == "reviewer"], ["reviewer-watch"])
+        self.assertIn("[review] PR #72 head bbbbbbb not reviewed by the reviewer -> covered by "
+                      "reviewer-watch", self.lines)
+
+    def test_unknown_raised_by_is_logged_once_and_done(self):
+        self.scene.issues[3]["body"] = question_body(raised="someone, on #3")
+        w = self.watcher()
+        w.tick(NOW)
+        self.assertNotIn(88, [e.issue for e in self.l.load()])
+        self.assertEqual(sum("skipped: \"Raised by\" names no known role" in x for x in self.lines), 1)
+        w.tick(NOW)
+        self.assertEqual(sum("skipped: \"Raised by\" names no known role" in x for x in self.lines), 1)
+
+    def test_a_failed_start_is_held_and_retried(self):
+        self.fake.fail_for = {"builder"}
+        w = self.watcher()
+        w.tick(NOW)
+        self.assertIn("failed to start", self.inbox())
+        self.fake.fail_for = set()
+        self.assertEqual([t.ref for t in w.tick(NOW)], ["#49"])
+
+    def test_bad_manifest_starts_nothing_and_the_loop_goes_on(self):
+        self.manifest(ALL_CAPPED, watch_table=False)
+        self.watcher().run(1, ticks=2, sleep=lambda s: None)
+        self.assertEqual(self.fake.commands, [])
+        self.assertEqual(sum("has no [watch] table; starting nothing (#88)" in x for x in self.lines), 2)
+
+    def test_ls_shows_sessions_started_by_watch(self):
+        self.watcher().tick(NOW)
+        model = self.scene.heartbeat(REPO, 15, NOW)
+        rows = swarm.ls_rows(model, self.l.live(), self.l.state, NOW, lambda t, n: "now")
+        self.assertIn(["builder-issue-49", "builder", "m-builder", "-", "no heartbeat yet", "-", "-",
+                       "running, by watch", self.l.load()[3].session_id], rows)
+
+    def test_never_signals_and_only_reads_github(self):
+        """The real readers (gather, gh_issue, heartbeat) over a fake `gh`: every call is a read."""
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, self.scene.gh(argv), "")
+        fake_sub = types.SimpleNamespace(run=run, SubprocessError=subprocess.SubprocessError)
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=False, manifest_path=self.path)
+        with mock.patch.object(G, "subprocess", fake_sub):
+            w.run(1, ticks=3, sleep=lambda s: None)
+            self.exit("builder-issue-49")
+            w.run(1, ticks=1, sleep=lambda s: None)
+        self.assertEqual(len(self.fake.commands), 4)            # it did start sessions
+        self.assertEqual(self.fake.signals, [])
+        self.assertTrue(calls)
+        writes = {"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"}
+        for argv in calls:
+            self.assertEqual(argv[0], "gh")
+            if argv[1] == "api":
+                self.assertFalse(writes & set(argv), argv)
+            else:
+                self.assertEqual(argv[1:3], ["pr", "list"], argv)
+
+
+class ManifestWatchTest(unittest.TestCase):
+    def test_repo_manifest_has_the_limits_from_88(self):
+        import manifest
+        self.assertEqual(manifest.load_watch(), manifest.WatchLimits(interval_minutes=5, max_live=2))
+
+    def test_bad_watch_table_lists_every_problem(self):
+        import manifest
+        text = '[watch]\ninterval_minutes = 0\nmax_live = 1.5\nceiling = 3\n\n' \
+               '[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n'
+        with self.assertRaises(manifest.ManifestError) as c:
+            manifest.parse_all(text)
+        self.assertEqual(c.exception.problems, [
+            "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live)",
+            "watch: interval_minutes must be a positive number, got 0",
+            "watch: max_live must be a whole number of at least 1, got 1.5"])
+        with self.assertRaises(manifest.ManifestError) as c:
+            manifest.parse_all('[watch]\nmax_live = 2\n[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n')
+        self.assertEqual(c.exception.problems, ["watch: missing 'interval_minutes'"])
+
+    def test_no_watch_table_is_fine_for_up(self):
+        import manifest
+        sessions, limits = manifest.parse_all('[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n')
+        self.assertIsNone(limits)
+        self.assertEqual(len(sessions), 1)
+
+
+class CliTest(unittest.TestCase):
+    def setUp(self):
+        self.lines = []
+        self.l = swarm.Launcher(Path(tempfile.mkdtemp()), out=self.lines.append,
+                                run=lambda c: self.fail("started"))
+
+    def test_interval_flag_is_for_dry_run_only(self):
+        self.assertEqual(swarm.main(["watch", "--interval", "1", "--repo", REPO], self.l), 2)
+        self.assertIn("interval_minutes in swarm.toml", self.lines[0])
+
+    def test_without_a_watch_table_refuses_and_names_88(self):
+        path = write_manifest(Path(tempfile.mkdtemp()), ALL_CAPPED, watch_table=False)
+        self.assertEqual(swarm.main(["watch", "--repo", REPO, "--manifest", str(path)], self.l), 1)
+        self.assertIn("no [watch] table", self.lines[0])
+        self.assertIn("#88", self.lines[0])
+
+    def test_script_refuses_interval_without_dry_run(self):
+        r = subprocess.run([str(HERE / "swarm"), "watch", "--interval", "1", "--repo", REPO],
+                           capture_output=True, text=True, timeout=30,
                            env={**os.environ, "PRODUCTSWARM_HOME": tempfile.mkdtemp()})
-        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.returncode, 2)
         self.assertIn("#88", r.stdout + r.stderr)
 
 
