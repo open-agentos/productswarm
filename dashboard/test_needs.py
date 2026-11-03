@@ -158,6 +158,58 @@ class ReviewerStateTest(unittest.TestCase):
         self.assertEqual(m["prs"][0]["reviewer"]["at_head"], None)
 
 
+def ttl_body(ttl):
+    return f"### Domain\n\narchitecture\n\n### Time to live\n\n{ttl}\n\n### Suggested shape\n\nadvice\n"
+
+
+class PastTimeToLiveTest(unittest.TestCase):
+    """#210 (v3 F1): flag a question whose time to live has passed. NOW is 2026-11-02."""
+
+    def model(self):
+        return build([
+            question(60, "GOV-Q: future", 900, body=ttl_body("2026-11-09")),
+            question(61, "GOV-Q: today", 800, body=ttl_body("2026-11-02")),
+            question(62, "GOV-Q: past recently", 700, body=ttl_body("2026-11-01")),
+            question(63, "GOV-Q: past long ago", 10, body=ttl_body("2026-10-20 (with a note)"),
+                     labels=["gov:lapsed"]),
+            question(64, "GOV-Q: not a date", 600, body=ttl_body("when F ships")),
+            question(65, "GOV-Q: missing", 500, body="no template"),
+            question(66, "GOV-Q: impossible date", 400, body=ttl_body("2026-13-40")),
+            tracking(50, "blocked"),
+        ], {50: [comment([ev("blocked", "blocked", 5, gov_question=60)])]})
+
+    def test_details(self):
+        items = {i["ref"]: i for i in g.needs_you(self.model())}
+        self.assertEqual(items["#62"]["detail"], "past time to live (2026-11-01)")
+        self.assertEqual(items["#63"]["detail"], "past time to live (2026-10-20), gov:lapsed")
+        self.assertEqual(items["#61"]["detail"], "time to live 2026-11-02")
+        self.assertEqual(items["#64"]["detail"], "time to live when F ships")
+        self.assertEqual(items["#65"]["detail"], "no time to live given")
+        self.assertEqual(items["#66"]["detail"], "time to live 2026-13-40")
+
+    def test_order(self):
+        items = g.needs_you(self.model())
+        self.assertEqual([(i["kind"], i["ref"]) for i in items], [
+            ("blocked", "#60"),                         # blocked still comes first
+            ("question", "#63"), ("question", "#62"),   # past time to live, oldest first
+            ("question", "#61"), ("question", "#64"),   # then the rest, longest waiting first
+            ("question", "#65"), ("question", "#66"),
+        ])
+
+    def test_shown_on_page_and_line(self):
+        m = self.model()
+        item = next(i for i in g.needs_you(m) if i["ref"] == "#62")
+        line = g.needs_line(item, NOW)
+        self.assertTrue(line.startswith("[gov question] #62 GOV-Q: past recently · past time to live (2026-11-01)"))
+        self.assertIn(html.escape(line), g.render(m))
+
+    def test_ttl_date(self):
+        self.assertEqual(g.ttl_date("2026-11-30"), g.dt.date(2026, 11, 30))
+        self.assertEqual(g.ttl_date("2026-11-30 (the rulings' review date)"), g.dt.date(2026, 11, 30))
+        for text in (None, "", "soon", "2026-11-30x", "2026-02-30"):
+            self.assertIsNone(g.ttl_date(text), text)
+
+
 class PageTest(unittest.TestCase):
     def test_first_section_matches_the_list(self):
         m = model()

@@ -301,6 +301,19 @@ def time_to_live(body: str | None) -> str | None:
     return m.group(1) if m and m.group(1) != "_No response_" else None
 
 
+TTL_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})(?:\s|$)")
+
+
+def ttl_date(ttl: str | None) -> dt.date | None:
+    """The date a 'Time to live' answer starts with, or None if it doesn't start with one.
+    A note after the date ("2026-11-30 (the rulings' review date)") is allowed."""
+    m = TTL_DATE_RE.match(ttl or "")
+    try:
+        return dt.date.fromisoformat(m.group(1)) if m else None
+    except ValueError:
+        return None
+
+
 # ---------------------------------------------------------------- needs you (L5)
 
 NEEDS_KINDS = ("blocked", "question", "pr", "idle", "over_cap")   # most urgent first
@@ -311,8 +324,10 @@ def needs_you(m: dict) -> list[dict]:
     dashboard's first section and `swarm inbox`, so they can't disagree.
 
     Reads only build()'s model, which comes from public GitHub data (GOV-0002, GOV-0004).
-    Within a kind, the longest waiting comes first. Each item: kind, ref, title, url,
-    detail, since, and for session items session_url.
+    Within a kind, the longest waiting comes first, except that questions past their time
+    to live come first among questions (oldest time to live first). Each item: kind, ref,
+    title, url, detail, since, for session items session_url, and for a question past its
+    time to live past_ttl.
     """
     repo, now, titles = m["repo"], m["now"], m["issue_titles"]
 
@@ -333,10 +348,15 @@ def needs_you(m: dict) -> list[dict]:
                           "since": s["last_ts"]})
     for q in m["gov"]:
         if not q["waiting"]:
-            bits = [f"time to live {q['ttl']}" if q["ttl"] else "no time to live given"]
+            # Only shows a lapse; the owner alone adds gov:lapsed (GOV-0006).
+            d = ttl_date(q["ttl"])
+            past = d if d and d < now.date() else None
+            bits = [f"past time to live ({past})" if past
+                    else f"time to live {q['ttl']}" if q["ttl"] else "no time to live given"]
             bits += q["labels"]
             items.append({"kind": "question", "ref": f"#{q['number']}", "title": q["title"],
-                          "url": q["url"], "detail": ", ".join(bits), "since": q["created_ts"]})
+                          "url": q["url"], "detail": ", ".join(bits), "since": q["created_ts"],
+                          **({"past_ttl": past} if past else {})})
     for p in m["prs"]:
         if not p["draft"]:
             state = (p.get("needs_owner")
@@ -363,9 +383,11 @@ def needs_you(m: dict) -> list[dict]:
                                     + (f", on #{s['issue']}" if s["issue"] else "")
                                     + "; warn only: swarm stop ends it (GOV-0008)",
                           "since": s["last_ts"], "over": s["cost"] / s["cap"]})
-    far = dt.datetime.max.replace(tzinfo=dt.timezone.utc)
-    # Over-cap sessions: furthest over first. Everything else: longest waiting first.
-    items.sort(key=lambda i: (NEEDS_KINDS.index(i["kind"]), -i.get("over", 0), i["since"] or far))
+    far, far_date = dt.datetime.max.replace(tzinfo=dt.timezone.utc), dt.date.max
+    # Over-cap sessions: furthest over first. Questions past their time to live: oldest
+    # time to live first, ahead of other questions. Everything else: longest waiting first.
+    items.sort(key=lambda i: (NEEDS_KINDS.index(i["kind"]), -i.get("over", 0),
+                              i.get("past_ttl", far_date), i["since"] or far))
     return items
 
 
