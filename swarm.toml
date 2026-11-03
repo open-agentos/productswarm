@@ -11,6 +11,16 @@
 # Any other key is an error. Changing a role's model changes cost per run: that is a
 # `spend` decision for the owner.
 
+# Limits on the sessions `swarm watch` starts (v2, #90), per GOV-0010 (#88)
+# (option 1). Sessions you start with `swarm up` or `swarm launch` don't count.
+#   interval_minutes  how often swarm watch reads GitHub and heartbeat state
+#   max_live          the most live sessions swarm watch may have started at once
+# swarm watch also starts only roles that set spend_cap_usd below, and lists any other
+# trigger as skipped in `swarm inbox`. Changing any of this is a `spend` decision.
+[watch]
+interval_minutes = 5
+max_live = 2
+
 [[session]]
 role = "planner"
 count = 1

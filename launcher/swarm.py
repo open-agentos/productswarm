@@ -7,7 +7,9 @@
     launcher/swarm launch <role> --issue N [--model M] [--force] [--dry-run]
                                     start one session on issue N (L3)
     launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
-    launcher/swarm watch --dry-run  print what the v2 wake-up loop would start (#89; watch.py)
+    launcher/swarm watch [--dry-run]
+                                    the v2 wake-up loop: start sessions on triggers, within
+                                    the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
 unchanged, in a new Terminal window: the owner's answer on #43. That runtime is kept
@@ -25,6 +27,7 @@ origin; otherwise it is kept and `swarm ls` lists it. Work is never deleted.
 What the launcher started is recorded locally, never on GitHub:
     ~/.productswarm/launcher/sessions.json   name, role, model, session id, start time
     ~/.productswarm/launcher/<id>.pid        written by the window's shell before exec
+    ~/.productswarm/launcher/watch.json      triggers `swarm watch` acted on or is holding
 (PRODUCTSWARM_HOME moves ~/.productswarm, as for the heartbeat.)
 
 `stop` sends SIGTERM. Claude Code then runs its SessionEnd hook, so the heartbeat
@@ -119,11 +122,12 @@ class Started:
     session_id: str
     started: float          # unix time the window was opened
     issue: int | None = None  # set by `swarm launch --issue`
+    by: str | None = None     # "watch" if `swarm watch` started it (counts toward its ceiling)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Started":
         return cls(**{k: d[k] for k in ("name", "role", "model", "session_id", "started")},
-                   issue=d.get("issue"))
+                   issue=d.get("issue"), by=d.get("by"))
 
 
 @dataclass
@@ -385,6 +389,10 @@ def spend_cell(s: dict, usd: Callable) -> str:
     return cell
 
 
+def process_cell(e: Started, local_state: Callable[[Started], str]) -> str:
+    return local_state(e) + (", by watch" if e.by == "watch" else "")
+
+
 def ls_rows(model: dict, started: list[Started], local_state: Callable[[Started], str],
             now: dt.datetime, ago: Callable, usd: Callable = lambda x: "-" if x is None else f"${x:,.2f}"
             ) -> list[list[str]]:
@@ -403,11 +411,11 @@ def ls_rows(model: dict, started: list[Started], local_state: Callable[[Started]
                      f"#{s['issue']}" if s["issue"] else "-",
                      s["status"] + (f" on #{s['gov_question']}" if s["gov_question"] else ""),
                      ago(s["last_ts"], now), spend_cell(s, usd),
-                     local_state(e) if e else "not launcher", s["session_id"]])
+                     process_cell(e, local_state) if e else "not launcher", s["session_id"]])
     for e in started:
         if e.session_id not in seen:
-            rows.append([e.name, e.role, e.model, "-", "no heartbeat yet", "-", "-", local_state(e),
-                         e.session_id])
+            rows.append([e.name, e.role, e.model, "-", "no heartbeat yet", "-", "-",
+                         process_cell(e, local_state), e.session_id])
     return rows
 
 
@@ -457,14 +465,24 @@ def inbox(launcher: Launcher, repo: str, idle_minutes: int) -> int:
     g = dashboard()
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     items = g.needs_you(heartbeat(repo, idle_minutes, now))
-    launcher.out(inbox_text(items, now, g))
+    import watch
+    launcher.out(inbox_text(items, now, g, watch.waiting(launcher)))
     return 0
 
 
-def inbox_text(items: list[dict], now: dt.datetime, g) -> str:
-    if not items:
+def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None) -> str:
+    """The needs-you list, then any triggers `swarm watch` is holding or skipping (#90).
+
+    held is watch.waiting(): (when swarm watch last checked, its waiting triggers). Those
+    come from local state, not GitHub, so the dashboard doesn't show them."""
+    checked, waiting = held or (None, [])
+    if not items and not waiting:
         return g.NEEDS_EMPTY
-    return "\n".join(f"{n}. {g.needs_line(i, now)}\n   {i['url']}" for n, i in enumerate(items, 1))
+    out = [f"{n}. {g.needs_line(i, now)}\n   {i['url']}" for n, i in enumerate(items, 1)]
+    if waiting:
+        out.append(f"\nswarm watch is holding (last check {g.ago(checked, now)}):")
+        out += [f"- [{w['kind']}] {w['ref']} {w['why']} · {w['reason']}" for w in waiting]
+    return "\n".join(out).lstrip("\n")
 
 
 # ---------------------------------------------------------------- launch (L3)
@@ -488,14 +506,12 @@ def label_event(events: list[dict], name: str) -> dict | None:
     return labeled[-1] if labeled else None
 
 
-def ready_by(events: list[dict]) -> str | None:
-    """Who added `ready` most recently (GOV-0006: the most recent `labeled` event for it)."""
-    e = label_event(events, "ready")
-    return (e.get("actor") or {}).get("login") if e else None
+def issue_refusals(n: int, issue: dict | None, events: list[dict], owner: str,
+                   label: str = "ready") -> list[str]:
+    """Reasons not to start a session on issue n. --force overrides none of these.
 
-
-def issue_refusals(n: int, issue: dict | None, events: list[dict], owner: str) -> list[str]:
-    """Reasons not to start a session on issue n. --force overrides none of these."""
+    `swarm launch` always checks `ready`. `swarm watch` checks `gov:ruled` instead when it
+    starts docs on a question that needs a record (GOV-0007)."""
     if issue is None:
         return [f"#{n} doesn't exist"]
     if "pull_request" in issue:
@@ -503,12 +519,13 @@ def issue_refusals(n: int, issue: dict | None, events: list[dict], owner: str) -
     if issue.get("state") != "open":
         return [f"#{n} is closed"]
     labels = {lb.get("name") for lb in issue.get("labels") or []}
-    if "ready" not in labels:
-        return [f"#{n} isn't labelled `ready`; the launcher starts sessions only on `ready` "
+    if label not in labels:
+        return [f"#{n} isn't labelled `{label}`; the launcher starts sessions only on `{label}` "
                 f"issues (per GOV-0006)"]
-    actor = ready_by(events)
+    e = label_event(events, label)
+    actor = (e.get("actor") or {}).get("login") if e else None
     if actor != owner:
-        return [f"#{n}'s `ready` label was added by {actor or 'nobody we can see'}, not @{owner}, "
+        return [f"#{n}'s `{label}` label was added by {actor or 'nobody we can see'}, not @{owner}, "
                 f"so it doesn't count (per GOV-0006)"]
     return []
 
@@ -603,19 +620,20 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_launch.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_launch.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_launch.add_argument("--idle-minutes", type=int, default=15)
-    p_watch = sub.add_parser("watch", help="print what the wake-up loop would start (--dry-run only)")
+    p_watch = sub.add_parser("watch", help="start sessions on triggers, within swarm.toml's [watch] limits")
     p_watch.add_argument("--dry-run", action="store_true", help="print triggers; start nothing")
     p_watch.add_argument("--interval", type=float, default=None,
-                         help="minutes between checks (default: 5, until #88 sets one)")
+                         help="--dry-run only: minutes between checks (default: swarm.toml's)")
+    p_watch.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_watch.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_watch.add_argument("--idle-minutes", type=int, default=15)
     args = ap.parse_args(argv)
 
     launcher = launcher or Launcher(home())
-    if args.cmd == "watch" and not args.dry_run:
-        launcher.out("swarm watch: refused: starting sessions waits on the spend limits in #88 "
-                     "(W2, #90); use --dry-run")
-        return 1
+    if args.cmd == "watch" and not args.dry_run and args.interval is not None:
+        launcher.out("swarm watch: --interval works only with --dry-run; the interval for real "
+                     "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")
+        return 2
     repo = None
     if args.cmd in ("ls", "launch", "inbox", "watch"):
         repo = args.repo or dashboard().default_repo()
@@ -647,9 +665,20 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return inbox(launcher, repo, args.idle_minutes)
         if args.cmd == "watch":
             import watch
+            try:
+                limits = manifest.load_watch(args.manifest)
+            except manifest.ManifestError as e:
+                launcher.out(f"swarm watch: {e}")
+                return 1
+            if limits is None and not args.dry_run:
+                launcher.out(f"swarm watch: refused: {args.manifest} has no [watch] table, so there "
+                             f"are no limits to start sessions within (GOV-0010); use --dry-run")
+                return 1
             w = watch.Watch(launcher, repo, owner_login(), watch.roles_in(launcher.root),
-                            idle_minutes=args.idle_minutes)
-            return w.run(args.interval or watch.DEFAULT_INTERVAL)
+                            idle_minutes=args.idle_minutes, dry_run=args.dry_run,
+                            manifest_path=Path(args.manifest))
+            interval = args.interval or (limits.interval_minutes if limits else watch.DEFAULT_INTERVAL)
+            return w.run(interval)
         return launcher.stop(args.session)
     except RuntimeError as e:   # GitHub unreachable, or an unreadable state file
         launcher.out(f"swarm {args.cmd}: {e}")
