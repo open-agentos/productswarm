@@ -8,6 +8,7 @@
                                     start one session on issue N (L3); with --pr, it
                                     responds to requested changes on PR M (GOV-0011)
     launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
+    launcher/swarm cost             cost per PR of the runs swarm watch recorded (#176; local only)
     launcher/swarm watch [--dry-run]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
@@ -566,6 +567,16 @@ def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None
     return "\n".join(out).lstrip("\n")
 
 
+def cost(launcher: Launcher, repo: str, get_prs: Callable | None = None) -> int:
+    """`swarm cost` (#176): the runs in watch.json, costed per PR. Only prints: no cost
+    goes to GitHub or the repo (GOV-0002, GOV-0003, GOV-0004, GOV-0014)."""
+    import watch
+    runs = watch.runs(launcher)
+    prs = (get_prs or watch.gh_prs)(repo) if runs else []
+    launcher.out(watch.cost_text(runs, prs))
+    return 0
+
+
 # ---------------------------------------------------------------- launch (L3)
 
 JURISDICTIONS = ROOT / "governance" / "jurisdictions.yml"
@@ -692,6 +703,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_inbox = sub.add_parser("inbox", help="what's waiting on the owner, most urgent first")
     p_inbox.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_inbox.add_argument("--idle-minutes", type=int, default=15)
+    p_cost = sub.add_parser("cost", help="cost per PR of the runs swarm watch recorded (local only)")
+    p_cost.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
     p_launch.add_argument("role")
     p_launch.add_argument("--issue", type=int, required=True, help="the issue to work on")
@@ -719,7 +732,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                      "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")
         return 2
     repo = None
-    if args.cmd in ("ls", "launch", "inbox", "watch"):
+    if args.cmd in ("ls", "launch", "inbox", "watch", "cost"):
         repo = args.repo or dashboard().default_repo()
         if not repo:
             launcher.out(f"swarm {args.cmd}: can't tell the repo; pass --repo owner/name")
@@ -747,6 +760,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return ls(launcher, repo, args.idle_minutes)
         if args.cmd == "inbox":
             return inbox(launcher, repo, args.idle_minutes)
+        if args.cmd == "cost":
+            return cost(launcher, repo)
         if args.cmd == "watch":
             import watch
             try:

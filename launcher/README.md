@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
 
 ## swarm up / ls / stop
 
@@ -87,6 +87,39 @@ Nothing new is posted to GitHub. What the launcher started is recorded under `~/
 - `<session-id>.result.json` is a headless run's output (see "Headless runs" below). Its first line is `ops/swarm-session`'s banner (`swarm-session: <role> as …`), and its last line is the JSON result from `claude -p --output-format json`.
 
 A PID counts only while that process's command line still contains `--session-id <its id>`. A reused PID is never mistaken for a session, and is never sent a signal. If a session exits by itself, `up` and `ls` remove it from the state file.
+
+## swarm cost: cost per PR (local only)
+
+```bash
+launcher/swarm cost [--repo owner/name]
+```
+
+It reads the `runs` that `swarm watch` recorded in `watch.json` (see "How each run ended" below) and adds up each run's `cost_usd` by the PR the run served (#176):
+
+- `[review]` and `[respond]` runs count towards their trigger's PR.
+- `[build]`, `[record]` and `[answer]` runs count towards the PR that closes their issue. If more than one PR closes it, a merged PR wins, then an open one, then a closed one. If no PR closes it yet, the run gets its own `#N (no PR)` row.
+
+For each PR it prints the number, whether it is merged, open or closed, the number of runs, their total cost and how many runs have no cost recorded. A run has no cost if it is still running or left no result. Then it prints the total, the dates the runs cover, and the PRs merged in that time that have no run recorded:
+
+```
+PR            STATE   RUNS  COST (EST.)  NO COST
+PR #70        merged  3     $6.50        0
+PR #72        open    2     -            2
+#90 (no PR)   -       1     $3.00        0
+
+total: $9.50 over 6 runs, runs started 2026-11-01 to 2026-11-03; 2 runs with no cost recorded (still running, or no result)
+1 PR merged since 2026-11-01 has no run recorded: #80
+```
+
+Its only GitHub call is a read: `gh pr list --state all`, to find each PR's state and the issues it closes.
+
+Limits. These are stated in the output too, and this command doesn't fix them:
+
+- **Only loop-started runs have a cost.** Sessions you start with `swarm up` or `swarm launch` have none, because the heartbeat's `cost_usd` is always null. A PR they worked on shows up only in the "merged … no run recorded" line, or with fewer runs than it really took.
+- **`watch.json` keeps runs for 7 days** (`watch.RUNS_DAYS`). Older runs are gone, so run `swarm cost` within a week of the work you want costed.
+- **The cost is Claude Code's local estimate** (`total_cost_usd`).
+
+**It stays local.** `swarm cost` only prints. Nothing is written to GitHub or the repo, and no cost figure goes into `evals/` or a PR. GOV-0014 keeps run costs local, and GOV-0002, GOV-0003 and GOV-0004 govern what reaches GitHub. Publishing cost would need a `security` question.
 
 ## swarm watch: the wake-up loop
 
