@@ -1,4 +1,5 @@
-"""swarm watch: the v2 wake-up loop (GOV-0009). W1 (#89) is --dry-run; W2 (#90) starts.
+"""swarm watch: the v2 wake-up loop (GOV-0009). W1 (#89) is --dry-run; W2 (#90) starts;
+#113 adds GOV-0011's [respond] trigger.
 
     launcher/swarm watch                          start sessions, within swarm.toml's [watch]
     launcher/swarm watch --dry-run [--interval MINUTES]   print what it would start
@@ -14,10 +15,17 @@ out each trigger below. --dry-run prints them and starts nothing.
 | record | gov:question whose most recent `gov:ruled` was added by the owner, that | docs on the question |
 |        | needs a record (GOV-0007), with no open PR closing it                   |                      |
 | answer | gov:question whose most recent `ready` was added by the owner           | its "Raised by" role |
+| respond| open, non-draft PR whose latest reviewer review at its head is          | builder on the PR    |
+|        | CHANGES_REQUESTED, with Authority not `fail`, for at most 2 rounds      | (GOV-0011)           |
+
+[respond] counts the reviewer's CHANGES_REQUESTED reviews on the PR from GitHub's review
+history, so the count holds across restarts. A third request starts nothing, and an
+Authority: fail review at the head starts nothing either: `needs_you()` lists both PRs
+as needing the owner. A PR that doesn't close exactly one issue is skipped with a reason.
 
 An issue or question with a live session on it prints nothing (`swarm launch`'s refusal
 rule), so it can fire later, once that session has stopped. Each trigger has an identity,
-which is the PR head SHA or the id of the owner's label event. A trigger prints once per
+which is the PR head SHA (for [review] and [respond]) or the id of the owner's label event. A trigger prints once per
 identity, so a new push or a fresh owner label is a new trigger. In dry-run the memory
 lives only in the process, and nothing is written to disk.
 
@@ -59,7 +67,7 @@ from typing import Callable
 import manifest
 import swarm
 
-REVIEWER = "productswarm-reviewer[bot]"
+REVIEWER = swarm.dashboard().REVIEWER
 DEFAULT_INTERVAL = 5          # minutes, for --dry-run when swarm.toml has no [watch] table
 STATE_FILE = "watch.json"     # in the launcher's state directory
 REF_RE = re.compile(r"#(\d+)")
@@ -68,25 +76,23 @@ REF_RE = re.compile(r"#(\d+)")
 @dataclass(frozen=True)
 class Trigger:
     key: str                  # identity: a new key is a new trigger
-    kind: str                 # review | build | record | answer
+    kind: str                 # review | build | record | answer | respond
     ref: str                  # "PR #12" or "#49"
     why: str
     role: str | None = None
     command: str | None = None
     skipped: str | None = None
+    issue: int | None = None  # the issue the session works on (none for a reviewer pass)
+    pr: int | None = None     # [respond]: the PR the builder responds on
 
     def line(self) -> str:
         if self.skipped:
             return f"[{self.kind}] {self.ref} {self.why} -> skipped: {self.skipped}"
         return f"[{self.kind}] {self.ref} {self.why} -> would start {self.command}"
 
-    @property
-    def issue(self) -> int | None:
-        return None if self.kind == "review" else int(self.ref.lstrip("#"))
 
-
-def launch_cmd(role: str, n: int) -> str:
-    return f"`launcher/swarm launch {role} --issue {n}`"
+def launch_cmd(role: str, n: int, pr: int | None = None) -> str:
+    return f"`launcher/swarm launch {role} --issue {n}" + (f" --pr {pr}`" if pr else "`")
 
 
 # ---------------------------------------------------------------- the template body
@@ -157,18 +163,23 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         return bool(swarm.holders(n, m, started))
 
     reviewing = reviewers(m, started)
+    prs = {p["number"]: p for p in m["prs"]}
 
-    # Reviews: the needs-you PR list is the open non-draft PRs.
+    # Reviews and responses: the needs-you PR list is the open non-draft PRs.
     for it in items:
         if it["kind"] != "pr":
             continue
         n = int(REF_RE.search(it["ref"]).group(1))
         head = heads.get(n)
-        if not head or head in w.reviewed.get(n, set()) or reviewing:
+        if not head:
             continue
-        out.append(Trigger(key=f"review:{n}:{head}", kind="review", ref=f"PR #{n}",
-                           why=f"head {head[:7]} not reviewed by the reviewer", role="reviewer",
-                           command="a reviewer pass"))
+        if head not in w.reviewed.get(n, set()) and not reviewing:
+            out.append(Trigger(key=f"review:{n}:{head}", kind="review", ref=f"PR #{n}",
+                               why=f"head {head[:7]} not reviewed by the reviewer", role="reviewer",
+                               command="a reviewer pass"))
+        t = respond(prs[n], busy)
+        if t:
+            out.append(t)
 
     # Questions: the needs-you list holds every open gov:question, as `question` or `blocked`.
     questions = []
@@ -186,14 +197,14 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         if ruled and why_record and n not in closing and not busy(n):
             out.append(Trigger(key=f"record:{n}:{ruled.get('id')}", kind="record", ref=f"#{n}",
                                why=f"gov:ruled by the owner, needs a record ({why_record})",
-                               role="docs", command=launch_cmd("docs", n)))
+                               role="docs", command=launch_cmd("docs", n), issue=n))
         ready = owner_label(events, "ready", owner) if "ready" in labels else None
         if ready and not busy(n):
             role, why_not = raised_by(body, roles)
             out.append(Trigger(key=f"answer:{n}:{ready.get('id')}", kind="answer", ref=f"#{n}",
                                why="ready by the owner", role=role,
                                command=launch_cmd(role, n) if role else None,
-                               skipped=None if role else why_not))
+                               skipped=None if role else why_not, issue=n))
 
     # Builds: ready, open, non-question, non-tracking issues with no open PR closing them
     # (that work is done and waits on the owner's merge).
@@ -207,8 +218,29 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         if ready and not busy(n):
             out.append(Trigger(key=f"build:{n}:{ready.get('id')}", kind="build", ref=f"#{n}",
                                why="ready by the owner", role="builder",
-                               command=launch_cmd("builder", n)))
+                               command=launch_cmd("builder", n), issue=n))
     return out
+
+
+def respond(p: dict, busy: Callable[[int], bool]) -> Trigger | None:
+    """GOV-0011's [respond] trigger for one open, non-draft PR, or None.
+
+    Oversteps and a third request are the owner's: needs_you() lists those PRs instead."""
+    g = swarm.dashboard()
+    r, n, head = p["reviewer"], p["number"], p["head"]
+    if r["at_head"] != g.CHANGES or p["needs_owner"]:
+        return None
+    key = f"respond:{n}:{head}"
+    why = f"changes requested at {head[:7]} (round {r['changes_requested']} of {g.ROUNDS})"
+    closes = [c["number"] for c in p["closes"]]
+    if len(closes) != 1:
+        return Trigger(key=key, kind="respond", ref=f"PR #{n}", why=why, role="builder", pr=n,
+                       skipped=f"it closes {len(closes)} issues, and the builder responds only on "
+                               f"a PR that closes exactly one")
+    if busy(closes[0]):
+        return None
+    return Trigger(key=key, kind="respond", ref=f"PR #{n}", why=why, role="builder",
+                   command=launch_cmd("builder", closes[0], n), issue=closes[0], pr=n)
 
 
 def reviewers(model: dict, started: list) -> list[str]:
@@ -234,11 +266,9 @@ def gather(repo: str, idle_minutes: int, now: dt.datetime) -> World:
         labels = {lb.get("name") for lb in it.get("labels") or []}
         if labels & {"ready", "gov:ruled"} and not g.is_tracking(it):
             w.events[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/events?per_page=100")
-    for p in model["prs"]:
-        if not p["draft"]:
-            reviews = g.gh_items(f"repos/{repo}/pulls/{p['number']}/reviews?per_page=100")
-            w.reviewed[p["number"]] = {r.get("commit_id") for r in reviews
-                                       if (r.get("user") or {}).get("login") == REVIEWER}
+    for n, reviews in (data.get("reviews") or {}).items():    # fetch() read them for build()
+        w.reviewed[n] = {r.get("commit_id") for r in reviews
+                         if (r.get("user") or {}).get("login") == REVIEWER}
     return w
 
 
@@ -379,7 +409,7 @@ class Watch:
                 continue
             entry = swarm.Started(name=self.name(t, live), role=t.role, model=s.model,
                                   session_id=str(uuid.uuid4()), started=self.launcher.clock(),
-                                  issue=t.issue, by="watch")
+                                  issue=t.issue, pr=t.pr, by="watch")
             out(f"[{t.kind}] {t.ref} {t.why} -> starting {entry.name}")
             if self.launcher.start(entry, live):
                 if t.kind == "review":
@@ -410,7 +440,7 @@ class Watch:
     def name(self, t: Trigger, live: list) -> str:
         taken = {e.name for e in live}
         if t.issue is not None:
-            return swarm.launch_name(t.role, t.issue, taken)
+            return swarm.launch_name(t.role, t.issue, taken, t.pr)
         name, k = "reviewer-watch", 2
         while name in taken:
             name, k = f"reviewer-watch-{k}", k + 1

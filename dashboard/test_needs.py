@@ -91,6 +91,62 @@ class NeedsYouTest(unittest.TestCase):
         self.assertEqual(g.time_to_live(None), None)
 
 
+def review(state, commit, authority="pass", login=g.REVIEWER):
+    return {"user": {"login": login}, "state": state, "commit_id": commit,
+            "body": f"- **Bugs:** pass\n- **Scope:** pass\n- **Authority:** {authority}\n\nx"}
+
+
+class ReviewerStateTest(unittest.TestCase):
+    """GOV-0011 (#113): the reviewer's reviews on a PR, as swarm watch and needs_you read them."""
+    HEAD = "h" * 40
+
+    def detail(self, reviews):
+        p = {**pr(40, 30, closes=[4]), "headRefOid": self.HEAD}
+        m = g.build({"repo": "open-agentos/productswarm", "issues": [issue(4, "x")], "comments": {},
+                     "prs": [p], "reviews": {40: reviews}}, NOW, g.dt.timedelta(minutes=15))
+        (item,) = g.needs_you(m)
+        return m["prs"][0]["reviewer"], item["detail"]
+
+    def test_round_count_and_latest_at_head(self):
+        r, detail = self.detail([review("CHANGES_REQUESTED", "c1"), review("COMMENTED", "c1"),
+                                 review("CHANGES_REQUESTED", self.HEAD),
+                                 review("CHANGES_REQUESTED", self.HEAD, login="someone")])
+        self.assertEqual(r, {"changes_requested": 2, "at_head": "CHANGES_REQUESTED", "authority": "pass"})
+        self.assertEqual(detail, "awaiting review, closes #4")
+
+    def test_third_request_needs_the_owner(self):
+        _, detail = self.detail([review("CHANGES_REQUESTED", c) for c in ("c1", "c2", self.HEAD)])
+        self.assertEqual(detail, "changes requested 3 times: needs the owner, closes #4")
+
+    def test_third_request_on_an_older_head_is_back_with_the_reviewer(self):
+        _, detail = self.detail([review("CHANGES_REQUESTED", c) for c in ("c1", "c2", "c3")])
+        self.assertEqual(detail, "awaiting review, closes #4")
+
+    def test_overstep_at_head_needs_the_owner_whatever_the_state(self):
+        for state in ("COMMENTED", "CHANGES_REQUESTED"):
+            _, detail = self.detail([review(state, self.HEAD, authority="fail")])
+            self.assertEqual(detail, "overstep: needs the owner, closes #4")
+        _, detail = self.detail([review("COMMENTED", "old", authority="fail")])  # an older head
+        self.assertEqual(detail, "awaiting review, closes #4")
+
+    def test_comment_or_approve_is_not_the_owners(self):
+        for state in ("COMMENTED", "APPROVED"):
+            r, detail = self.detail([review(state, self.HEAD)])
+            self.assertEqual((r["at_head"], detail), (state, "awaiting review, closes #4"))
+
+    def test_authority_line_forms(self):
+        for body, want in [("- **Authority:** fail", "fail"), ("**Authority**: FAIL", "fail"),
+                           ("Authority: pass — none", "pass"), ("no rubric here", None),
+                           ("The Authority: fail line is quoted mid-sentence", None)]:
+            m = g.AUTHORITY_RE.search(body)
+            self.assertEqual(m.group(1).lower() if m else None, want, body)
+
+    def test_data_without_reviews_still_builds(self):
+        m = g.build({"repo": "r", "issues": [], "comments": {}, "prs": [pr(40, 30)]}, NOW,
+                    g.dt.timedelta(minutes=15))
+        self.assertEqual(m["prs"][0]["reviewer"]["at_head"], None)
+
+
 class PageTest(unittest.TestCase):
     def test_first_section_matches_the_list(self):
         m = model()

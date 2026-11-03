@@ -94,7 +94,7 @@ launcher/swarm watch --dry-run                # print what it would start; start
 launcher/swarm watch --dry-run --interval 1
 ```
 
-This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts). It runs in the foreground. On every check it reads the same GitHub and heartbeat state as `swarm inbox` and works out each **new** trigger:
+This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respond]` from GOV-0011). It runs in the foreground. On every check it reads the same GitHub and heartbeat state as `swarm inbox` and works out each **new** trigger:
 
 | Trigger | Starts |
 |---|---|
@@ -102,6 +102,16 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts). It runs in the f
 | `[build]` An open issue whose most recent `ready` label was added by the owner (GOV-0006), with no open PR closing it | `builder` on #N, as `swarm launch builder --issue N` would |
 | `[record]` A `gov:question` whose most recent `gov:ruled` was added by the owner and that needs a record (GOV-0007), with no open PR closing it | `docs` on the question |
 | `[answer]` A `gov:question` whose most recent `ready` was added by the owner | the role in its "Raised by" field, on the question |
+| `[respond]` An open, non-draft PR whose latest `productswarm-reviewer[bot]` review at its current head is "changes requested", and whose **Authority** line isn't `fail`, for at most 2 rounds (GOV-0011) | `builder` on the PR, as `swarm launch builder --issue N --pr M` would, where #N is the one issue the PR closes |
+
+`[respond]` is GOV-0011's bounded review loop. The builder's push starts a fresh `[review]`, and if the reviewer requests changes again, a fresh `[respond]`:
+
+- **Round bound.** The loop counts the reviewer's "changes requested" reviews on the PR, on any head, from GitHub's review history, so the count holds across restarts and machines. At the third, it starts nothing, and `swarm inbox` and the dashboard list the PR as "changes requested 3 times: needs the owner".
+- **Oversteps.** If the reviewer's latest review at the head has `- **Authority:** fail` (the rubric line in `roles/reviewer.md`), whatever its state, the loop starts nothing, and the PR is listed as "overstep: needs the owner".
+- A comment or an approval at the head, or a request on an older head, starts nothing. A PR that doesn't close exactly one issue is logged as skipped.
+- `[respond]` starts count toward `max_live` and need the builder's `spend_cap_usd`, like any loop start. Its refusal checks run on the issue the PR closes.
+
+`swarm launch builder --issue N --pr M` starts the same session by hand. `--pr` only changes the opener, which names the PR and the issue; the refusal checks are still on #N.
 
 Each start is a fresh session in a new Terminal window, as `swarm launch` makes. The loop never re-prompts a running session. `--dry-run` prints `would start …` for each trigger and starts nothing. It keeps its memory only while it runs and writes nothing to disk.
 
@@ -122,7 +132,7 @@ max_live = 2           # the most live sessions swarm watch may have started at 
 
 ### What it does on each trigger
 
-- **Once per trigger, across restarts too.** A trigger is identified by the PR's head SHA or by the id of the owner's label event. What the loop has acted on is kept in `~/.productswarm/launcher/watch.json`, so restarting `swarm watch` starts nothing twice. A new push, or the owner adding the label again, is a new trigger.
+- **Once per trigger, across restarts too.** A trigger is identified by the PR and its head SHA (`[review]`, `[respond]`) or by the id of the owner's label event. What the loop has acted on is kept in `~/.productswarm/launcher/watch.json`, so restarting `swarm watch` starts nothing twice. A new push, or the owner adding the label again, is a new trigger.
 - **No session already on it.** An issue or question with a live session gets no trigger, by the same rule `swarm launch` refuses on. Once that session stops, the trigger can fire.
 - **Refusal checks again.** Just before each start, it runs `swarm launch`'s refusal checks on fresh GitHub data: the issue is open, the owner added the label most recently (`gov:ruled` for `[record]`, `ready` otherwise), and no live session is on it. If a check refuses, for example because someone started a session on the issue by hand, the loop logs the refusal and the trigger is done.
 - **Reviews.** One reviewer pass covers every review trigger present when it starts, because the pass reviews every open PR. While any reviewer session is live, review triggers wait: that pass may have listed the PRs before the latest push. The loop does the polling. The reviewer still runs one pass and stops, as `roles/reviewer.md` says.
