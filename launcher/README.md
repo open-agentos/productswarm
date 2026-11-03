@@ -130,6 +130,18 @@ max_live = 2           # the most live sessions swarm watch may have started at 
 - **Interval.** `interval_minutes` sets how often it checks. `--interval` works only with `--dry-run`, so the real interval can't be changed by a flag.
 - `swarm.toml` is read again on every check, so a new cap or limit applies without a restart. Without a `[watch]` table, `swarm watch` refuses to start anything, but `--dry-run` still works and checks every 5 minutes.
 
+### Overlapping builds
+
+Builders on issues from the same ruling usually change the same files, so their PRs conflict or one undoes the other. A `[build]` trigger is **held** while other work from the same GOV record is in flight. This is #136, which builds the owner's answer on #127. That answer is direction for #127, not a ruling.
+
+- **An issue's GOV records** are the `GOV-NNNN` ids in its **title**, e.g. `GOV-0011 R3: …`. Ids cited only in the body don't count, because bodies cite rulings in passing. An issue whose title cites no GOV id is never held by this rule.
+- A build for #N is held while N's title shares a GOV id with the title of:
+  - another issue a **live builder** is on: a heartbeat `builder` session that isn't stopped, or a launcher builder entry with no heartbeat yet. This includes builders you started by hand, which don't count toward `max_live` but still write to the same files, and a builder the loop started earlier in the same check;
+  - an issue that an **open PR**, draft or not, closes.
+- `swarm inbox` lists the hold with what it waits on, e.g. `held: #113 shares GOV-0011 with live builder-issue-112 (on #112) / open PR #120 (#127)`. It is logged once per reason. Held triggers start held-longest-first once the overlap clears: on the first check after the builder stops and the PR is merged or closed.
+- `[respond]` is never held: a builder responding on its own PR is the same work (GOV-0011). `[review]`, `[record]` and `[answer]` are never held either.
+- `--dry-run` doesn't show these holds, as it doesn't show the ceiling's.
+
 ### What it does on each trigger
 
 - **Once per trigger, across restarts too.** A trigger is identified by the PR and its head SHA (`[review]`, `[respond]`) or by the id of the owner's label event. What the loop has acted on is kept in `~/.productswarm/launcher/watch.json`, so restarting `swarm watch` starts nothing twice. A new push, or the owner adding the label again, is a new trigger.

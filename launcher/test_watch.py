@@ -681,3 +681,131 @@ class RespondTest(unittest.TestCase):
         self.assertEqual(self.watcher().tick(NOW), [])
         self.scene.tracking, self.scene.comments = [], {}
         self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["respond"])
+
+
+class OverlapTest(unittest.TestCase):
+    """#136 (the owner's answer on #127): a [build] waits while a live builder or an open PR
+    shares a GOV id in its issue's title."""
+
+    setUp_start = StartTest.setUp
+    manifest, watcher, started, exit, inbox = (StartTest.manifest, StartTest.watcher, StartTest.started,
+                                               StartTest.exit, StartTest.inbox)
+
+    def setUp(self):
+        self.setUp_start()
+        sc = self.scene
+        sc.issues = [issue(49, ["ready"], title="GOV-0011 R1: reviewer states"),
+                     issue(50, ["ready"], title="GOV-0011 R2: builder responds"),
+                     issue(60, ["ready"], title="GOV-0010 W2: limits")]
+        sc.events = {49: [ev("ready", eid=11)], 50: [ev("ready", eid=16)], 60: [ev("ready", eid=12)]}
+        sc.prs, sc.reviewed = [], {}
+        sc.tracking, sc.comments = [], {}
+
+    def refs(self, w):
+        return [t.ref for t in w.tick(NOW)]
+
+    def busy_on(self, n, sid="busy-sid"):
+        """A builder started by hand, on the heartbeat, working on #n."""
+        it, comments = tracking(200, sid, "builder", n)
+        self.scene.tracking, self.scene.comments = [it], {200: comments}
+
+    def stop_heartbeat(self):
+        self.scene.tracking[0]["state"] = "closed"
+        self.scene.comments = {200: []}
+
+    def test_two_new_builds_sharing_an_id_in_one_check_start_one_and_hold_the_other(self):
+        w = self.watcher()
+        self.assertEqual(self.refs(w), ["#49", "#60"])
+        reason = "held: #50 shares GOV-0011 with live builder-issue-49 (on #49) (#127)"
+        self.assertIn(f"[build] #50 ready by the owner -> {reason}", self.lines)
+        self.assertIn(f"- [build] #50 ready by the owner · {reason}", self.inbox())
+        n = len(self.lines)
+        self.assertEqual(w.tick(NOW), [])                    # logged once per reason
+        self.assertEqual(len(self.lines), n)
+        self.exit("builder-issue-49")
+        self.assertEqual(self.refs(w), ["#50"])
+        self.assertEqual(self.inbox(), "Nothing is waiting on you.")
+
+    def test_a_heartbeat_builder_started_by_hand_holds_until_it_stops(self):
+        self.scene.issues = [issue(49, ["ready"], title="GOV-0011 R1: reviewer states"),
+                             issue(61, title="GOV-0011 R3: watch respond")]
+        self.busy_on(61)
+        w = self.watcher()
+        self.assertEqual(w.tick(NOW), [])
+        self.assertIn("- [build] #49 ready by the owner · held: #49 shares GOV-0011 with live "
+                      "builder session busy-sid (on #61) (#127)", self.inbox())
+        self.stop_heartbeat()
+        self.assertEqual(self.refs(w), ["#49"])
+
+    def test_a_launcher_builder_with_no_heartbeat_yet_holds(self):
+        self.scene.issues = [issue(49, ["ready"], title="GOV-0011 R1"), issue(61, title="GOV-0011 R3")]
+        self.l.start(swarm.Started("builder-1", "builder", "m", "sid-61", self.fake.t, issue=61), [])
+        w = self.watcher()
+        self.assertEqual(w.tick(NOW), [])
+        self.assertIn("held: #49 shares GOV-0011 with live builder-1 (on #61) (#127)", self.lines[-1])
+        self.exit("builder-1")
+        self.assertEqual(self.refs(w), ["#49"])
+
+    def test_an_open_pr_holds_draft_or_not_until_it_closes(self):
+        for draft in (False, True):
+            with self.subTest(draft=draft):
+                self.setUp()
+                self.scene.issues = [issue(49, ["ready"], title="GOV-0011 R1"),
+                                     issue(61, title="GOV-0011 R3")]
+                self.scene.prs = [pr(120, SHA1, draft=draft, closes=[61])]
+                self.scene.reviewed = {120: {SHA1}}
+                w = self.watcher()
+                self.assertEqual(w.tick(NOW), [])
+                self.assertIn("held: #49 shares GOV-0011 with open PR #120 (#127)", self.lines[-1])
+                self.scene.prs = []                          # merged or closed
+                self.assertEqual(self.refs(w), ["#49"])
+
+    def test_the_reason_names_every_builder_and_pr_it_waits_on(self):
+        self.scene.issues = [issue(49, ["ready"], title="GOV-0011 GOV-0012: both"),
+                             issue(61, title="GOV-0011 R3"), issue(62, title="GOV-0012 B1")]
+        self.busy_on(62)
+        self.scene.prs, self.scene.reviewed = [pr(120, SHA1, closes=[61])], {120: {SHA1}}
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.assertIn("held: #49 shares GOV-0011, GOV-0012 with live builder session busy-sid (on #62) "
+                      "/ open PR #120 (#127)", self.lines[-1])
+
+    def test_no_shared_id_or_no_id_or_an_id_only_in_the_body_runs_side_by_side(self):
+        self.scene.issues = [issue(49, ["ready"], title="GOV-0011 R1"),
+                             issue(50, ["ready"], title="GOV-0012 B1"),
+                             issue(51, ["ready"], body="per GOV-0011 and GOV-0010", title="plain one"),
+                             issue(52, ["ready"], body="per GOV-0011", title="plain two")]
+        self.scene.events = {n: [ev("ready", eid=n)] for n in (49, 50, 51, 52)}
+        self.assertEqual(self.refs(self.watcher()), ["#49", "#50", "#51", "#52"])
+
+    def test_review_record_and_answer_are_never_held(self):
+        sc = self.scene
+        sc.issues = [issue(49, ["ready"], title="GOV-0011 R1"), issue(61, title="GOV-0011 R3"),
+                     issue(87, ["gov:question", "gov:ruled"], question_body(domain="governance"),
+                           title="GOV-Q: GOV-0011 follow-up"),
+                     issue(88, ["gov:question", "ready"], question_body(), title="GOV-Q: GOV-0011 too")]
+        sc.events = {49: [ev("ready", eid=11)], 87: [ev("gov:ruled", eid=13)], 88: [ev("ready", eid=14)]}
+        sc.prs, sc.reviewed = [pr(70, SHA1)], {70: set()}
+        self.busy_on(61)
+        done = self.watcher().tick(NOW)
+        self.assertEqual([(t.kind, t.ref) for t in done], [("review", "PR #70"), ("record", "#87"),
+                                                           ("answer", "#88")])
+        self.assertIn("held: #49 shares GOV-0011", self.lines[-1])
+
+    def test_respond_is_never_held(self):
+        sc = self.scene
+        sc.issues = [issue(73, ["ready"], title="GOV-0011 R1"), issue(74, title="GOV-0011 R2")]
+        sc.events = {73: [ev("ready", eid=15)]}
+        sc.prs, sc.reviews = [pr(72, SHA1, closes=[73])], {72: [review("CHANGES_REQUESTED", SHA1)]}
+        self.busy_on(74)
+        self.assertEqual([(t.kind, t.ref) for t in self.watcher().tick(NOW)], [("respond", "PR #72")])
+
+    def test_overlap_is_pure(self):
+        w = self.scene.read(REPO, 15, NOW)
+        self.assertIsNone(watch.overlap(49, w, []))
+        b = swarm.Started("builder-issue-50", "builder", "m", "sid-50", 0.0, issue=50)
+        self.assertEqual(watch.overlap(49, w, [b]),
+                         "held: #49 shares GOV-0011 with live builder-issue-50 (on #50) (#127)")
+        self.assertIsNone(watch.overlap(60, w, [b]))
+        self.assertIsNone(watch.overlap(49, w, [swarm.Started("r", "reviewer", "m", "s", 0.0, issue=50)]))
+        self.assertEqual(watch.gov_ids("GOV-0011 R3: x (GOV-0012)"), {"GOV-0011", "GOV-0012"})
+        self.assertEqual(watch.gov_ids("GOV-Q: a question"), set())

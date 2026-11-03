@@ -1,5 +1,5 @@
 """swarm watch: the v2 wake-up loop (GOV-0009). W1 (#89) is --dry-run; W2 (#90) starts;
-#113 adds GOV-0011's [respond] trigger.
+#113 adds GOV-0011's [respond] trigger; #136 holds overlapping builds (the owner's answer on #127).
 
     launcher/swarm watch                          start sessions, within swarm.toml's [watch]
     launcher/swarm watch --dry-run [--interval MINUTES]   print what it would start
@@ -44,6 +44,18 @@ Without --dry-run, each new trigger starts one fresh session (one Terminal windo
   listed in `swarm inbox`, and starts once the role has a cap;
 - every [watch] interval_minutes. swarm.toml is read again on every check.
 
+A [build] trigger is also held while other work from the same GOV record is in flight
+(#136, the owner's answer on #127; direction, not a ruling). An issue's GOV records are
+the GOV-NNNN ids in its title only: bodies cite rulings in passing. A build for #N is
+held while N's title shares a GOV id with the title of
+- another issue a live builder is on: a heartbeat builder session that isn't stopped, or
+  a launcher builder entry with no heartbeat yet, including builders started by hand and
+  one started earlier in the same check; or
+- an issue that an open PR, draft or not, closes.
+The hold is listed in `swarm inbox` with what it waits on, logged once per reason, and
+starts held-longest-first once the overlap clears. An issue whose title cites no GOV id
+is never held this way, and [respond], [review], [record] and [answer] never are.
+
 Before each start it runs `swarm launch`'s refusal checks again on fresh GitHub data. A
 refusal is logged and the trigger is done. What it has acted on is kept in
 ~/.productswarm/launcher/watch.json, so a restart starts nothing twice. One reviewer
@@ -73,6 +85,7 @@ REVIEWER = swarm.dashboard().REVIEWER
 DEFAULT_INTERVAL = 5          # minutes, for --dry-run when swarm.toml has no [watch] table
 STATE_FILE = "watch.json"     # in the launcher's state directory
 REF_RE = re.compile(r"#(\d+)")
+GOV_RE = re.compile(r"\bGOV-\d{4}\b")
 
 
 @dataclass(frozen=True)
@@ -245,6 +258,43 @@ def respond(p: dict, busy: Callable[[int], bool]) -> Trigger | None:
                    command=launch_cmd("builder", closes[0], n), issue=closes[0], pr=n)
 
 
+def gov_ids(title: str | None) -> set[str]:
+    """The GOV records an issue belongs to: the GOV-NNNN ids in its title (#136)."""
+    return set(GOV_RE.findall(title or ""))
+
+
+def overlap(n: int, w: World, live: list) -> str | None:
+    """Why a [build] trigger for #n is held because other work from the same GOV record is
+    in flight (#136, the owner's answer on #127), or None. Pure: reads only w and live."""
+    m = w.model
+    titles = {c["number"]: c.get("title") or "" for p in m["prs"] for c in p["closes"]}
+    titles.update({i["number"]: i.get("title") or "" for i in w.issues})
+    ids = gov_ids(titles.get(n))
+    if not ids:
+        return None
+    names = {e.session_id: e.name for e in live}
+    seen = {s["session_id"] for s in m["sessions"]}
+    builders = [(names.get(s["session_id"], f"builder session {s['session_id']}"), s["issue"])
+                for s in m["sessions"]
+                if s["role"] == "builder" and s["status"] != "stopped" and s["issue"] is not None]
+    builders += [(e.name, e.issue) for e in live
+                 if e.role == "builder" and e.session_id not in seen and e.issue is not None]
+    shared, why = set(), []
+    for name, i in sorted(builders, key=lambda b: (b[1], b[0])):
+        common = ids & gov_ids(titles.get(i))
+        if i != n and common:
+            shared |= common
+            why.append(f"live {name} (on #{i})")
+    for p in m["prs"]:
+        common = set().union(*(ids & gov_ids(c.get("title")) for c in p["closes"] if c["number"] != n))
+        if common:
+            shared |= common
+            why.append(f"open PR #{p['number']}")
+    if not why:
+        return None
+    return f"held: #{n} shares {', '.join(sorted(shared))} with {' / '.join(why)} (#127)"
+
+
 def reviewers(model: dict, started: list) -> list[str]:
     """Live reviewer sessions that swarm watch started (#132): live launcher entries with
     by="watch" whose heartbeat isn't stopped, or that have no heartbeat yet. Reviewers the
@@ -403,6 +453,10 @@ class Watch:
             if s.spend_cap_usd is None:
                 hold(t, f"skipped: {t.role} has no spend_cap_usd in swarm.toml, and swarm watch "
                         f"starts only capped roles (GOV-0010)")
+                continue
+            busy_with = overlap(t.issue, w, live) if t.kind == "build" else None
+            if busy_with:
+                hold(t, busy_with)
                 continue
             if mine >= limits.max_live:
                 hold(t, f"held: {mine} of {limits.max_live} sessions swarm watch started are live (GOV-0010)")
