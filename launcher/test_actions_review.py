@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -199,3 +200,210 @@ class SharedRule(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- run (#215)
+
+import os  # noqa: E402
+import shlex  # noqa: E402
+import stat  # noqa: E402
+import swarm  # noqa: E402
+
+SID = "11111111-2222-3333-4444-555555555555"
+TOML = """[watch]
+interval_minutes = 5
+max_live = 2
+{turns}
+
+[[session]]
+role = "reviewer"
+count = 1
+model = "claude-test-1"
+{cap}
+"""
+TRANSCRIPT = "assistant: I read the diff of secret.py\ntool_result: GH_TOKEN=ghs_leaky\n"
+# A stand-in for claude: records its argv and the env it got, prints a transcript then the
+# JSON result to stdout, and more transcript to stderr.
+FAKE = r"""#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_LOG"], "w") as f:
+    json.dump({"argv": sys.argv[1:], "env": {k: os.environ.get(k) for k in
+               ("SWARM_ROLE", "PRODUCTSWARM_HOME", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")},
+               "cwd": os.getcwd()}, f)
+sys.stdout.write(%r)
+sys.stderr.write("stderr: " + %r)
+result = os.environ.get("FAKE_RESULT")
+if result:
+    print(result)
+"""
+
+
+def result(subtype="success", is_error=False, **extra):
+    return json.dumps({"type": "result", "subtype": subtype, "is_error": is_error, "num_turns": 12,
+                       "total_cost_usd": 1.25, "result": "Reviewed PR #70: request changes.\n::error::x",
+                       "session_id": SID, "usage": {"input_tokens": 9}, **extra})
+
+
+class Run(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.root = self.dir / "checkout"
+        (self.root / "roles").mkdir(parents=True)
+        (self.root / "roles" / "reviewer.md").write_text("# reviewer\n")
+        self.manifest(cap="spend_cap_usd = 2.5", turns="max_turns = 7")
+        bin_dir = self.dir / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "claude"
+        fake.write_text(FAKE % (TRANSCRIPT, TRANSCRIPT))
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        (self.dir / "runner").mkdir()
+        self.log = self.dir / "fake.json"
+        self.env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "GITHUB_ACTIONS": "true",
+                    "RUNNER_TEMP": str(self.dir / "runner"), "FAKE_LOG": str(self.log),
+                    "CLAUDE_CODE_OAUTH_TOKEN": "oauth-secret", "FAKE_RESULT": result()}
+        self.lines = []
+
+    def manifest(self, cap="", turns=""):
+        (self.root / "swarm.toml").write_text(TOML.format(cap=cap, turns=turns))
+
+    def run_it(self, dry_run=False, **env):
+        e = {**self.env, **env}
+        e = {k: v for k, v in e.items() if v is not None}
+        with unittest.mock.patch.object(actions_review.manifest, "ROOT", self.root):
+            return actions_review.run(70, dry_run=dry_run, env=e, root=self.root,
+                                      manifest_path=self.root / "swarm.toml", out=self.lines.append,
+                                      clock=lambda: 1000.0, new_id=lambda: SID)
+
+    def fake_ran(self):
+        return json.loads(self.log.read_text()) if self.log.exists() else None
+
+    # ---- the command
+
+    def test_argv_is_headless_args_for_the_reviewer(self):
+        self.assertEqual(self.run_it(), actions_review.DONE)
+        argv = self.fake_ran()["argv"]
+        entry = swarm.Started("reviewer-pr-70", "reviewer", "claude-test-1", SID, 1000.0, pr=70,
+                              by="actions", budget_usd=2.5, max_turns=7)
+        quoted = swarm.Launcher.headless_args(entry)
+        self.assertEqual(argv, ["--model", "claude-test-1", "--session-id", SID,
+                                "-p", swarm.opener("reviewer", None, 70),
+                                *shlex.split(" ".join(quoted))])
+        self.assertIn("review PR #70 only", argv[argv.index("-p") + 1])
+
+    def test_budget_and_turns_come_from_swarm_toml(self):
+        self.run_it()
+        argv = self.fake_ran()["argv"]
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "2.5")    # reviewer's spend_cap_usd
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "7")           # [watch] max_turns
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")  # GOV-0013
+        self.assertEqual(argv[-2:], ["--output-format", "json"])
+
+    def test_no_cap_or_no_max_turns_never_starts(self):
+        for cap, turns in (("", "max_turns = 7"), ("spend_cap_usd = 2.5", "")):
+            self.manifest(cap=cap, turns=turns)
+            self.lines.clear()
+            self.assertEqual(self.run_it(), actions_review.REFUSED)
+            self.assertIsNone(self.fake_ran())
+            self.assertIn("GOV-0012", self.lines[-1])
+
+    def test_hooks_and_stop_hook_entry(self):
+        self.run_it()
+        got = self.fake_ran()
+        self.assertEqual(got["env"]["SWARM_ROLE"], "reviewer")
+        self.assertEqual(Path(got["cwd"]).resolve(), self.root.resolve())
+        home = Path(got["env"]["PRODUCTSWARM_HOME"])
+        self.assertEqual(home.parent, self.dir / "runner")                   # thrown away with the runner
+        (entry,) = json.loads((home / "launcher" / "sessions.json").read_text())
+        self.assertEqual((entry["session_id"], entry["by"], entry["pr"], entry["role"]),
+                         (SID, "actions", 70, "reviewer"))
+        settings = json.loads((self.root / ".claude" / "settings.local.json").read_text())
+        commands = [h["command"] for g in settings["hooks"]["Stop"] for h in g["hooks"]]
+        self.assertTrue(any(str(self.root / "heartbeat" / "hook.py") in c for c in commands))
+        self.assertTrue(any(str(self.root / "launcher" / "stophook.py") in c for c in commands))
+        self.assertIn("SessionStart", settings["hooks"])
+
+    # ---- what's printed (GOV-0016)
+
+    def test_prints_only_the_four_fields(self):
+        self.run_it()
+        printed = "\n".join(self.lines)
+        for leak in ("assistant:", "tool_result", "ghs_leaky", "oauth-secret", "usage", "input_tokens", SID):
+            self.assertNotIn(leak, printed)
+        fields = [ln.split(":", 1)[0] for ln in self.lines[1:]]
+        self.assertEqual(fields, list(actions_review.FIELDS))
+        self.assertEqual(json.loads(self.lines[1].split(": ", 1)[1]), "Reviewed PR #70: request changes.\n::error::x")
+        # one line each, and none can be read as an Actions workflow command
+        self.assertEqual(len(self.lines), 5)
+        self.assertFalse(any(ln.startswith("::") for ln in self.lines))
+
+    def test_transcript_stays_in_files_on_the_runner(self):
+        self.run_it()
+        home = Path(self.fake_ran()["env"]["PRODUCTSWARM_HOME"])
+        self.assertIn("ghs_leaky", (home / "launcher" / f"{SID}.result.json").read_text())
+        self.assertIn("stderr:", (home / "launcher" / f"{SID}.stderr").read_text())
+
+    # ---- exit codes
+
+    def test_exit_codes(self):
+        cases = [(result(), actions_review.DONE),
+                 (result("error_max_turns", True), actions_review.AT_CAP),
+                 (result("error_max_budget_usd", True), actions_review.AT_CAP),
+                 (result("error_during_execution", True), actions_review.ERROR),
+                 (result("success", True), actions_review.ERROR),
+                 (None, actions_review.ERROR)]                                # no JSON result
+        for res, code in cases:
+            with self.subTest(res=res and json.loads(res)["subtype"]):
+                self.lines.clear()
+                self.assertEqual(self.run_it(FAKE_RESULT=res), code)
+                if res is None:
+                    self.assertEqual(self.lines[-1], "run: no JSON result from claude")
+
+    def test_claude_missing_is_an_error(self):
+        self.assertEqual(self.run_it(PATH="/nonexistent"), actions_review.ERROR)
+        self.assertIn("can't start claude", self.lines[-1])
+
+    # ---- credentials (#208)
+
+    def test_runs_with_either_credential(self):
+        for name in actions_review.CREDENTIALS:
+            with self.subTest(name):
+                env = {k: None for k in actions_review.CREDENTIALS}
+                env[name] = "x"
+                self.log.unlink(missing_ok=True)
+                self.assertEqual(self.run_it(**env), actions_review.DONE)
+                got = self.fake_ran()["env"]
+                self.assertEqual(got[name], "x")
+                other = [k for k in actions_review.CREDENTIALS if k != name][0]
+                self.assertIsNone(got[other])                 # passed through as is, none added
+
+    def test_neither_credential_fails_clearly(self):
+        code = self.run_it(CLAUDE_CODE_OAUTH_TOKEN=None, ANTHROPIC_API_KEY="")
+        self.assertEqual(code, actions_review.REFUSED)
+        self.assertIsNone(self.fake_ran())
+        self.assertEqual(len(self.lines), 1)
+        for name in actions_review.CREDENTIALS:
+            self.assertIn(name, self.lines[0])
+
+    # ---- outside Actions, and --dry-run
+
+    def test_refuses_outside_actions(self):
+        self.assertEqual(self.run_it(GITHUB_ACTIONS=None), actions_review.REFUSED)
+        self.assertIsNone(self.fake_ran())
+        self.assertFalse((self.root / ".claude").exists())
+
+    def test_dry_run_prints_the_command_and_starts_nothing(self):
+        code = self.run_it(dry_run=True, GITHUB_ACTIONS=None, CLAUDE_CODE_OAUTH_TOKEN=None)
+        self.assertEqual(code, actions_review.DONE)
+        self.assertIsNone(self.fake_ran())
+        self.assertFalse((self.root / ".claude").exists())
+        self.assertEqual(list((self.dir / "runner").iterdir()), [])
+        argv = shlex.split(self.lines[-1])
+        self.assertEqual(argv[0], "claude")
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "7")
+
+    def test_main_parses_run(self):
+        with unittest.mock.patch.object(actions_review, "run", return_value=0) as r:
+            self.assertEqual(actions_review.main(["run", "--pr", "70", "--dry-run"]), 0)
+        r.assert_called_once_with(70, dry_run=True, manifest_path=None)

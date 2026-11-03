@@ -259,6 +259,34 @@ class ReviewerTest(HookCase):
         self.assertBlocks("PR #51")
 
 
+
+class ActionsReviewerTest(HookCase):
+    """A reviewer run in Actions (#215): by="actions", on one PR."""
+    def setUp(self):
+        super().setUp()
+        self.run_as("reviewer", pr=50, by="actions")
+        self.gh.put("pulls/50", {"number": 50, "state": "open", "draft": False, "head": {"sha": "a"}})
+        # another open, unreviewed PR: not this run's to review
+        self.gh.put("pulls", [{"number": 51, "draft": False, "created_at": BEFORE, "head": {"sha": "b"}}])
+
+    def test_its_pr_unreviewed_blocks(self):
+        out = self.decide()
+        self.assertIn("PR #50", out["reason"])
+        self.assertNotIn("#51", out["reason"])
+
+    def test_its_pr_reviewed_is_done_whatever_else_is_open(self):
+        self.gh.put("pulls/50/reviews", [{"user": {"login": ME["reviewer"]}, "commit_id": "a"}])
+        self.assertAllows()
+
+    def test_its_pr_closed_or_draft_is_done(self):
+        for pr in ({"state": "closed", "draft": False}, {"state": "open", "draft": True}):
+            self.gh.put("pulls/50", {"number": 50, "head": {"sha": "a"}, **pr})
+            self.assertAllows()
+
+    def test_other_starters_still_get_no_hook(self):
+        self.run_as("reviewer", pr=50, by=None)
+        self.assertAllows()
+
 class DocsTest(HookCase):
     def setUp(self):
         super().setUp()

@@ -98,12 +98,28 @@ def opener(role: str, issue: int | None = None, pr: int | None = None) -> str:
 
     With an issue, it names it: the heartbeat's `working_on` detection matches
     "issue #N" in a prompt, so the session's current issue is set with no hook change.
-    With a PR too, the session responds to requested changes on it (GOV-0011)."""
+    With a PR too, the session responds to requested changes on it (GOV-0011). With only a
+    PR, it reviews that PR once (a reviewer run in Actions, #215)."""
     if issue and pr:
         then = f"respond to the requested changes on PR #{pr}, which closes issue #{issue}"
+    elif pr:     # a reviewer on one PR: a run in GitHub Actions (#215)
+        then = f"review PR #{pr} only, in one pass, and stop"
     else:
         then = f"work on issue #{issue}" if issue else "begin"
     return f"You are the {role} for productswarm. Read CLAUDE.md, PRODUCT.md and roles/{role}.md, then {then}."
+
+
+def headless_flags(budget_usd: float, max_turns: int) -> list[str]:
+    """The flags after `-p <opener>` for a headless run, as an argv (not shell-quoted):
+    GOV-0013's permission mode and denies, GOV-0012's budget and turn ceiling, and a JSON
+    result. Shared by runs `swarm watch` starts and reviewer runs in Actions (#215).
+
+    --disallowedTools takes several values, so another flag must follow it: otherwise
+    claude would read the next word as one more pattern."""
+    return ["--permission-mode", "auto",
+            "--disallowedTools", *DENY,
+            "--max-budget-usd", f"{budget_usd:g}", "--max-turns", str(max_turns),
+            "--output-format", "json"]
 
 
 def home() -> Path:
@@ -339,17 +355,11 @@ class Launcher:
 
     @staticmethod
     def headless_args(s: Started) -> list[str]:
-        """The flags after `-p <opener>` for a loop-started run, shell-quoted (#147).
-
-        --disallowedTools takes several values, so another flag must follow it: otherwise
-        claude would read the next word as one more pattern."""
+        """headless_flags() for a loop-started run, shell-quoted (#147)."""
         if s.budget_usd is None or s.max_turns is None:
             raise RuntimeError(f"{s.name}: a run swarm watch starts needs a budget and a turn "
                                f"ceiling (GOV-0012)")
-        return ["--permission-mode", "auto",
-                "--disallowedTools", *(shlex.quote(d) for d in DENY),
-                "--max-budget-usd", f"{s.budget_usd:g}", "--max-turns", str(s.max_turns),
-                "--output-format", "json"]
+        return [shlex.quote(a) for a in headless_flags(s.budget_usd, s.max_turns)]
 
     def plan(self, sessions: list[manifest.Session], live: list[Started]) -> list[manifest.Session]:
         """Manifest sessions with no live launcher session of the same name: the shortfall."""
