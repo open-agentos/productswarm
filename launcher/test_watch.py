@@ -190,6 +190,28 @@ class WatchTest(unittest.TestCase):
         self.l.start(swarm.Started("builder-issue-49", "builder", "m", "sid-49", self.fake.t, issue=49), [])
         self.assertNotIn("#49", [t.ref for t in self.w.tick(NOW)])
 
+    def reviewer_on_heartbeat(self, sid, status_minutes_ago=1):
+        """A reviewer on the heartbeat (idle once it's been quiet past idle_minutes)."""
+        t_issue, t_comments = tracking(202, sid, "reviewer", None, status_minutes_ago)
+        self.scene.tracking.append(t_issue)
+        self.scene.comments[202] = t_comments
+
+    def test_an_idle_owner_started_reviewer_doesnt_keep_reviews_quiet(self):
+        # #132: reviewer-1 from `swarm up`, idle at its prompt, held reviews up for 20 minutes.
+        self.l.start(swarm.Started("reviewer-1", "reviewer", "m", "up-sid", self.fake.t), [])
+        self.reviewer_on_heartbeat("up-sid", status_minutes_ago=30)
+        self.assertEqual(self.w.tick(NOW)[0].ref, "PR #70")
+        self.assertIn("[review] PR #70 head aaaaaaa not reviewed by the reviewer -> would start a "
+                      "reviewer pass", self.lines)
+
+    def test_a_live_loop_started_reviewer_keeps_reviews_quiet(self):
+        self.l.start(swarm.Started("reviewer-watch", "reviewer", "m", "watch-sid", self.fake.t,
+                                   by="watch"), [])
+        self.assertNotIn("review", [t.kind for t in self.w.tick(NOW)])      # starting, no heartbeat
+        self.w.seen.clear()
+        self.reviewer_on_heartbeat("watch-sid")
+        self.assertNotIn("review", [t.kind for t in self.w.tick(NOW)])      # on the heartbeat
+
     def test_session_on_it_stops_then_it_fires(self):
         self.w.tick(NOW)
         self.scene.comments = {200: []}                    # the #60 session goes quiet...
@@ -408,16 +430,38 @@ class StartTest(unittest.TestCase):
     def test_one_reviewer_pass_covers_every_pr_and_waits_for_a_live_reviewer(self):
         self.scene.prs.append(pr(72, SHA2))
         self.scene.reviewed[72] = set()
+        # A reviewer an earlier `swarm watch` run started, still live.
+        self.l.start(swarm.Started("reviewer-watch", "reviewer", "m", "rev-sid", self.fake.t,
+                                   by="watch"), [])
         t_issue, t_comments = tracking(202, "rev-sid", "reviewer", None)
         self.scene.tracking.append(t_issue)
         self.scene.comments[202] = t_comments
         w = self.watcher()
         self.assertEqual([t.kind for t in w.tick(NOW)], ["record", "answer", "build"])   # reviewer live
-        self.scene.tracking.remove(t_issue)                                               # it stops
+        self.exit("reviewer-watch")                                                       # it stops
+        self.scene.tracking.remove(t_issue)
         self.assertEqual([t.ref for t in w.tick(NOW)], ["PR #70", "PR #72"])
         self.assertEqual([e.name for e in self.l.load() if e.role == "reviewer"], ["reviewer-watch"])
         self.assertIn("[review] PR #72 head bbbbbbb not reviewed by the reviewer -> covered by "
                       "reviewer-watch", self.lines)
+
+    def test_an_owner_started_reviewer_doesnt_hold_reviews(self):
+        # #132: triggers() and refusal() share the rule, so the pass starts.
+        self.l.start(swarm.Started("reviewer-1", "reviewer", "m", "up-sid", self.fake.t), [])
+        t_issue, t_comments = tracking(202, "up-sid", "reviewer", None, minutes_ago=30)
+        self.scene.tracking.append(t_issue)
+        self.scene.comments[202] = t_comments
+        self.assertIn("PR #70", [t.ref for t in self.watcher().tick(NOW)])
+        self.assertIn(("reviewer-watch", "reviewer", "m-reviewer", None, "watch"), self.started())
+
+    def test_refusal_waits_only_for_a_loop_started_reviewer(self):
+        w = self.watcher()
+        t = watch.Trigger(key="review:70:x", kind="review", ref="PR #70", why="", role="reviewer",
+                          command="a reviewer pass")
+        hand = swarm.Started("reviewer-1", "reviewer", "m", "up-sid", self.fake.t)
+        mine = swarm.Started("reviewer-watch", "reviewer", "m", "w-sid", self.fake.t, by="watch")
+        self.assertEqual(w.refusal(t, [hand], NOW), (None, False))
+        self.assertEqual(w.refusal(t, [hand, mine], NOW), (None, True))
 
     def test_unknown_raised_by_is_logged_once_and_done(self):
         self.scene.issues[3]["body"] = question_body(raised="someone, on #3")
