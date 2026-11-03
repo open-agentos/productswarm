@@ -38,7 +38,7 @@ The Actions reviewer is one workflow, `.github/workflows/reviewer.yml`:
 ## Applies when / does not apply when
 
 - Applies when: building, proposing or changing the Actions reviewer workflow's triggers, concurrency or skip rule, or the `swarm watch` switch that defers `[review]` to it (C stage 1, GOV-0015).
-- Does not apply when: deciding which authors and events are trusted (prompt injection), which secrets the job gets, or what the job log shows. Those are separate sub-questions; GOV-0016 covers the log.
+- Does not apply when: deciding which authors and events are trusted (prompt injection), which secrets the job gets, or what the job log shows. GOV-0017 covers trusted authors and events, GOV-0018 the secrets, and GOV-0016 the log.
 - Does not apply when: builder or docs runs move to Actions, or `[respond]` and `[record]` run there (C stage 2). That needs its own question.
 - It does not change `swarm watch` for any trigger but `[review]`, GOV-0010's limits on loop-started runs, or `ops/`.
 
