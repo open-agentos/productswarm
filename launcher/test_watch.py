@@ -576,9 +576,16 @@ class StartTest(unittest.TestCase):
         w = watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=False, manifest_path=self.path)
         with mock.patch.object(G, "subprocess", fake_sub):
             w.run(1, ticks=3, sleep=lambda s: None)
+            (e,) = [e for e in self.l.load() if e.name == "builder-issue-49"]
+            self.l.result_file(e.session_id).write_text(
+                "swarm-session: builder\n" + json.dumps({"type": "result", "subtype": "error_max_budget_usd",
+                                                         "is_error": True, "total_cost_usd": 9.87}))
             self.exit("builder-issue-49")
             w.run(1, ticks=1, sleep=lambda s: None)
         self.assertEqual(len(self.fake.commands), 4)            # it did start sessions
+        # #149: the ending and cost are recorded locally, and none of it reaches GitHub.
+        self.assertEqual([r.get("cost_usd") for r in watch.runs(self.l) if r["name"] == "builder-issue-49"], [9.87])
+        self.assertFalse(any("9.87" in a or "ended at cap" in a for argv in calls for a in argv))
         self.assertEqual(self.fake.signals, [])
         self.assertTrue(calls)
         writes = {"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"}
@@ -907,3 +914,203 @@ class OverlapTest(unittest.TestCase):
         self.assertIsNone(watch.overlap(49, w, [swarm.Started("r", "reviewer", "m", "s", 0.0, issue=50)]))
         self.assertEqual(watch.gov_ids("GOV-0011 R3: x (GOV-0012)"), {"GOV-0011", "GOV-0012"})
         self.assertEqual(watch.gov_ids("GOV-Q: a question"), set())
+
+
+# ---------------------------------------------------------------- run results (#149)
+
+BANNER = "swarm-session: builder as productswarm-builder[bot]\n"   # ops/swarm-session's stdout (#147)
+
+
+def result_json(subtype, cost, is_error=None, errors=None, sid="run-sid"):
+    """A trimmed --output-format json result, with the fields of real Claude Code 2.1.317
+    runs (`success`, `error_max_budget_usd`, `error_max_turns`; see the PR for #149)."""
+    d = {"type": "result", "subtype": subtype, "is_error": subtype != "success" if is_error is None else is_error,
+         "num_turns": 2, "session_id": sid, "total_cost_usd": cost, "stop_reason": "end_turn"}
+    if subtype == "success":
+        d["result"] = "Opened PR #160."
+    else:
+        d["errors"] = errors or []
+    return json.dumps(d) + "\n"
+
+
+CANNED = {
+    "success": result_json("success", 1.234),
+    "budget": result_json("error_max_budget_usd", 15.02, errors=["Reached maximum budget ($15)"]),
+    "turns": result_json("error_max_turns", 3.5, errors=["Reached maximum number of turns (200)"]),
+    "error": result_json("error_during_execution", 0.42, errors=["API Error: 529 overloaded"]),
+}
+
+
+class ReadResultTest(unittest.TestCase):
+    """watch.read_result() on canned result files, one per way a run can end."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+
+    def read(self, text=None, raw=None):
+        p = self.dir / "r.result.json"
+        if raw is not None:
+            p.write_bytes(raw)
+        elif text is not None:
+            p.write_text(text)
+        return watch.read_result(p)
+
+    def test_success_is_done(self):
+        self.assertEqual(self.read(BANNER + CANNED["success"]),
+                         {"ending": "done", "detail": "", "cost_usd": 1.234, "subtype": "success"})
+
+    def test_budget_reached_is_at_cap(self):
+        self.assertEqual(self.read(BANNER + CANNED["budget"]),
+                         {"ending": "ended at cap", "detail": "budget (--max-budget-usd)", "cost_usd": 15.02,
+                          "subtype": "error_max_budget_usd"})
+
+    def test_turns_reached_is_at_cap(self):
+        r = self.read(BANNER + CANNED["turns"])
+        self.assertEqual((r["ending"], r["detail"], r["cost_usd"]), ("ended at cap", "turns (--max-turns)", 3.5))
+
+    def test_other_error_is_error_with_its_messages(self):
+        r = self.read(BANNER + CANNED["error"])
+        self.assertEqual((r["ending"], r["detail"], r["cost_usd"]), ("error", "API Error: 529 overloaded", 0.42))
+
+    def test_success_with_is_error_is_an_error(self):
+        r = self.read(BANNER + result_json("success", 0.1, is_error=True))
+        self.assertEqual((r["ending"], r["detail"]), ("error", "subtype success"))
+
+    def test_without_the_banner_still_reads(self):
+        self.assertEqual(self.read(CANNED["success"])["ending"], "done")
+
+    def test_missing_file_is_no_result(self):
+        self.assertEqual(self.read(), {"ending": "no result", "detail": "no result file", "cost_usd": None,
+                                       "subtype": None})
+
+    def test_unreadable_or_partial_file_is_no_result(self):
+        for case in (dict(raw=b"\xff\xfe\x00bad"), dict(text=BANNER), dict(text=""),
+                     dict(text=BANNER + CANNED["success"][:40]), dict(text=BANNER + '{"type": "assistant"}\n')):
+            with self.subTest(case=case):
+                r = self.read(**case)
+                self.assertEqual((r["ending"], r["cost_usd"]), ("no result", None))
+        (self.dir / "d.result.json").mkdir()                     # a path that can't be read as a file
+        self.assertEqual(watch.read_result(self.dir / "d.result.json")["ending"], "no result")
+
+    def test_a_non_number_cost_is_no_cost(self):
+        self.assertIsNone(self.read(result_json("success", "lots"))["cost_usd"])
+        self.assertIsNone(self.read(result_json("success", True))["cost_usd"])
+
+
+class RunRecordTest(unittest.TestCase):
+    """swarm watch records how each run it started ended, and `swarm inbox` lists it (#149)."""
+
+    setUp = StartTest.setUp
+    manifest = StartTest.manifest
+    watcher = StartTest.watcher
+    exit = StartTest.exit
+
+    def entry(self, name):
+        (e,) = [e for e in self.l.load() if e.name == name]
+        return e
+
+    def end(self, name, text=None):
+        """`name` exits, leaving `text` as its result file (none if text is None)."""
+        e = self.entry(name)
+        if text is not None:
+            self.l.result_file(e.session_id).write_text(text)
+        self.exit(name)
+        return e
+
+    def state(self):
+        return json.loads((self.home / "launcher" / "watch.json").read_text())
+
+    def inbox(self, now=NOW):
+        return swarm.inbox_text([], now, G, watch.waiting(self.l), watch.runs(self.l))
+
+    def test_each_ending_is_recorded_against_its_trigger_and_nothing_restarts(self):
+        self.watcher().tick(NOW)
+        ends = {"builder-issue-49": BANNER + CANNED["budget"], "docs-issue-87": BANNER + CANNED["success"],
+                "planner-issue-88": BANNER + CANNED["error"], "reviewer-watch": None}
+        sids = {name: self.end(name, text).session_id for name, text in ends.items()}
+        later = NOW + dt.timedelta(minutes=5)
+        self.assertEqual(self.watcher().tick(later), [])
+        self.assertEqual(len(self.fake.commands), 4)               # the triggers stay done
+        st = self.state()
+        self.assertTrue(all(v.startswith("started ") for v in st["acted"].values()))
+        runs = st["runs"]
+        self.assertEqual(runs["build:49:11"], {
+            "session_id": sids["builder-issue-49"], "name": "builder-issue-49", "kind": "build", "ref": "#49",
+            "started": NOW.isoformat(), "ending": "ended at cap", "detail": "budget (--max-budget-usd)",
+            "cost_usd": 15.02, "subtype": "error_max_budget_usd", "ended": later.isoformat()})
+        got = {r["name"]: (r["ending"], r["cost_usd"]) for r in runs.values()}
+        self.assertEqual(got, {"builder-issue-49": ("ended at cap", 15.02), "docs-issue-87": ("done", 1.234),
+                               "planner-issue-88": ("error", 0.42), "reviewer-watch": ("no result", None)})
+        self.assertIn("[build] #49 builder-issue-49 · ended at cap (budget (--max-budget-usd)) · $15.02 (est.)"
+                      " -> recorded", self.lines)
+        self.watcher().tick(later + dt.timedelta(minutes=5))       # recorded once
+        self.assertEqual(sum(x.endswith("-> recorded") for x in self.lines), 4)
+
+    def test_a_live_run_is_not_recorded_yet(self):
+        self.watcher().tick(NOW)
+        self.watcher().tick(NOW)
+        self.assertTrue(all("ending" not in r for r in self.state()["runs"].values()))
+        self.assertEqual(len(self.state()["runs"]), 4)
+
+    def test_inbox_lists_a_run_that_ended_at_cap_with_its_ref_and_cost_and_every_cost(self):
+        self.watcher().tick(NOW)
+        self.end("builder-issue-49", BANNER + CANNED["turns"])
+        self.end("docs-issue-87", BANNER + CANNED["success"])
+        self.watcher().tick(NOW)
+        text = self.inbox()
+        capped = text.split("swarm watch runs that ended at cap (restart one if its work should go on):\n")[1]
+        self.assertTrue(capped.startswith("- [build] #49 builder-issue-49 · ended at cap (turns (--max-turns))"
+                                          " · $3.50 (est.) · ended "))
+        self.assertNotIn("Nothing is waiting on you.", text)
+        recent = text.split("swarm watch runs in the last 7 days (cost is Claude Code's local estimate):\n")[1]
+        self.assertIn("- [build] #49 builder-issue-49 · ended at cap", recent)
+        self.assertIn("- [record] #87 docs-issue-87 · done · $1.23 (est.)", recent)
+
+    def test_only_costs_still_says_nothing_is_waiting(self):
+        self.watcher().tick(NOW)
+        self.end("docs-issue-87", BANNER + CANNED["success"])
+        self.watcher().tick(NOW)
+        self.assertTrue(self.inbox().startswith("Nothing is waiting on you.\n\nswarm watch runs in the last"))
+
+    def test_a_later_run_on_the_same_ref_clears_the_cap_item(self):
+        self.watcher().tick(NOW)
+        self.end("builder-issue-49", BANNER + CANNED["budget"])
+        self.scene.events[49] += [ev("ready", eid=20, kind="unlabeled"), ev("ready", eid=21)]  # the owner restarts it
+        later = NOW + dt.timedelta(minutes=5)
+        self.assertEqual([t.ref for t in self.watcher().tick(later)], ["#49"])
+        text = self.inbox(later)
+        self.assertNotIn("ended at cap (restart", text)
+        self.assertIn("- [build] #49 builder-issue-49 · ended at cap", text)  # its cost is still listed
+
+    def test_records_older_than_runs_days_drop_out(self):
+        self.watcher().tick(NOW)
+        self.end("builder-issue-49", BANNER + CANNED["budget"])
+        self.watcher().tick(NOW)
+        week = NOW + dt.timedelta(days=watch.RUNS_DAYS, minutes=1)
+        self.assertNotIn("#49", self.inbox(week))
+        self.watcher().tick(week)
+        self.assertNotIn("build:49:11", self.state()["runs"])
+
+    def test_an_ended_at_cap_runs_unpushed_work_keeps_its_worktree(self):
+        self.watcher().tick(NOW)
+        e = self.entry("builder-issue-49")
+        self.l.git.unpushed.add(e.session_id)
+        self.end("builder-issue-49", BANNER + CANNED["budget"])
+        self.watcher().tick(NOW)
+        wt = self.home / "repo" / ".worktrees" / e.session_id
+        self.assertTrue(wt.exists())
+        self.assertIn(wt, self.l.kept)
+        self.assertEqual(self.state()["runs"]["build:49:11"]["ending"], "ended at cap")
+
+    def test_dry_run_records_nothing(self):
+        self.watcher().tick(NOW)
+        self.end("builder-issue-49", BANNER + CANNED["budget"])
+        before = self.state()
+        watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=True, manifest_path=self.path,
+                    read=self.scene.read).tick(NOW)
+        self.assertEqual(self.state(), before)
+
+    def test_old_state_without_runs_still_loads(self):
+        (self.home / "launcher" / "watch.json").write_text(json.dumps({"checked": None, "acted": {}, "waiting": []}))
+        self.assertEqual(watch.load_state(self.l)["runs"], {})
+        self.assertEqual(watch.runs(self.l), [])

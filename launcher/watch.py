@@ -70,6 +70,15 @@ refusal is logged and the trigger is done. What it has acted on is kept in
 ~/.productswarm/launcher/watch.json, so a restart starts nothing twice. One reviewer
 pass covers every review trigger present when it starts.
 
+How each run ended (#149): when a run the loop started is no longer live, the loop reads
+its result file and records, against the trigger in watch.json's "runs", the session id,
+Claude Code's total_cost_usd (a client-side estimate that stays local: GOV-0002/3/4) and
+its ending: done, ended at cap (--max-budget-usd or --max-turns), error, or no result (no
+file or no JSON result, for example after `swarm stop`). The trigger stays done, so the
+loop never restarts it by itself; `swarm inbox` lists a run that ended at cap, with its
+ref and cost, so the owner can decide whether to restart it, and lists every recorded
+cost from the last RUNS_DAYS days. A kept worktree is tidy()'s job, as for any session.
+
 It never stops a session (GOV-0008), never adds or removes labels, and never comments,
 approves or merges: its only GitHub calls are reads. Sessions it starts are recorded
 with by="watch", and `swarm ls` shows them as "by watch".
@@ -95,6 +104,14 @@ DEFAULT_INTERVAL = 5          # minutes, for --dry-run when swarm.toml has no [w
 STATE_FILE = "watch.json"     # in the launcher's state directory
 REF_RE = re.compile(r"#(\d+)")
 GOV_RE = re.compile(r"\bGOV-\d{4}\b")
+RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and watch.json keeps it
+
+# How a headless run ended, from the `subtype` of its --output-format json result: the
+# SDKResultMessage type in the Claude Code Agent SDK reference (#149). Any other subtype,
+# or "success" with is_error set, is an error.
+DONE, AT_CAP, ERROR, NO_RESULT = "done", "ended at cap", "error", "no result"
+CAPS = {"error_max_budget_usd": "budget (--max-budget-usd)",
+        "error_max_turns": "turns (--max-turns)"}
 
 
 @dataclass(frozen=True)
@@ -345,15 +362,65 @@ def state_path(launcher: "swarm.Launcher") -> Path:
 
 
 def load_state(launcher: "swarm.Launcher") -> dict:
-    """{"checked": ISO time, "acted": {key: outcome}, "waiting": [trigger dicts]}."""
+    """{"checked": ISO time, "acted": {key: outcome}, "waiting": [trigger dicts],
+    "runs": {key: run record}}. A run record (#149) is {session_id, name, kind, ref,
+    started}, plus {ending, detail, cost_usd, subtype, ended} once the run has ended."""
     try:
         data = json.loads(state_path(launcher).read_text())
     except FileNotFoundError:
-        return {"checked": None, "acted": {}, "waiting": []}
+        return {"checked": None, "acted": {}, "waiting": [], "runs": {}}
     except ValueError as e:
         raise RuntimeError(f"{state_path(launcher)} is not valid JSON: {e}") from None
     return {"checked": data.get("checked"), "acted": dict(data.get("acted") or {}),
-            "waiting": list(data.get("waiting") or [])}
+            "waiting": list(data.get("waiting") or []), "runs": dict(data.get("runs") or {})}
+
+
+def read_result(path: Path) -> dict:
+    """How a headless run ended (#149), from its result file: ops/swarm-session's banner,
+    then the JSON result on the last line (#147). Never raises.
+
+    {"ending", "detail", "cost_usd", "subtype"}; cost_usd is total_cost_usd, or None."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return {"ending": NO_RESULT, "detail": "no result file", "cost_usd": None, "subtype": None}
+    except (OSError, UnicodeDecodeError) as e:
+        return {"ending": NO_RESULT, "detail": f"can't read the result file ({e.__class__.__name__})",
+                "cost_usd": None, "subtype": None}
+    lines = [x for x in text.splitlines() if x.strip()]
+    result = None
+    for candidate in (text, lines[-1] if lines else ""):
+        try:
+            d = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "result":
+            result = d
+            break
+    if result is None:
+        return {"ending": NO_RESULT, "detail": "no JSON result in the result file", "cost_usd": None,
+                "subtype": None}
+    cost = result.get("total_cost_usd")
+    cost = float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
+    sub = result.get("subtype")
+    rec = {"cost_usd": cost, "subtype": sub if isinstance(sub, str) else None}
+    if sub in CAPS:
+        return {**rec, "ending": AT_CAP, "detail": CAPS[sub]}
+    if sub == "success" and not result.get("is_error"):
+        return {**rec, "ending": DONE, "detail": ""}
+    errors = result.get("errors")
+    detail = "; ".join(str(e) for e in errors) if isinstance(errors, list) and errors else ""
+    return {**rec, "ending": ERROR, "detail": (detail or f"subtype {sub}")[:200]}
+
+
+def usd(x: float | None) -> str:
+    return "-" if x is None else f"${x:,.2f}"
+
+
+def run_line(r: dict) -> str:
+    """One recorded run, for the loop's log and `swarm inbox`."""
+    ending = r["ending"] + (f" ({r['detail']})" if r.get("detail") else "")
+    return f"[{r['kind']}] {r['ref']} {r['name']} · {ending} · {usd(r.get('cost_usd'))} (est.)"
 
 
 def save_state(launcher: "swarm.Launcher", st: dict) -> None:
@@ -373,6 +440,32 @@ def waiting(launcher: "swarm.Launcher") -> tuple[dt.datetime | None, list[dict]]
         return None, []
     checked = dt.datetime.fromisoformat(st["checked"]) if st["checked"] else None
     return checked, st["waiting"]
+
+
+def runs(launcher: "swarm.Launcher") -> list[dict]:
+    """For `swarm inbox` (#149): every run record in watch.json, ended or not. Never
+    raises: a missing or bad state file shows nothing."""
+    try:
+        return list(load_state(launcher)["runs"].values())
+    except (RuntimeError, OSError):
+        return []
+
+
+def runs_text(runs: list[dict], now: dt.datetime, ago: Callable) -> tuple[list[str], list[str]]:
+    """(lines for runs that ended at cap, lines for every ended run, newest first), within
+    RUNS_DAYS. runs is watch.runs(): every record, including runs still live.
+
+    A run that ended at cap is listed until a later run on the same ref has started (the
+    owner restarted it with a fresh label, or the loop moved on), or RUNS_DAYS pass."""
+    since = now - dt.timedelta(days=RUNS_DAYS)
+    recent = sorted((r for r in runs if r.get("ending") and r.get("ended")
+                     and dt.datetime.fromisoformat(r["ended"]) >= since),
+                    key=lambda r: r["ended"], reverse=True)
+    capped = [r for r in recent if r["ending"] == AT_CAP
+              and not any(o["ref"] == r["ref"] and o["started"] > r["started"] for o in runs)]
+    when = lambda r: f" · ended {ago(dt.datetime.fromisoformat(r['ended']), now)}"
+    return ([f"- {run_line(r)}{when(r)}" for r in capped],
+            [f"- {run_line(r)}{when(r)}" for r in recent])
 
 
 def iso(t: dt.datetime) -> str:
@@ -454,6 +547,7 @@ class Watch:
         live = self.launcher.live()
         st = load_state(self.launcher)
         acted, before = st["acted"], {x["key"]: x for x in st["waiting"]}
+        runs = self.record_ended(st["runs"], live, now)
         todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking)
                 if t.key not in acted]
         todo.sort(key=lambda t: before.get(t.key, {}).get("since", iso(now)))  # held longest first
@@ -462,7 +556,8 @@ class Watch:
         def finish(t: Trigger, outcome: str) -> None:
             acted[t.key] = outcome
             done.append(t)
-            save_state(self.launcher, {"checked": iso(now), "acted": acted, "waiting": st["waiting"]})
+            save_state(self.launcher, {"checked": iso(now), "acted": acted, "waiting": st["waiting"],
+                                       "runs": runs})
 
         def hold(t: Trigger, reason: str) -> None:
             since = before.get(t.key, {}).get("since", iso(now))
@@ -510,11 +605,29 @@ class Watch:
             if self.launcher.start(entry, live):
                 if t.kind == "review":
                     reviewer = entry.name
+                runs[t.key] = {"session_id": entry.session_id, "name": entry.name, "kind": t.kind,
+                               "ref": t.ref, "started": iso(now)}
                 finish(t, f"started {entry.name}")
             else:
                 hold(t, "failed to start (see above); trying again next check")
-        save_state(self.launcher, {"checked": iso(now), "acted": acted, "waiting": held})
+        save_state(self.launcher, {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs})
         return done
+
+    def record_ended(self, runs: dict, live: list, now: dt.datetime) -> dict:
+        """Record how each run this loop started ended, once it is no longer live (#149):
+        read its result file and log one line. Records older than RUNS_DAYS are dropped.
+        Its trigger stays done in "acted", so the loop never starts it again by itself."""
+        alive = {e.session_id for e in live}
+        since = iso(now - dt.timedelta(days=RUNS_DAYS))
+        kept = {}
+        for key, r in runs.items():
+            if r.get("ended") and r["ended"] < since:
+                continue
+            if not r.get("ending") and r["session_id"] not in alive:
+                r = {**r, **read_result(self.launcher.result_file(r["session_id"])), "ended": iso(now)}
+                self.launcher.out(f"{run_line(r)} -> recorded")
+            kept[key] = r
+        return kept
 
     def refusal(self, t: Trigger, live: list, now: dt.datetime) -> tuple[str | None, bool]:
         """`swarm launch`'s refusal checks, run again on fresh GitHub data just before a
