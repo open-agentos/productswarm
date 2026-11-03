@@ -41,7 +41,7 @@ For now, plan **stage B only**:
 - Applies when: planning or building v3 work, or deciding which v3 stage or sub-question comes next.
 - Does not apply when: any F or C work before the owner has reviewed B's results; this ruling does not let that start.
 - It approves the direction only. #167 names five sub-questions (public Actions logs vs GOV-0002/0004; prompt injection and secrets; App private keys in Actions secrets, one-way; model billing in Actions; trigger design), plus smaller design calls (where B's report lives, F's form). Each is still its own question, raised when its stage is next. Nothing here rules on any of them.
-- Option 2's launchd local loop (A), a kit for other repos (D) and other model providers (E) are not part of v3.
+- Option 2's launchd local loop (A) is not part of v3. A kit for other repos (D) and other model providers (E) stay deferred as #167 describes; this ruling does not decide them.
 
 ## Context
 
