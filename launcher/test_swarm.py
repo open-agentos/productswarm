@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -192,6 +193,84 @@ class CommandTest(Base):
         self.assertEqual(argv, [f"{wt}/ops/swarm-session", "builder", "--model", "claude-sonnet-5-5",
                                 "--session-id", e.session_id, swarm.opener("builder")])
         self.assertIn(f"echo $$ >| {self.home}/launcher/{e.session_id}.pid", script)
+
+    def test_up_and_launch_commands_are_byte_for_byte_unchanged(self):
+        # #147 changes only runs swarm watch starts; these are command() before it.
+        l = swarm.Launcher(Path("/h"), root=Path("/r"))
+        sid = "0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41"
+        self.assertEqual(
+            l.command(swarm.Started("builder-1", "builder", "claude-opus-5-5", sid, 0)),
+            'exec /bin/bash -c \'cd /r/.worktrees/0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41 && echo $$ >| '
+            '/h/launcher/0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41.pid && exec /r/.worktrees/'
+            '0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41/ops/swarm-session builder --model claude-opus-5-5 '
+            '--session-id 0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41 \'"\'"\'You are the builder for '
+            'productswarm. Read CLAUDE.md, PRODUCT.md and roles/builder.md, then begin.\'"\'"\'\'')
+        self.assertEqual(
+            l.command(swarm.Started("builder-pr-72", "builder", "claude-opus-5-5", sid, 0, issue=73, pr=72)),
+            'exec /bin/bash -c \'cd /r/.worktrees/0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41 && echo $$ >| '
+            '/h/launcher/0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41.pid && exec /r/.worktrees/'
+            '0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41/ops/swarm-session builder --model claude-opus-5-5 '
+            '--session-id 0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41 \'"\'"\'You are the builder for '
+            'productswarm. Read CLAUDE.md, PRODUCT.md and roles/builder.md, then respond to the '
+            'requested changes on PR #72, which closes issue #73.\'"\'"\'\'')
+
+    def watch_entry(self, **kw):
+        d = dict(issue=49, by="watch", budget_usd=15.0, max_turns=200)
+        d.update(kw)
+        return swarm.Started("builder-issue-49", "builder", "claude-opus-5-5",
+                             "0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41", 0, **d)
+
+    def test_a_run_swarm_watch_starts_is_headless(self):
+        import shlex
+        e = self.watch_entry()
+        (script,) = shlex.split(self.l.command(e)[len("exec /bin/bash -c "):])
+        wt = self.root / ".worktrees" / e.session_id
+        result = self.home / "launcher" / f"{e.session_id}.result.json"
+        self.assertTrue(script.startswith(f"cd {wt} && echo $$ >| {self.home}/launcher/{e.session_id}.pid && "))
+        # The window says what it is before exec, then stdout goes to the result file.
+        note, rest = script.split(" && exec ", 1)
+        self.assertIn("headless run (claude -p)", shlex.split(note.rsplit(" && ", 1)[1])[1])
+        self.assertIn(str(result), note)
+        argv, redirect = rest.split(" >| ")
+        self.assertEqual(shlex.split(redirect), [str(result)])
+        self.assertEqual(shlex.split(argv), [
+            f"{wt}/ops/swarm-session", "builder", "--model", "claude-opus-5-5",
+            "--session-id", e.session_id,
+            "-p", swarm.opener("builder", 49),
+            "--permission-mode", "auto",                                   # GOV-0013
+            "--disallowedTools", *swarm.DENY,
+            "--max-budget-usd", "15", "--max-turns", "200",               # GOV-0012
+            "--output-format", "json"])
+
+    def test_headless_budget_and_turns_come_from_the_entry(self):
+        argv = swarm.Launcher.headless_args(self.watch_entry(budget_usd=2.5, max_turns=7))
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "2.5")
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "7")
+        # --disallowedTools takes several values: a flag must follow its last pattern.
+        i = argv.index("--disallowedTools") + len(swarm.DENY) + 1
+        self.assertEqual(argv[i], "--max-budget-usd")
+
+    def test_a_watch_run_with_no_budget_or_ceiling_never_starts(self):
+        for kw in ({"budget_usd": None}, {"max_turns": None}):
+            with self.assertRaises(RuntimeError):
+                self.l.command(self.watch_entry(**kw))
+            lines = []
+            self.l.out = lines.append
+            self.assertFalse(self.l.start(self.watch_entry(**kw), []))
+            self.assertEqual(self.fake.commands, [])
+            self.assertIn("GOV-0012", lines[-1])
+
+    def test_deny_patterns_cover_merge_and_label_edits(self):
+        # GOV-0013: the two rules governance cares about most, as #147 lists them.
+        for d in ("Bash(gh pr merge *)", "Bash(gh issue edit * --add-label *)",
+                  "Bash(gh issue edit * --remove-label *)", "Bash(gh pr edit * --add-label *)",
+                  "Bash(gh pr edit * --remove-label *)", "Bash(gh label *)",
+                  "Bash(gh api *labels*)", "Bash(gh api *merge*)"):
+            self.assertIn(d, swarm.DENY)
+
+    def test_budget_and_ceiling_survive_the_state_file(self):
+        e = self.watch_entry()
+        self.assertEqual(swarm.Started.from_dict(json.loads(json.dumps(e.__dict__))), e)
 
     def test_applescript_string_escapes(self):
         self.assertEqual(swarm.applescript_string('a "b" \\c'), '"a \\"b\\" \\\\c"')
@@ -586,14 +665,16 @@ class RealShellTest(unittest.TestCase):
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd,
                        check=True, capture_output=True)
 
-    def repo(self, tmp: Path) -> Path:
+    SLEEPS = '#!/bin/bash\nexec python3 -c "import time; time.sleep(30)" "$@"\n'
+
+    def repo(self, tmp: Path, script: str = SLEEPS) -> Path:
         """A real checkout whose origin's main has a stand-in ops/swarm-session that sleeps."""
         origin, seed, root = tmp / "origin.git", tmp / "seed", tmp / "repo"
         self.git("init", "-q", "--bare", "-b", "main", str(origin))
         self.git("clone", "-q", str(origin), str(seed))
         (seed / "ops").mkdir()
         fake = seed / "ops" / "swarm-session"
-        fake.write_text('#!/bin/bash\nexec python3 -c "import time; time.sleep(30)" "$@"\n')
+        fake.write_text(script)
         fake.chmod(0o755)
         (seed / ".gitignore").write_text(".worktrees/\n.claude/settings.local.json\n")
         self.git("add", "-A", cwd=seed)
@@ -656,6 +737,36 @@ class RealShellTest(unittest.TestCase):
                 for p in procs:
                     if p.poll() is None:
                         p.kill()
+
+
+    def test_headless_run_writes_its_result_and_keeps_the_pid(self):
+        # #147: a stand-in swarm-session that prints its banner as the real one does, then
+        # its argv as JSON, as claude -p --output-format json prints one JSON result.
+        script = ('#!/bin/bash\necho "swarm-session: $1 as stand-in[bot]"\n'
+                  'exec python3 -c "import json, os, sys; print(json.dumps({\'pid\': os.getpid(), '
+                  '\'argv\': sys.argv[1:]}))" "$@"\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            root, home = self.repo(tmp, script), tmp / "home"
+            procs, lines = [], []
+            l = swarm.Launcher(home, root=root, out=lines.append,
+                               run=lambda cmd: procs.append(subprocess.Popen(
+                                   ["/bin/sh", "-c", cmd], stdout=subprocess.PIPE, text=True)))
+            e = swarm.Started("builder-issue-49", "builder", "m", str(uuid.uuid4()), time.time(),
+                              issue=49, by="watch", budget_usd=15, max_turns=200)
+            self.assertTrue(l.start(e, []))
+            window = procs[0].communicate(timeout=10)[0]
+            self.assertIn("headless run (claude -p)", window)
+            self.assertIn(str(l.result_file(e.session_id)), window)
+            banner, result = l.result_file(e.session_id).read_text().splitlines()
+            self.assertEqual(banner, "swarm-session: builder as stand-in[bot]")
+            result = json.loads(result)
+            self.assertEqual(result["pid"], l.pid(e))                 # both exec's kept the pid
+            self.assertEqual(result["argv"], ["builder", "--model", "m", "--session-id", e.session_id,
+                                              "-p", swarm.opener("builder", 49),
+                                              "--permission-mode", "auto", "--disallowedTools", *swarm.DENY,
+                                              "--max-budget-usd", "15", "--max-turns", "200",
+                                              "--output-format", "json"])
 
 
 if __name__ == "__main__":

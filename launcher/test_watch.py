@@ -29,6 +29,18 @@ ROLES = {"builder", "docs", "planner", "reviewer"}
 SHA1, SHA2 = "a" * 40, "b" * 40
 
 
+def trigger_lines(lines):
+    """Dry-run output without the indented headless command under each trigger (#147)."""
+    return [x for x in lines if not x.startswith("  ")]
+
+
+def headless_argv(command: str) -> list[str]:
+    """The ops/swarm-session argv in a window command, up to the result redirect."""
+    import shlex
+    (script,) = shlex.split(command[len("exec /bin/bash -c "):])
+    return shlex.split(script.split("&& exec ", 1)[1].split(" >| ", 1)[0])
+
+
 def ts(minutes_ago):
     return (NOW - dt.timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -158,7 +170,7 @@ class WatchTest(unittest.TestCase):
         first = self.w.tick(NOW)
         self.assertEqual(self.kinds(first), [("review", "PR #70"), ("record", "#87"), ("answer", "#88"),
                                              ("build", "#49")])
-        self.assertEqual(self.lines, [
+        self.assertEqual(trigger_lines(self.lines), [
             "[review] PR #70 head aaaaaaa not reviewed by the reviewer -> would start a reviewer pass",
             "[record] #87 gov:ruled by the owner, needs a record (domain governance) -> would start "
             "`launcher/swarm launch docs --issue 87`",
@@ -167,7 +179,35 @@ class WatchTest(unittest.TestCase):
         ])
         self.assertEqual(self.w.tick(NOW), [])
         self.assertEqual(self.w.tick(NOW), [])
-        self.assertEqual(len(self.lines), 4)
+        self.assertEqual(len(self.lines), 8)       # each with its headless command (#147)
+
+    def test_dry_run_prints_the_full_headless_command_under_each_trigger(self):
+        # #147: what a real start would run, with every flag, from swarm.toml.
+        path = write_manifest(self.home, {"builder": 15, "docs": 5, "planner": 5, "reviewer": 5},
+                              max_turns=200)
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=path)
+        w.tick(NOW)
+        self.assertEqual(len(self.lines), 8)
+        build = self.lines[self.lines.index(
+            "[build] #49 ready by the owner -> would start `launcher/swarm launch builder --issue 49`") + 1]
+        argv = headless_argv(build.strip())
+        self.assertEqual(argv[1:6], ["builder", "--model", "m-builder", "--session-id", argv[5]])
+        self.assertEqual(argv[6:], ["-p", swarm.opener("builder", 49), "--permission-mode", "auto",
+                                    "--disallowedTools", *swarm.DENY, "--max-budget-usd", "15",
+                                    "--max-turns", "200", "--output-format", "json"])
+        self.assertIn(f">| {self.home}/launcher/{argv[5]}.result.json", build)
+        self.assertEqual(self.fake.commands, [])
+        self.assertFalse((self.home / "launcher" / "sessions.json").exists())
+
+    def test_dry_run_says_why_there_is_no_headless_command(self):
+        path = write_manifest(self.home, {r: 5 for r in ROLES - {"docs"}})
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=path)
+        w.tick(NOW)
+        self.assertIn("  (no headless command: docs has no spend_cap_usd in swarm.toml)", self.lines)
+        path = write_manifest(self.home, ALL_CAPPED, max_turns=None)
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=path)
+        w.tick(NOW)
+        self.assertIn("  (no headless command: swarm.toml's [watch] table has no max_turns)", self.lines)
 
     def test_new_push_or_fresh_owner_label_is_a_new_trigger(self):
         self.w.tick(NOW)
@@ -206,7 +246,7 @@ class WatchTest(unittest.TestCase):
 
     def test_a_live_loop_started_reviewer_keeps_reviews_quiet(self):
         self.l.start(swarm.Started("reviewer-watch", "reviewer", "m", "watch-sid", self.fake.t,
-                                   by="watch"), [])
+                                   by="watch", budget_usd=5, max_turns=50), [])
         self.assertNotIn("review", [t.kind for t in self.w.tick(NOW)])      # starting, no heartbeat
         self.w.seen.clear()
         self.reviewer_on_heartbeat("watch-sid")
@@ -280,9 +320,13 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(watch.needs_record(question_body(blast="external")), "blast radius external")
 
 
-def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = True) -> Path:
+def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = True,
+                   max_turns: int | None = 50) -> Path:
     """A swarm.toml with every role, the given caps, and a [watch] table."""
-    text = ("[watch]\ninterval_minutes = 5\nmax_live = %d\n\n" % max_live) if watch_table else ""
+    text = ""
+    if watch_table:
+        text = "[watch]\ninterval_minutes = 5\nmax_live = %d\n" % max_live
+        text += ("max_turns = %d\n" % max_turns if max_turns is not None else "") + "\n"
     for role in sorted(ROLES):
         text += f'[[session]]\nrole = "{role}"\ncount = 1\nmodel = "m-{role}"\n'
         if role in caps:
@@ -346,6 +390,34 @@ class StartTest(unittest.TestCase):
             self.exit(name)                                          # all stop; nothing is busy now
         self.assertEqual(self.watcher().tick(NOW), [])              # a restart over the same state
         self.assertEqual(len(self.fake.commands), 4)
+
+    def test_each_run_is_headless_with_its_roles_budget_and_the_turn_ceiling(self):
+        # #147 / GOV-0012: --max-budget-usd is the role's spend_cap_usd, --max-turns is [watch].
+        self.manifest({"builder": 15, "docs": 5, "planner": 4.5, "reviewer": 3}, max_turns=120)
+        self.watcher().tick(NOW)
+        by_role = {}
+        for c in self.fake.commands:
+            argv = headless_argv(c)
+            by_role[argv[1]] = argv
+        self.assertEqual(sorted(by_role), ["builder", "docs", "planner", "reviewer"])
+        for role, cap in (("builder", "15"), ("docs", "5"), ("planner", "4.5"), ("reviewer", "3")):
+            argv = by_role[role]
+            self.assertEqual(argv[argv.index("--max-budget-usd") + 1], cap)
+            self.assertEqual(argv[argv.index("--max-turns") + 1], "120")
+            self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
+            self.assertEqual(argv[argv.index("--output-format") + 1], "json")
+            self.assertTrue(argv[argv.index("-p") + 1].startswith(f"You are the {role} "))
+            i = argv.index("--disallowedTools") + 1
+            self.assertEqual(tuple(argv[i:i + len(swarm.DENY)]), swarm.DENY)
+        self.assertEqual({(e.budget_usd, e.max_turns) for e in self.l.load() if e.role == "builder"},
+                         {(15.0, 120)})
+
+    def test_no_max_turns_starts_nothing_and_the_loop_goes_on(self):
+        self.manifest(ALL_CAPPED, max_turns=None)
+        w = self.watcher()
+        self.assertEqual(w.run(5, ticks=2, sleep=lambda s: None), 0)
+        self.assertEqual(self.fake.commands, [])
+        self.assertEqual(sum("has no max_turns; starting nothing (GOV-0012)" in x for x in self.lines), 2)
 
     def test_a_fresh_owner_label_starts_again(self):
         self.watcher().tick(NOW)
@@ -432,7 +504,7 @@ class StartTest(unittest.TestCase):
         self.scene.reviewed[72] = set()
         # A reviewer an earlier `swarm watch` run started, still live.
         self.l.start(swarm.Started("reviewer-watch", "reviewer", "m", "rev-sid", self.fake.t,
-                                   by="watch"), [])
+                                   by="watch", budget_usd=5, max_turns=50), [])
         t_issue, t_comments = tracking(202, "rev-sid", "reviewer", None)
         self.scene.tracking.append(t_issue)
         self.scene.comments[202] = t_comments
@@ -521,7 +593,8 @@ class StartTest(unittest.TestCase):
 class ManifestWatchTest(unittest.TestCase):
     def test_repo_manifest_has_the_limits_from_88(self):
         import manifest
-        self.assertEqual(manifest.load_watch(), manifest.WatchLimits(interval_minutes=5, max_live=2))
+        self.assertEqual(manifest.load_watch(),
+                         manifest.WatchLimits(interval_minutes=5, max_live=2, max_turns=200))
 
     def test_bad_watch_table_lists_every_problem(self):
         import manifest
@@ -530,12 +603,29 @@ class ManifestWatchTest(unittest.TestCase):
         with self.assertRaises(manifest.ManifestError) as c:
             manifest.parse_all(text)
         self.assertEqual(c.exception.problems, [
-            "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live)",
+            "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live, max_turns)",
             "watch: interval_minutes must be a positive number, got 0",
             "watch: max_live must be a whole number of at least 1, got 1.5"])
         with self.assertRaises(manifest.ManifestError) as c:
             manifest.parse_all('[watch]\nmax_live = 2\n[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n')
         self.assertEqual(c.exception.problems, ["watch: missing 'interval_minutes'"])
+
+    def test_max_turns_must_be_a_positive_whole_number(self):
+        import manifest
+        base = '[watch]\ninterval_minutes = 5\nmax_live = 2\n%s\n[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n'
+        for v in ("0", "-3", "1.5", '"200"', "true"):
+            with self.assertRaises(manifest.ManifestError, msg=v) as c:
+                manifest.parse_all(base % f"max_turns = {v}")
+            self.assertEqual(len(c.exception.problems), 1)
+            self.assertIn("watch: max_turns must be a whole number of at least 1", c.exception.problems[0])
+        self.assertEqual(manifest.parse_all(base % "max_turns = 200")[1].max_turns, 200)
+
+    def test_max_turns_missing_is_fine_for_up_but_not_for_watch(self):
+        import manifest
+        sessions, limits = manifest.parse_all(
+            '[watch]\ninterval_minutes = 5\nmax_live = 2\n[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n')
+        self.assertEqual(len(sessions), 1)
+        self.assertIsNone(limits.max_turns)
 
     def test_no_watch_table_is_fine_for_up(self):
         import manifest
@@ -559,6 +649,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(swarm.main(["watch", "--repo", REPO, "--manifest", str(path)], self.l), 1)
         self.assertIn("no [watch] table", self.lines[0])
         self.assertIn("GOV-0010", self.lines[0])
+
+    def test_without_max_turns_refuses_and_names_gov_0012(self):
+        path = write_manifest(Path(tempfile.mkdtemp()), ALL_CAPPED, max_turns=None)
+        self.assertEqual(swarm.main(["watch", "--repo", REPO, "--manifest", str(path)], self.l), 1)
+        self.assertIn("no max_turns", self.lines[0])
+        self.assertIn("GOV-0012", self.lines[0])
 
     def test_script_refuses_interval_without_dry_run(self):
         r = subprocess.run([str(HERE / "swarm"), "watch", "--interval", "1", "--repo", REPO],
@@ -653,8 +749,10 @@ class RespondTest(unittest.TestCase):
         self.request(SHA1)
         w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read)
         w.tick(NOW)
-        self.assertEqual(self.lines, ["[respond] PR #72 changes requested at aaaaaaa (round 1 of 2) "
-                                      "-> would start `launcher/swarm launch builder --issue 73 --pr 72`"])
+        self.assertEqual(trigger_lines(self.lines),
+                         ["[respond] PR #72 changes requested at aaaaaaa (round 1 of 2) "
+                          "-> would start `launcher/swarm launch builder --issue 73 --pr 72`"])
+        self.assertIn("respond to the requested changes on PR #72", self.lines[1])
         self.assertEqual(self.fake.commands, [])
 
     def test_needs_the_builders_cap_and_counts_toward_the_ceiling(self):
