@@ -145,6 +145,49 @@ class BuilderTest(HookCase):
         self.gh.put("issues/11", issue(11, ("enhancement",)))     # not a gov:question
         self.assertBlocks("No PR closes #7")
 
+    # -- blocked on an unfinished prerequisite (#184)
+
+    def said_on_7(self, body, when=AFTER, who=ME["builder"]):
+        self.gh.put("issues/7/comments", [{"created_at": when, "user": {"login": who},
+                                           "body": body}])
+
+    def test_no_pr_block_says_how_to_report_a_prerequisite(self):
+        self.builder_on()
+        self.assertBlocks("comment on #7 naming that issue")
+
+    def test_commented_naming_an_open_prerequisite_is_done(self):
+        self.builder_on()
+        self.said_on_7("This needs `evals/results.md`, which #174 creates. Stopping until #174 is done.")
+        self.gh.put("issues/174", issue(174, ()))
+        self.assertAllows()
+
+    def test_a_closed_prerequisite_does_not_count(self):
+        self.builder_on()
+        self.said_on_7("Blocked on #174.")
+        self.gh.put("issues/174", issue(174, (), state="closed"))
+        self.assertBlocks("No PR closes #7")
+
+    def test_naming_an_open_pr_or_its_own_issue_does_not_count(self):
+        self.builder_on()
+        self.said_on_7("Working on #7; see PR #50.")
+        self.gh.put("issues/7", {**issue(7), "body": ""})
+        self.gh.put("issues/50", {**issue(50, ()), "pull_request": {"url": "x"}})
+        self.assertBlocks("No PR closes #7")
+
+    def test_prerequisite_comment_before_the_run_or_by_others_does_not_count(self):
+        self.builder_on()
+        self.gh.put("issues/174", issue(174, ()))
+        self.said_on_7("Blocked on #174.", when=BEFORE)
+        self.assertBlocks("No PR closes #7")
+        self.said_on_7("Blocked on #174.", who="someone")
+        self.assertBlocks("No PR closes #7")
+
+    def test_links_and_other_repos_do_not_count(self):
+        self.builder_on()
+        self.gh.put("issues/174", issue(174, ()))
+        self.said_on_7("See https://github.com/o/r/issues/7#174 and other/repo#174.")
+        self.assertBlocks("No PR closes #7")
+
 
 class RespondTest(HookCase):
     def setUp(self):
