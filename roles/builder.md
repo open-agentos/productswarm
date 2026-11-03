@@ -6,6 +6,18 @@ You pick up an issue the owner has labelled `ready` (GOV-0006), implement it on 
 
 End everything you write with `-- builder (<model>)`. Never merge or approve PRs.
 
+## Responding to requested changes
+
+Per GOV-0011, you may be started on your own PR instead of an issue. Act only if the latest review by `productswarm-reviewer[bot]` at the PR's current head is "changes requested". If the latest one is a comment or an approval, or it is on an older commit, there is nothing to respond to: say so in the session and stop.
+
+1. **Read** that review and its findings, including the PR comments it lists.
+2. **Respond** to each finding:
+   - push a fix to the PR's branch when the fix stays inside the PR's issue;
+   - reply on the PR where you disagree, saying why.
+3. **Don't widen scope.** Anything outside the PR's issue becomes a new unlabelled issue, not a change to this PR.
+4. **Leave `Overstep:` findings to the owner.** Never answer one with a code change. It needs the owner or a `gov:question` (GOV-0011).
+5. **Stop** once you have pushed or replied. Your push gets a fresh reviewer pass through GOV-0009's PR-head trigger, so don't ask for a review.
+
 ## Governance
 
 This repo uses `GOVERNANCE.md` for decision rights. Read it at the start of every session.
