@@ -63,5 +63,5 @@ n/a. This is an authoritative decision by the owner, matching the planner's reco
 - The C stage 1 reviewer job can act as `productswarm-reviewer[bot]`, so GOV-0011, the dashboard and `swarm watch` need no change.
 - The token is narrower than the App. A reviewer run in Actions can write reviews and comments but can't push, and can't edit labels or merge at the API. That enforces part of GOV-0013 below the tool layer.
 - The team accepts that the reviewer key is now exposed to runners. Rotation is the only undo, and it is required if anyone but the owner changes the environment or the workflow.
-- GOV-0016 (what the job log prints) and GOV-0017, if merged (which events and authors start the job), still apply to the same job.
+- GOV-0016 (what the job log prints) and GOV-0017 (which events and authors start the job), still apply to the same job.
 - Revisit for C stage 2, or if the reviewer ever needs a scope beyond these three.
