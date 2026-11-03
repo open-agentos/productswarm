@@ -1,0 +1,653 @@
+{
+  "prs": [
+    {
+      "closed_issues": [
+        47
+      ],
+      "files": [
+        "launcher/README.md",
+        "launcher/manifest.py",
+        "launcher/test_manifest.py",
+        "swarm.toml"
+      ],
+      "gov_ids": [
+        "GOV-0005"
+      ],
+      "head_sha": "df8dbd299df4435a2239250f2ac08684e451b0ba",
+      "issue": {
+        "done_when": "- `python3 -m unittest discover -s launcher` passes.\n- A bad manifest (unknown role, unknown key, count 0) fails with a message that names the problem.",
+        "number": 47,
+        "title": "Launcher: swarm manifest and loader"
+      },
+      "merged_at": "2026-11-02T18:18:25Z",
+      "number": 64,
+      "reviews": [],
+      "title": "Launcher: swarm manifest and loader (L1)"
+    },
+    {
+      "closed_issues": [
+        48
+      ],
+      "files": [
+        "launcher/README.md",
+        "launcher/swarm",
+        "launcher/swarm.py",
+        "launcher/test_swarm.py"
+      ],
+      "gov_ids": [
+        "GOV-0002",
+        "GOV-0004",
+        "GOV-0005"
+      ],
+      "head_sha": "074fcc5583e0fa6bd7cb9b7fb4beb66afeb5afcc",
+      "issue": {
+        "done_when": "- With the default manifest, `swarm up` opens the expected sessions, each acting as its role's App.\n- `swarm ls` shows them within one heartbeat interval.\n- `swarm stop` ends one, and the dashboard shows it `stopped`.\n- Tests cover planning (what to start given what's running) with a fake runtime; no test opens real sessions.",
+        "number": 48,
+        "title": "Launcher: swarm up / ls / stop"
+      },
+      "merged_at": "2026-11-02T18:38:07Z",
+      "number": 65,
+      "reviews": [],
+      "title": "Launcher: swarm up / ls / stop (L2)"
+    },
+    {
+      "closed_issues": [
+        49
+      ],
+      "files": [
+        "launcher/README.md",
+        "launcher/swarm",
+        "launcher/swarm.py",
+        "launcher/test_swarm.py"
+      ],
+      "gov_ids": [
+        "GOV-0002",
+        "GOV-0004",
+        "GOV-0005",
+        "GOV-0006"
+      ],
+      "head_sha": "a73141b39785768c72ab54d55fe0dc57b53c75c4",
+      "issue": {
+        "done_when": "- `swarm launch builder --issue N` starts a builder whose heartbeat shows #N as its current issue.\n- A second launch on #N is refused while the first is live.\n- Tests cover the refusal rules against canned heartbeat data.",
+        "number": 49,
+        "title": "Launcher: start a session on a given issue"
+      },
+      "merged_at": "2026-11-02T18:39:36Z",
+      "number": 70,
+      "reviews": [],
+      "title": "Launcher: swarm launch <role> --issue N (L3)"
+    },
+    {
+      "closed_issues": [
+        50
+      ],
+      "files": [
+        "dashboard/README.md",
+        "dashboard/generate.py",
+        "dashboard/test_needs.py",
+        "launcher/README.md",
+        "launcher/swarm.py",
+        "launcher/test_swarm.py"
+      ],
+      "gov_ids": [
+        "GOV-0002",
+        "GOV-0004",
+        "GOV-0005"
+      ],
+      "head_sha": "ff96607fc74346815683e08c918ca84e94e9809e",
+      "issue": {
+        "done_when": "- `swarm inbox` and the top of the dashboard show the same items in the same order for the same data.\n- Empty state says plainly that nothing is waiting.\n- Tests cover the ordering with canned data.",
+        "number": 50,
+        "title": "Launcher: \"needs you\" list in swarm inbox and at the top of the dashboard"
+      },
+      "merged_at": "2026-11-02T18:49:43Z",
+      "number": 71,
+      "reviews": [],
+      "title": "Needs-you list: swarm inbox and the top of the dashboard (L5)"
+    },
+    {
+      "closed_issues": [
+        51
+      ],
+      "files": [
+        "launcher/test_manifest.py",
+        "roles/reviewer.md",
+        "swarm.toml"
+      ],
+      "gov_ids": [
+        "GOV-0005"
+      ],
+      "head_sha": "f129c5fd4fd2a403c34166d3a694e9b523a241a7",
+      "issue": {
+        "done_when": "- The default manifest starts a reviewer.\n- The dry run's reviews are linked from the PR.",
+        "number": 51,
+        "title": "Launcher: reviewer runs by default and reviews each open PR once"
+      },
+      "merged_at": "2026-11-02T18:57:29Z",
+      "number": 72,
+      "reviews": [
+        {
+          "at_merge_head": false,
+          "commit_id": "b14116ad7f9e80a5d81f7448520a95df45a58e17",
+          "id": 5741681112,
+          "overstep_comments": [],
+          "state": "COMMENTED",
+          "submitted_at": "2026-11-02T18:51:57Z"
+        }
+      ],
+      "title": "Reviewer runs by default and reviews each open PR once per push (L6)"
+    },
+    {
+      "closed_issues": [
+        52
+      ],
+      "files": [
+        "dashboard/README.md",
+        "dashboard/generate.py",
+        "dashboard/test_cap.py",
+        "launcher/README.md",
+        "launcher/swarm.py",
+        "launcher/test_swarm.py"
+      ],
+      "gov_ids": [
+        "GOV-0002",
+        "GOV-0004",
+        "GOV-0005",
+        "GOV-0008"
+      ],
+      "head_sha": "0ded27fcc874c71c276ab35276857d757dcbc1b7",
+      "issue": {
+        "done_when": "- A session whose estimated spend passes its manifest cap shows as over cap in `swarm ls` and `swarm inbox`.\n- No code path stops a session automatically.\n- Tests use canned token counts.",
+        "number": 52,
+        "title": "Launcher: per-session spend cap"
+      },
+      "merged_at": "2026-11-02T19:01:05Z",
+      "number": 74,
+      "reviews": [],
+      "title": "Spend cap, warn only (L4)"
+    },
+    {
+      "closed_issues": [
+        76
+      ],
+      "files": [
+        "governance/PHASE0.md"
+      ],
+      "gov_ids": [
+        "GOV-0006"
+      ],
+      "head_sha": "e8944ed61f471dccc598671aeb5e7f2a4260c059",
+      "issue": {
+        "done_when": null,
+        "number": 76,
+        "title": "Phase 0 log: v1 launcher round"
+      },
+      "merged_at": "2026-11-02T19:50:30Z",
+      "number": 77,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "e8944ed61f471dccc598671aeb5e7f2a4260c059",
+          "id": 5741939265,
+          "overstep_comments": [],
+          "state": "COMMENTED",
+          "submitted_at": "2026-11-02T19:11:45Z"
+        }
+      ],
+      "title": "Phase 0 log: v1 launcher round"
+    },
+    {
+      "closed_issues": [
+        84
+      ],
+      "files": [
+        "PRODUCT.md"
+      ],
+      "gov_ids": [
+        "GOV-0005"
+      ],
+      "head_sha": "9f5e3374f5c5bea5938833a4da2150558ba4c221",
+      "issue": {
+        "done_when": "**Done when:**\n- The status line reads `v0 (swarm dashboard) done \u00b7 v1 (local launcher) done`.\n- The v1 table gets a column with the PR that delivered each item.\n- No other content changes. Anything after v1 needs a `product-scope` question first.",
+        "number": 84,
+        "title": "PRODUCT.md: mark v1 (local launcher) done"
+      },
+      "merged_at": "2026-11-03T09:50:34Z",
+      "number": 100,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "9f5e3374f5c5bea5938833a4da2150558ba4c221",
+          "id": 5749740301,
+          "overstep_comments": [],
+          "state": "COMMENTED",
+          "submitted_at": "2026-11-03T09:28:14Z"
+        }
+      ],
+      "title": "PRODUCT.md: mark v1 (local launcher) done"
+    },
+    {
+      "closed_issues": [
+        91
+      ],
+      "files": [
+        "PRODUCT.md"
+      ],
+      "gov_ids": [
+        "GOV-0006",
+        "GOV-0007",
+        "GOV-0008",
+        "GOV-0009"
+      ],
+      "head_sha": "c0083655b124905a3368e7380431f543de4ac0f5",
+      "issue": {
+        "done_when": "- `PRODUCT.md` has the v2 section above, and its issue numbers match the open v2 issues.\n- Nothing outside `PRODUCT.md` changes.",
+        "number": 91,
+        "title": "PRODUCT.md: add the v2 section (wake-up loop)"
+      },
+      "merged_at": "2026-11-03T09:51:04Z",
+      "number": 103,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "c0083655b124905a3368e7380431f543de4ac0f5",
+          "id": 5749740621,
+          "overstep_comments": [],
+          "state": "COMMENTED",
+          "submitted_at": "2026-11-03T09:28:15Z"
+        }
+      ],
+      "title": "PRODUCT.md: add the v2 section (wake-up loop)"
+    },
+    {
+      "closed_issues": [
+        90
+      ],
+      "files": [
+        "launcher/README.md",
+        "launcher/manifest.py",
+        "launcher/swarm.py",
+        "launcher/test_watch.py",
+        "launcher/watch.py",
+        "swarm.toml"
+      ],
+      "gov_ids": [
+        "GOV-0007",
+        "GOV-0008",
+        "GOV-0010"
+      ],
+      "head_sha": "30d6f8401d611fc5cfc51c3757956b5040dbe2fe",
+      "issue": {
+        "done_when": "- In tests, each trigger starts exactly one session, and restarting `watch` over the same state starts none.\n- The ceiling from #88 holds: an extra trigger waits, appears in `swarm inbox`, and starts once a loop-started session stops.\n- If #88 requires a cap, a role with no `spend_cap_usd` is skipped, and the reason appears in `swarm inbox`.\n- Tests show the loop never sends a signal to a session and never calls a GitHub write.\n- `launcher/README.md` documents `swarm watch` and its limits, and cites the #88 record.",
+        "number": 90,
+        "title": "v2 W2: `swarm watch` starts sessions, within the limits from #88"
+      },
+      "merged_at": "2026-11-03T10:10:03Z",
+      "number": 104,
+      "reviews": [
+        {
+          "at_merge_head": false,
+          "commit_id": "48ab1fd9e8c02faa6b20833de88cf0145bb5856c",
+          "id": 5750110109,
+          "overstep_comments": [],
+          "state": "COMMENTED",
+          "submitted_at": "2026-11-03T09:53:48Z"
+        },
+        {
+          "at_merge_head": true,
+          "commit_id": "30d6f8401d611fc5cfc51c3757956b5040dbe2fe",
+          "id": 5750317335,
+          "overstep_comments": [],
+          "state": "COMMENTED",
+          "submitted_at": "2026-11-03T10:08:28Z"
+        }
+      ],
+      "title": "swarm watch: start sessions within the #88 limits"
+    },
+    {
+      "closed_issues": [
+        112
+      ],
+      "files": [
+        "roles/builder.md"
+      ],
+      "gov_ids": [
+        "GOV-0009",
+        "GOV-0011"
+      ],
+      "head_sha": "79fb7a7e40ee92946b53037ec2a4d591d92deffd",
+      "issue": {
+        "done_when": "- `roles/builder.md` has the step above and cites GOV-0011.\n- \"Never merge or approve PRs\" stays in the builder prompt.",
+        "number": 112,
+        "title": "GOV-0011 R2: builder responds to requested changes on its own PR"
+      },
+      "merged_at": "2026-11-03T11:29:29Z",
+      "number": 116,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "79fb7a7e40ee92946b53037ec2a4d591d92deffd",
+          "id": 5751353757,
+          "overstep_comments": [],
+          "state": "COMMENTED",
+          "submitted_at": "2026-11-03T11:28:07Z"
+        }
+      ],
+      "title": "roles/builder.md: respond to requested changes on own PR"
+    },
+    {
+      "closed_issues": [
+        111
+      ],
+      "files": [
+        "CLAUDE.md",
+        "roles/reviewer.md"
+      ],
+      "gov_ids": [
+        "GOV-0011"
+      ],
+      "head_sha": "8471704e51ea156b70450024c98161e910f98491",
+      "issue": {
+        "done_when": "- `roles/reviewer.md` and CLAUDE.md say the above, and cite GOV-0011.\n- No other role prompt changes.",
+        "number": 111,
+        "title": "GOV-0011 R1: reviewer posts request-changes / comment / approve, with rubric lines"
+      },
+      "merged_at": "2026-11-03T11:30:07Z",
+      "number": 117,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "8471704e51ea156b70450024c98161e910f98491",
+          "id": 5751354779,
+          "overstep_comments": [],
+          "state": "COMMENTED",
+          "submitted_at": "2026-11-03T11:28:11Z"
+        }
+      ],
+      "title": "Reviewer posts request-changes / comment / approve, with rubric lines (GOV-0011 R1)"
+    },
+    {
+      "closed_issues": [
+        113
+      ],
+      "files": [
+        "dashboard/generate.py",
+        "dashboard/test_needs.py",
+        "launcher/README.md",
+        "launcher/swarm.py",
+        "launcher/test_swarm.py",
+        "launcher/test_watch.py",
+        "launcher/watch.py"
+      ],
+      "gov_ids": [
+        "GOV-0009",
+        "GOV-0010",
+        "GOV-0011"
+      ],
+      "head_sha": "3a26b077738916d9c89bf179f557b9e99ea2c68d",
+      "issue": {
+        "done_when": "Tests with canned GitHub data show:\n- `CHANGES_REQUESTED` at the head starts one builder, and a restart starts none;\n- the third request lists the PR as needing the owner and starts nothing;\n- Authority: fail starts nothing and lists the PR;\n- a `COMMENTED` or `APPROVED` review starts nothing.\n\n`launcher/README.md`'s trigger table gains `[respond]` and cites GOV-0011.",
+        "number": 113,
+        "title": "GOV-0011 R3: swarm watch starts the builder on requested changes, at most 2 rounds per PR"
+      },
+      "merged_at": "2026-11-03T11:56:02Z",
+      "number": 120,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "3a26b077738916d9c89bf179f557b9e99ea2c68d",
+          "id": 5751738931,
+          "overstep_comments": [],
+          "state": "APPROVED",
+          "submitted_at": "2026-11-03T11:54:55Z"
+        }
+      ],
+      "title": "swarm watch: [respond] starts the builder on requested changes, at most 2 rounds per PR (GOV-0011 R3)"
+    },
+    {
+      "closed_issues": [
+        121
+      ],
+      "files": [
+        "dashboard/test_cap.py",
+        "launcher/README.md"
+      ],
+      "gov_ids": [],
+      "head_sha": "9a8cbbf2d0eaf5f01b3242ab5507ab1b1259df00",
+      "issue": {
+        "done_when": "**Done when:** the test checks that the repo manifest's caps load (or asserts the current values), and the README line describes the caps as set.",
+        "number": 121,
+        "title": "test_cap and launcher/README.md still assume swarm.toml sets no spend caps (stale since #110)"
+      },
+      "merged_at": "2026-11-03T12:46:20Z",
+      "number": 139,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "9a8cbbf2d0eaf5f01b3242ab5507ab1b1259df00",
+          "id": 5752290986,
+          "overstep_comments": [],
+          "state": "APPROVED",
+          "submitted_at": "2026-11-03T12:39:31Z"
+        }
+      ],
+      "title": "test_cap and launcher README: swarm.toml sets per-role spend caps"
+    },
+    {
+      "closed_issues": [
+        132
+      ],
+      "files": [
+        "launcher/README.md",
+        "launcher/test_watch.py",
+        "launcher/watch.py"
+      ],
+      "gov_ids": [
+        "GOV-0010"
+      ],
+      "head_sha": "40c0ec55006ef9811597a54aba6d94e7e2347e7c",
+      "issue": {
+        "done_when": "- [ ] With an idle owner-started reviewer live, a new PR head produces a `[review]` trigger, and `--dry-run` prints its `swarm launch` command.\n- [ ] With a loop-started reviewer live, the `[review]` trigger stays quiet, as today.\n- [ ] Both `triggers()` and `refusal()` use the same rule.\n- [ ] The `launcher/watch.py` module docstring (lines ~24\u201325) and `launcher/README.md` describe the new rule.\n- [ ] Tests cover both cases.\n\nOut of scope: headless runs, Stop hook, budgets (waiting on #131, then #125 and #126 records).",
+        "number": 132,
+        "title": "swarm watch: only reviewers the loop started keep [review] triggers quiet"
+      },
+      "merged_at": "2026-11-03T12:47:11Z",
+      "number": 143,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "40c0ec55006ef9811597a54aba6d94e7e2347e7c",
+          "id": 5752291729,
+          "overstep_comments": [],
+          "state": "APPROVED",
+          "submitted_at": "2026-11-03T12:39:35Z"
+        }
+      ],
+      "title": "swarm watch: only loop-started reviewers keep [review] triggers quiet"
+    },
+    {
+      "closed_issues": [
+        136
+      ],
+      "files": [
+        "launcher/README.md",
+        "launcher/test_watch.py",
+        "launcher/watch.py"
+      ],
+      "gov_ids": [
+        "GOV-0006",
+        "GOV-0010",
+        "GOV-0011"
+      ],
+      "head_sha": "9fe755582201ff7c90674be842c567954f4f9942",
+      "issue": {
+        "done_when": "- [ ] Two new `[build]` triggers whose titles cite the same GOV id arrive in one check, with free slots: the first starts and the second is held. (The builder started this check counts as live.)\n- [ ] A `[build]` trigger is held while a live builder (heartbeat, or launcher entry with no heartbeat yet) is on an issue whose title shares a GOV id. It starts on the first check after that builder stops, if no open PR also holds it.\n- [ ] A `[build]` trigger is held while an open PR, draft or not, closes an issue whose title shares a GOV id. It starts once that PR is merged or closed.\n- [ ] Issues whose titles share no GOV id, or cite none, run side by side as today. A GOV id cited only in the body doesn't hold.\n- [ ] `[respond]`, `[review]`, `[record]` and `[answer]` triggers are never held by this rule.\n- [ ] The hold shows in `swarm inbox` with its reason, as GOV-0010 holds do.\n- [ ] The `launcher/watch.py` module docstring and `launcher/README.md` describe the rule.\n- [ ] Tests cover each case above. `triggers()` stays pure; the check can sit in `start_tick` next to the ceiling check, using data `gather()` already reads (issue titles, PR `closes`).",
+        "number": 136,
+        "title": "swarm watch: hold a [build] trigger while a live builder or open PR shares its GOV record (#127)"
+      },
+      "merged_at": "2026-11-03T12:47:32Z",
+      "number": 144,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "9fe755582201ff7c90674be842c567954f4f9942",
+          "id": 5752291972,
+          "overstep_comments": [],
+          "state": "APPROVED",
+          "submitted_at": "2026-11-03T12:39:36Z"
+        }
+      ],
+      "title": "swarm watch: hold a [build] while a live builder or open PR shares its GOV record"
+    },
+    {
+      "closed_issues": [
+        148
+      ],
+      "files": [
+        "launcher/README.md",
+        "launcher/stophook.py",
+        "launcher/swarm.py",
+        "launcher/test_stophook.py",
+        "launcher/watch.py"
+      ],
+      "gov_ids": [
+        "GOV-0006",
+        "GOV-0012"
+      ],
+      "head_sha": "5770e722b909e7854f7d475c78bc3cd3baceac58",
+      "issue": {
+        "done_when": "- Tests for each role's done-condition, each \"also counts as done\" case, the `stop_hook_active` guard, the N-block guard and a failed GitHub read. Use canned GitHub data; no network.\n- Owner-started worktrees get no Stop hook (test).\n- `launcher/README.md` documents the done-conditions.",
+        "number": 148,
+        "title": "Stop hook: loop-started headless runs keep going until their role's done-condition is met"
+      },
+      "merged_at": "2026-11-03T13:19:22Z",
+      "number": 152,
+      "reviews": [
+        {
+          "at_merge_head": false,
+          "commit_id": "67bd9e094eadc7904bd092f50df729927454c002",
+          "id": 5752719540,
+          "overstep_comments": [],
+          "state": "APPROVED",
+          "submitted_at": "2026-11-03T13:08:59Z"
+        }
+      ],
+      "title": "swarm watch: Stop hook keeps loop-started runs going until their role is done"
+    },
+    {
+      "closed_issues": [
+        147
+      ],
+      "files": [
+        "launcher/README.md",
+        "launcher/manifest.py",
+        "launcher/swarm.py",
+        "launcher/test_swarm.py",
+        "launcher/test_watch.py",
+        "launcher/watch.py",
+        "swarm.toml"
+      ],
+      "gov_ids": [
+        "GOV-0006",
+        "GOV-0007",
+        "GOV-0010",
+        "GOV-0011",
+        "GOV-0012",
+        "GOV-0013"
+      ],
+      "head_sha": "ac4bb0403bc82fb2ed3c4eb85e964d3d582e4c16",
+      "issue": {
+        "done_when": "- `swarm watch --dry-run` prints the full headless command for each trigger, including every flag above.\n- `swarm up` and `swarm launch` commands are byte-for-byte unchanged (existing tests still pass, plus one that asserts it).\n- Tests for `command()` with `by=\"watch\"` cover each flag, the budget taken from the role's `spend_cap_usd`, and `max_turns` taken from `swarm.toml`.\n- `manifest.py` tests cover `max_turns` missing, zero, negative and non-integer.\n- The `swarm.py` and `watch.py` docstrings and `launcher/README.md` describe headless loop-started runs.\n- The heartbeat still records `started` and `stopped` for a headless run. Note in the PR how you checked this.",
+        "number": 147,
+        "title": "swarm watch: start loop-started runs headless (claude -p) with auto mode, denies and a hard budget"
+      },
+      "merged_at": "2026-11-03T13:15:59Z",
+      "number": 153,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "ac4bb0403bc82fb2ed3c4eb85e964d3d582e4c16",
+          "id": 5752719129,
+          "overstep_comments": [],
+          "state": "APPROVED",
+          "submitted_at": "2026-11-03T13:08:58Z"
+        }
+      ],
+      "title": "swarm watch: start loop-started runs headless (claude -p) with auto mode, denies and a hard budget"
+    },
+    {
+      "closed_issues": [
+        149
+      ],
+      "files": [
+        "launcher/README.md",
+        "launcher/swarm.py",
+        "launcher/test_watch.py",
+        "launcher/watch.py"
+      ],
+      "gov_ids": [
+        "GOV-0002",
+        "GOV-0003",
+        "GOV-0004",
+        "GOV-0012"
+      ],
+      "head_sha": "70aa4ff10e91ffd7bcb27320ce8b1ba4dfe5b0ce",
+      "issue": {
+        "done_when": "- Tests use canned result JSON for each ending: success, budget reached, turns reached, error, and a missing or unreadable file.\n- `swarm inbox` shows an \"ended at cap\" item; `swarm ls` or `swarm inbox` shows each recorded cost.\n- Nothing new reaches GitHub (test or note in the PR).\n- `launcher/README.md` describes the record.\n\nCheck the exact JSON fields for \"reached budget\" and \"reached max turns\" (`subtype` or similar) against the Claude Code headless docs, and cite them in the PR.",
+        "number": 149,
+        "title": "swarm watch: record each headless run's cost and ending; list runs that ended at cap in needs-you"
+      },
+      "merged_at": "2026-11-03T13:26:02Z",
+      "number": 156,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "70aa4ff10e91ffd7bcb27320ce8b1ba4dfe5b0ce",
+          "id": 5752928846,
+          "overstep_comments": [],
+          "state": "APPROVED",
+          "submitted_at": "2026-11-03T13:23:56Z"
+        }
+      ],
+      "title": "swarm watch: record each headless run's cost and ending; list runs that ended at cap in inbox"
+    },
+    {
+      "closed_issues": [
+        160
+      ],
+      "files": [
+        "PRODUCT.md"
+      ],
+      "gov_ids": [
+        "GOV-0006",
+        "GOV-0008",
+        "GOV-0009",
+        "GOV-0010",
+        "GOV-0011",
+        "GOV-0012",
+        "GOV-0013",
+        "GOV-0014"
+      ],
+      "head_sha": "eff6053118f30a854aa949511f72cf7cf48c9892",
+      "issue": {
+        "done_when": "- The v2 section matches what's on `main` and cites GOV-0009 to GOV-0014.\n- Nothing in it contradicts an in-force ruling.\n- Only `PRODUCT.md` changes.\n\nOpened by the coordinator session at the owner's request.",
+        "number": 160,
+        "title": "PRODUCT.md: bring the v2 section up to date (GOV-0011 to GOV-0014)"
+      },
+      "merged_at": "2026-11-03T13:48:47Z",
+      "number": 164,
+      "reviews": [
+        {
+          "at_merge_head": true,
+          "commit_id": "eff6053118f30a854aa949511f72cf7cf48c9892",
+          "id": 5753187557,
+          "overstep_comments": [],
+          "state": "APPROVED",
+          "submitted_at": "2026-11-03T13:43:11Z"
+        }
+      ],
+      "title": "PRODUCT.md: bring the v2 section up to date (GOV-0010 to GOV-0014)"
+    }
+  ],
+  "repo": "open-agentos/productswarm"
+}
