@@ -23,10 +23,19 @@
 #                     the owner sets it.
 # swarm watch also starts only roles that set spend_cap_usd below, and lists any other
 # trigger as skipped in `swarm inbox`. Changing any of this is a `spend` decision.
+#
+#   review_in_actions optional, true or false, default false (#216, GOV-0019). When true,
+#                     swarm watch leaves every [review] trigger to the GitHub Actions
+#                     reviewer workflow and starts nothing for it; [respond], [build],
+#                     [answer] and [record] still run locally, and `swarm inbox` says it is
+#                     on. Set it back to false (and disable the workflow if Actions should
+#                     stop reviewing) to fall back to local reviews. Changing it is a
+#                     `ci-and-workflows` call for the owner, not a `spend` one.
 [watch]
 interval_minutes = 5
 max_live = 2
 max_turns = 200
+review_in_actions = false
 
 [[session]]
 role = "planner"

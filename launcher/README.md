@@ -75,6 +75,8 @@ If nothing is waiting, it says "Nothing is waiting on you."
 
 Below the list, `inbox` adds what `swarm watch` is holding or skipping, with the reason and when it last checked, and the runs it started that ended at cap, plus each recorded run's cost (see "How each run ended" below). That part comes from local state, so the dashboard doesn't show it.
 
+If `swarm.toml` sets `review_in_actions = true` (see "Leaving reviews to Actions" below), `inbox` also says that `swarm watch` leaves `[review]` to the GitHub Actions reviewer, so you know the local fallback for reviews is off. `inbox --manifest PATH` reads another manifest.
+
 ### Local state
 
 Nothing new is posted to GitHub. What the launcher started is recorded under `~/.productswarm/launcher/` (or `$PRODUCTSWARM_HOME/launcher/`):
@@ -226,6 +228,21 @@ max_turns = 200        # the turn ceiling for each headless run (#147, GOV-0012)
 - **Turn ceiling.** `max_turns` is the `--max-turns` for every headless run. The budget is the main bound; the ceiling only catches a run that is looping. Setting the number is the owner's call (a `spend` change, GOV-0010); 200 is the planner's suggestion. It must be a whole number of at least 1.
 - **Interval.** `interval_minutes` sets how often it checks. `--interval` works only with `--dry-run`, so the real interval can't be changed by a flag.
 - `swarm.toml` is read again on every check, so a new cap or limit applies without a restart. Without a `[watch]` table, or with one that has no `max_turns`, `swarm watch` refuses to start anything, but `--dry-run` still works (with no `[watch]` table, it checks every 5 minutes). `swarm up` and `swarm launch` don't need `max_turns`.
+
+### Leaving reviews to Actions
+
+GOV-0019 runs the reviewer in GitHub Actions on each PR push (`.github/workflows/reviewer.yml`). So that the Actions reviewer and `swarm watch` don't both review the same head, a switch in `[watch]` hands `[review]` to Actions (#216):
+
+```toml
+[watch]
+review_in_actions = true   # optional; default false
+```
+
+- **On.** Every `[review]` trigger is logged once per head as `skipped: left to Actions …` and starts nothing, in `--dry-run` too (with no headless command under it). `swarm inbox` says the switch is on. `[respond]`, `[build]`, `[answer]` and `[record]` are unchanged, and still run locally.
+- **Off or missing.** `swarm watch` starts reviewer passes as before. This is the default, so the switch changes nothing until you turn it on.
+- **Falling back.** If the Actions reviewer is down or you want reviews local again, set `review_in_actions = false` (or delete the line). If you also want Actions to stop reviewing, disable the workflow (`gh workflow disable reviewer.yml`, or in the Actions tab); otherwise both review each new head. Skipped reviews are not recorded in `watch.json`, so on the next check the loop reviews any open PR whose head is still unreviewed.
+- Changing the switch is a `ci-and-workflows` call for the owner (GOV-0019), not a `spend` one. It must be `true` or `false`; anything else is an error.
+- `swarm.toml` is read on every check, so the switch applies without a restart.
 
 ### Overlapping builds
 

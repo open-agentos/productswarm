@@ -33,6 +33,14 @@ which is the PR head SHA (for [review] and [respond]) or the id of the owner's l
 identity, so a new push or a fresh owner label is a new trigger. In dry-run the memory
 lives only in the process, and nothing is written to disk.
 
+Leaving [review] to Actions (#216, GOV-0019): with `review_in_actions = true` in
+swarm.toml's [watch] table, every [review] trigger is listed as "left to Actions" and
+starts nothing, in --dry-run and for real; the GitHub Actions reviewer workflow reviews
+that head instead. It is logged once per head and never recorded in watch.json, so
+setting the switch back to false (or disabling the workflow and setting it false) puts
+the local loop back in charge of any head still unreviewed. [respond], [build], [answer]
+and [record] are unchanged. Changing the switch is a `ci-and-workflows` call for the owner.
+
 A review trigger is also quiet while a reviewer that swarm watch started is live: that
 pass may have listed the PRs before this push, so the trigger waits for it to stop rather
 than being covered by it. Reviewers the owner started (`swarm up`, `swarm launch`) don't
@@ -113,6 +121,8 @@ DEFAULT_INTERVAL = 5          # minutes, for --dry-run when swarm.toml has no [w
 STATE_FILE = "watch.json"     # in the launcher's state directory
 REF_RE = re.compile(r"#(\d+)")
 GOV_RE = re.compile(r"\bGOV-\d{4}\b")
+LEFT_TO_ACTIONS = ("left to Actions: review_in_actions = true in swarm.toml, so the GitHub "
+                   "Actions reviewer reviews this head (GOV-0019)")
 RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and watch.json keeps it
 
 # How a headless run ended, from the `subtype` of its --output-format json result: the
@@ -201,9 +211,10 @@ def owner_label(events: list[dict], name: str, owner: str) -> dict | None:
 
 
 def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Callable,
-             is_tracking: Callable) -> list[Trigger]:
+             is_tracking: Callable, review_in_actions: bool = False) -> list[Trigger]:
     """Every trigger present now, in needs-you order then issue order. Nothing is filtered
-    for novelty here; Watch does that."""
+    for novelty here; Watch does that. With review_in_actions, each [review] trigger is
+    skipped as left to Actions (GOV-0019)."""
     m, out = w.model, []
     items = needs_you(m)
     heads = {p["number"]: p.get("head") for p in m["prs"]}
@@ -226,7 +237,8 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         if head not in w.reviewed.get(n, set()) and not reviewing:
             out.append(Trigger(key=f"review:{n}:{head}", kind="review", ref=f"PR #{n}",
                                why=f"head {head[:7]} not reviewed by the reviewer", role="reviewer",
-                               command="a reviewer pass"))
+                               command="a reviewer pass",
+                               skipped=LEFT_TO_ACTIONS if review_in_actions else None))
         t = respond(prs[n], busy)
         if t:
             out.append(t)
@@ -590,7 +602,7 @@ class Watch:
         g = swarm.dashboard()
         w = self.read(self.repo, self.idle_minutes, now)
         new = [t for t in triggers(w, self.owner, self.launcher.running(), self.roles,
-                                   g.needs_you, g.is_tracking)
+                                   g.needs_you, g.is_tracking, self.review_in_actions())
                if t.key not in self.seen]
         for t in new:
             self.seen.add(t.key)
@@ -598,6 +610,15 @@ class Watch:
             if not t.skipped:
                 self.launcher.out(f"  {self.headless(t)}")
         return new
+
+    def review_in_actions(self) -> bool:
+        """For --dry-run: swarm.toml's [watch] review_in_actions, or False if swarm.toml has
+        no [watch] table or can't be read (headless() reports that). Never raises."""
+        try:
+            limits = manifest.load_watch(self.manifest_path)
+        except manifest.ManifestError:
+            return False
+        return bool(limits and limits.review_in_actions)
 
     def headless(self, t: Trigger) -> str:
         """For --dry-run: the full command a real start would run for t (#147), or why
@@ -640,7 +661,8 @@ class Watch:
         st = load_state(self.launcher)
         acted, before = st["acted"], {x["key"]: x for x in st["waiting"]}
         runs = self.record_ended(st["runs"], live, now)
-        todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking)
+        todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
+                                    limits.review_in_actions)
                 if t.key not in acted]
         todo.sort(key=lambda t: before.get(t.key, {}).get("since", iso(now)))  # held longest first
         held, done, reviewer = [], [], None
@@ -659,6 +681,12 @@ class Watch:
                 out(f"[{t.kind}] {t.ref} {t.why} -> {reason}")
 
         for t in todo:
+            if t.kind == "review" and t.skipped == LEFT_TO_ACTIONS:
+                # Not recorded in watch.json: switch it off and the loop reviews this head again.
+                if t.key not in self.seen:
+                    self.seen.add(t.key)
+                    out(t.line())
+                continue
             if t.skipped:
                 out(t.line())
                 finish(t, f"skipped: {t.skipped}")

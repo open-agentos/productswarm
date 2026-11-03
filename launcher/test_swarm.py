@@ -634,6 +634,24 @@ class InboxTest(unittest.TestCase):
         g = swarm.dashboard()
         self.assertEqual(swarm.inbox_text([], None, g), "Nothing is waiting on you.")
 
+    def test_says_when_reviews_are_left_to_actions(self):
+        # #216, GOV-0019: the owner can see the local fallback for reviews is off.
+        g = swarm.dashboard()
+        self.assertEqual(swarm.inbox_text([], None, g, review_in_actions=True),
+                         "Nothing is waiting on you.\n\n" + swarm.REVIEW_IN_ACTIONS)
+        self.assertNotIn("Actions", swarm.inbox_text([], None, g, review_in_actions=False))
+
+    def test_reads_the_switch_from_swarm_toml(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "swarm.toml"
+            base = ('[watch]\ninterval_minutes = 5\nmax_live = 2\n%s\n'
+                    '[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n')
+            for line, want in (("review_in_actions = true", True), ("review_in_actions = false", False),
+                               ("", False), ("review_in_actions = 1", False)):
+                path.write_text(base % line)
+                self.assertIs(swarm.review_in_actions(path), want, line)
+            self.assertIs(swarm.review_in_actions(Path(d) / "missing.toml"), False)
+
 
 class LaunchHelpersTest(unittest.TestCase):
     def test_owner_login_from_jurisdictions(self):
