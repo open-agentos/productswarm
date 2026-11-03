@@ -63,6 +63,71 @@ These don't change any mark, but #175 may want them.
 - **Two reviews were not at the merge head.** At #72, the review at `b14116a` found an unmet item and a pagination bug, and the builder fixed both in `f129c5f`, the merge head. At #152, the approval was at `67bd9e0`.
 - **#156 narrows its issue's "What".** #149's "What" asks for the "ended at cap" item at the top of the dashboard too. The PR keeps it in `swarm inbox` only and says why (the published page can't read local `watch.json`, and costs must not reach GitHub). The "Done when" items ask only for `swarm inbox`, so all are met.
 
+## Calibration
+
+Stage B4 of v3 (#175). This section explains the reviewer's calibration from the scores above, and checks the totals against the bar that the owner set on #172 (`evals/README.md`, "Pre-registered bar for C stage 2"). It decides nothing, and nothing outside this file changes.
+
+### Causes of disagreement
+
+There are **no disagreements to explain**: the eval and the reviewer agree on all 15 reviewed PRs. Each of the cause categories from #175 is counted, and every count is 0.
+
+| Cause | Count |
+|---|---|
+| A rule in the role prompt says comment where the rubric says block | 0 |
+| A "Done when" item the reviewer didn't check | 0 |
+| A review at a head that wasn't the merge head | 0 |
+| No review at all (unreviewed defect, outside N) | 0 |
+| Other | 0 |
+| **Total** | **0** |
+
+Two of the 15 agreements come from a review that wasn't at the merge head (#72, #152). Both agree because the eval found nothing at the merge head. This doesn't show what the reviewer would have done there.
+
+**The 15 reviews came from two different prompts.** `roles/reviewer.md` had no way to block until #117 (GOV-0011) merged at 2026-11-03T11:30:07Z. Before that, it said to post only `--comment`, and only an `Overstep:` finding went to the owner.
+
+- **7 PRs were reviewed under the comment-only prompt:** #72, #77, #100, #103, #104, #116 and #117. The last reviews on #116 and #117 were posted at 11:28, before #117 merged. On these PRs the reviewer could block only with an `Overstep:` finding, and it found none. So "reviewer blocks = 0" on them is what the prompt required, not a calibration result.
+- **8 PRs were reviewed under the stoplight prompt:** #120, #139, #143, #144, #152, #153, #156 and #164. All 8 are `APPROVED`, and the eval says `would approve` on all 8.
+
+On no PR in the sample was the reviewer able to block, and also faced a defect the eval would block at the merge head. So the sample doesn't test the stoplight's "request changes" side at all.
+
+### Against the bar
+
+N = 15, so line 1 needs at least 13 of 15 (85% of 15 is 12.75, rounded up, per `evals/README.md`).
+
+| Bar line | Owner's number | Measured | Result |
+|---|---|---|---|
+| 1. Agreement | at least 13 of 15 (85% of N, rounded up) | 15 of 15 | pass |
+| 2. Misses | 0 | 0 | not tested (see below) |
+| 3. False blocks | at most 2 | 0 | pass |
+| Extra condition: the eval finds at least one `unmet` item or `broken` record | at least 1 | 0 | not met |
+
+**Result: inconclusive, not passed.** The eval found no `unmet` item and no `broken` record anywhere in the sample, so under the README's extra condition line 2 hasn't been tested. Whether C stage 2 goes ahead is the owner's call.
+
+#### How the reviewer could be shown to block a real defect
+
+The README asks #175 to say how this could be shown. These are options for the owner. None has been started.
+
+1. **A planted defect.** Open a non-draft PR that closes a throwaway issue and leaves one "Done when" item `unmet`. Let one loop-started reviewer pass run on it, record the review state, then close the PR unmerged. A pass means `CHANGES_REQUESTED`, or `COMMENTED` with an `Overstep:` finding. Planting a `broken` record as well, in a second PR, would test the records side separately.
+2. **Replay real defects under the current prompt.** Two earlier heads in this sample had defects that the reviewer itself found while it could only comment (see cases 1 and 2 below): #72 at `b14116a`, where a "Done when" item was unmet, and #104 at `48ab1fd`, where `[build]` started a second builder on finished work. Running the current `roles/reviewer.md` against those heads would show whether the stoplight prompt now blocks them. These PRs are merged, so this needs a way to review a past head outside the normal loop.
+3. **Wait for a real defect.** Re-run #173–#175 on a later sample that includes a PR where the eval blocks. This costs nothing, but has no end date.
+
+### Inputs for a committee
+
+#167 asks: "What should make the reviewer request changes rather than comment?" These are the cases from this sample that such a ruling would decide. Each is a real review. Cases 1 and 2 were reviewed under the comment-only prompt. The others were reviewed under the current stoplight prompt or still bear on it. This list convenes nothing and proposes no change to `roles/reviewer.md`. That would be a separate issue.
+
+| # | PR, head | What the reviewer found | What it posted | What the case would decide |
+|---|---|---|---|---|
+| 1 | #72, `b14116a` (not the merge head) | "Done when" item 2 "not met yet" (the dry-run link was "To follow"). Also a minor bug: no `--paginate` | `COMMENTED` (comment-only prompt). Both were fixed by the merge head | An unmet "Done when" item that the builder can fix. The current prompt's "bugs … the builder can fix" seems to cover it, but nothing in the sample tests this |
+| 2 | #104, `48ab1fd` (not the merge head) | A bug: `[build]` fires on a `ready` issue that an open PR already closes, confirmed by a live dry run. Also a minor point: `[build]` always starts `builder` | `COMMENTED` (comment-only prompt). The bug was fixed by `30d6f84`. The minor point became #108 | A behaviour bug that no "Done when" item names. The eval can't block it, because the rubric scores only "Done when" items and records |
+| 3 | #103, `c008365` (the merge head) | `PRODUCT.md` presents open questions #101 and #102 as answered. Its Order line ("W2 waits on #88") contradicts its own design-decisions list | `COMMENTED` (comment-only prompt). Merged unchanged: lines 103, 124 and 126 at `c008365` | A factual error in a docs PR whose "Done when" items are all met. Should inaccuracy block when no "Done when" item covers it? |
+| 4 | #120, #143, #144 (each at the merge head) | The dashboard suite has 1 failure (`test_repo_manifest_sets_no_caps_by_default`). The same failure is on `main`, so the PR didn't cause it | `APPROVED`, each noting the failure (#143 and #144 point to #121) | A pre-existing test failure on `main`. The prompt asks "do the tests pass?" without saying which tests, or whether a failure inherited from `main` counts |
+| 5 | #120, `3a26b07` (the merge head) | `class RespondTest` comes after `unittest.main()`, so running the file directly skips 9 tests. `discover` runs them | `APPROVED`, as a note "no change needed" | A test layout fault that hides tests under one documented way of running them but not the other |
+| 6 | #152, `67bd9e0` (not the merge head) and #153, `ac4bb04` | Once both merge, one test fails and `launcher/README.md` conflicts. Whichever merges second needs a rebase | `APPROVED` on both, with merge-order notes | A known break that appears only when two separately correct PRs are combined. Does it block either one, and does a rebased head need a new review? |
+| 7 | #156, `70aa4ff` (the merge head) | The dashboard part of #149's Scope isn't built. "Done when" asks only for `swarm inbox` | `APPROVED`, calling it "the right call, not an overstep" | A PR that does less than its issue's Scope or "What", but meets every "Done when" item |
+| 8 | #143, `40c0ec5` (the merge head) | Nothing. The eval marks one item `unclear`: a `[review]` trigger has no `swarm launch` command, so the item's wording can't be met literally | `APPROVED`, without mentioning the wording | A "Done when" item that can't be met as written. Does that block, or does a reasonable reading pass? |
+| 9 | #104 at `30d6f84`, #116, #117 | The rubric passed | `COMMENTED`, because the prompt then still said comment-only | A gap between a merged ruling (GOV-0011) and a role prompt that hasn't caught up. Does the reviewer follow the ruling or the prompt? |
+
+Cases 1 and 2 are the closest the sample comes to a miss: real defects that got a non-blocking review. Neither counts as one, because the eval scores only the merge head and both were fixed by then.
+
 ## Per PR
 
 ### #64: Launcher: swarm manifest and loader (closes #47)
