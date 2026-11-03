@@ -1,4 +1,5 @@
-"""Tests for launcher/watch.py (`swarm watch`: --dry-run #89, real starts #90). Canned
+"""Tests for launcher/watch.py (`swarm watch`: --dry-run #89, real starts #90, [respond]
+#113). Canned
 GitHub data only; no test opens a Terminal window or starts Claude Code.
 
 Run: python3 -m unittest discover -s launcher
@@ -54,6 +55,12 @@ def pr(n, head=SHA1, draft=False, closes=()):
             "headRefOid": head}
 
 
+def review(state, commit, authority="pass"):
+    """A reviewer App review, with the rubric lines roles/reviewer.md asks for."""
+    return {"user": {"login": watch.REVIEWER}, "state": state, "commit_id": commit,
+            "body": f"- **Bugs:** pass\n- **Scope:** pass\n- **Authority:** {authority}\n"}
+
+
 def tracking(n, sid, role, on_issue, minutes_ago=1):
     """A live heartbeat session on issue `on_issue`: its tracking issue and one comment."""
     bot = f"productswarm-{role}[bot]"
@@ -79,6 +86,7 @@ class Scene:
                        88: [ev("ready", eid=14)]}
         self.prs = [pr(70, SHA1), pr(71, SHA2, draft=True)]
         self.reviewed = {70: set()}
+        self.reviews = {}                      # PR -> reviewer reviews with state and body
         t_issue, t_comments = tracking(200, "busy-sid", "builder", 60)
         self.tracking = [t_issue]
         self.comments = {200: t_comments}
@@ -86,14 +94,22 @@ class Scene:
 
     def data(self):
         return {"repo": REPO, "issues": self.issues + self.tracking, "comments": self.comments,
-                "prs": self.prs}
+                "prs": self.prs, "reviews": self.all_reviews()}
+
+    def all_reviews(self):
+        """Every PR's reviewer reviews: bare ones for SHAs in `reviewed`, then `reviews`."""
+        out = {n: [review("COMMENTED", c) for c in sorted(cs)] for n, cs in self.reviewed.items()}
+        for n, rs in self.reviews.items():
+            out.setdefault(n, []).extend(rs)
+        return out
 
     def read(self, repo, idle, now):
         self.reads += 1
         model = G.build(self.data(), NOW, dt.timedelta(minutes=idle))
         return watch.World(model=model, issues=self.issues + self.tracking,
                            events={k: list(v) for k, v in self.events.items()},
-                           reviewed={k: set(v) for k, v in self.reviewed.items()})
+                           reviewed={k: {r["commit_id"] for r in v}
+                                     for k, v in self.all_reviews().items()})
 
     # The fresh reads `swarm watch` makes before each start (swarm launch's refusal checks).
     def heartbeat(self, repo, idle, now):
@@ -117,8 +133,7 @@ class Scene:
         elif parts[-1] == "events":
             items = self.events.get(int(parts[1]), [])
         elif parts[-1] == "reviews":
-            items = [{"user": {"login": watch.REVIEWER}, "commit_id": c}
-                     for c in self.reviewed.get(int(parts[1]), set())]
+            items = self.all_reviews().get(int(parts[1]), [])
         else:                                    # issues/N: gh_json, one object
             return json.dumps(self.get_issue(REPO, int(parts[1]))[0])
         return "\n".join(json.dumps(i) for i in items)
@@ -511,3 +526,114 @@ class CliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RespondTest(unittest.TestCase):
+    """GOV-0011's [respond] trigger and round bound (#113): one PR, #72, closing #73."""
+
+    setUp_start = StartTest.setUp
+    manifest, watcher, started, exit = StartTest.manifest, StartTest.watcher, StartTest.started, StartTest.exit
+
+    def setUp(self):
+        self.setUp_start()
+        sc = self.scene
+        sc.issues, sc.events = [issue(73, ["ready"])], {73: [ev("ready", eid=15)]}
+        sc.prs, sc.reviewed = [pr(72, SHA1, closes=[73])], {}
+
+    def request(self, *commits, state="CHANGES_REQUESTED", authority="pass"):
+        self.scene.reviews.setdefault(72, []).extend(review(state, c, authority) for c in commits)
+
+    def needs_you(self):
+        items = G.needs_you(self.scene.heartbeat(REPO, 15, NOW))
+        return [i["detail"] for i in items if i["ref"] == "PR #72"]
+
+    def test_changes_requested_at_head_starts_one_builder_and_a_restart_starts_none(self):
+        self.request(SHA1)
+        done = self.watcher().tick(NOW)
+        self.assertEqual([(t.kind, t.ref) for t in done], [("respond", "PR #72")])
+        self.assertEqual(self.started(), [("builder-pr-72", "builder", "m-builder", 73, "watch")])
+        self.assertEqual(self.l.load()[0].pr, 72)
+        self.assertIn("respond to the requested changes on PR #72, which closes issue #73.",
+                      self.fake.commands[0])
+        self.assertIn("[respond] PR #72 changes requested at aaaaaaa (round 1 of 2) -> starting "
+                      "builder-pr-72", self.lines)
+        self.assertEqual(self.watcher().tick(NOW), [])          # next check: it's busy on #73
+        self.exit("builder-pr-72")
+        self.assertEqual(self.watcher().tick(NOW), [])          # a restart over the same state
+        self.assertEqual(len(self.fake.commands), 1)
+
+    def test_second_round_starts_then_third_request_lists_the_pr_and_starts_nothing(self):
+        self.request(SHA1)
+        self.watcher().tick(NOW)
+        self.exit("builder-pr-72")
+        self.scene.prs[0]["headRefOid"] = SHA2                  # the builder pushed: a review starts
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["review"])
+        self.exit("reviewer-watch")
+        self.request(SHA2)                                      # round 2
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["respond"])
+        self.assertIn("[respond] PR #72 changes requested at bbbbbbb (round 2 of 2) -> starting "
+                      "builder-pr-72", self.lines)
+        self.exit("builder-pr-72")
+        sha3 = "c" * 40
+        self.scene.prs[0]["headRefOid"] = sha3
+        self.watcher().tick(NOW)
+        self.exit("reviewer-watch")
+        self.request(sha3)                                      # the third request
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.assertEqual(len(self.fake.commands), 4)            # 2 builders, 2 reviewers
+        self.assertEqual(self.needs_you(), ["changes requested 3 times: needs the owner, closes #73"])
+        self.assertIn("[PR to review] PR #72 PR 72 · changes requested 3 times: needs the owner",
+                      swarm.inbox_text(G.needs_you(self.scene.heartbeat(REPO, 15, NOW)), NOW, G))
+
+    def test_overstep_starts_nothing_and_lists_the_pr(self):
+        for state in ("CHANGES_REQUESTED", "COMMENTED"):
+            self.scene.reviews = {}
+            self.request(SHA1, state=state, authority="fail")
+            self.assertEqual(self.watcher().tick(NOW), [])
+            self.assertEqual(self.needs_you(), ["overstep: needs the owner, closes #73"])
+        self.assertEqual(self.fake.commands, [])
+
+    def test_comment_or_approve_starts_nothing(self):
+        for state in ("COMMENTED", "APPROVED"):
+            self.scene.reviews = {}
+            self.request(SHA1, state=state)
+            self.assertEqual(self.watcher().tick(NOW), [])
+            self.assertEqual(self.needs_you(), ["awaiting review, closes #73"])
+        self.assertEqual(self.fake.commands, [])
+
+    def test_request_on_an_older_head_starts_nothing(self):
+        self.request(SHA2)
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["review"])
+
+    def test_dry_run_prints_it(self):
+        self.request(SHA1)
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read)
+        w.tick(NOW)
+        self.assertEqual(self.lines, ["[respond] PR #72 changes requested at aaaaaaa (round 1 of 2) "
+                                      "-> would start `launcher/swarm launch builder --issue 73 --pr 72`"])
+        self.assertEqual(self.fake.commands, [])
+
+    def test_needs_the_builders_cap_and_counts_toward_the_ceiling(self):
+        self.request(SHA1)
+        self.manifest({r: 10 for r in ROLES - {"builder"}})
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.assertIn("builder has no spend_cap_usd", self.lines[-1])
+        self.manifest(ALL_CAPPED, max_live=1)
+        self.scene.issues.append(issue(49, ["ready"]))
+        self.scene.events[49] = [ev("ready", eid=11)]
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["respond"])
+        self.assertIn("held: 1 of 1 sessions swarm watch started are live", self.lines[-1])
+
+    def test_a_pr_that_closes_no_issue_is_skipped_with_a_reason(self):
+        self.scene.prs, self.scene.issues = [pr(72, SHA1)], []
+        self.request(SHA1)
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["respond"])
+        self.assertIn("skipped: it closes 0 issues", self.lines[-1])
+        self.assertEqual(self.fake.commands, [])
+
+    def test_a_live_session_on_the_issue_holds_it_until_it_stops(self):
+        self.request(SHA1)
+        self.scene.tracking[0], self.scene.comments[200] = tracking(200, "busy-sid", "builder", 73)
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.scene.tracking, self.scene.comments = [], {}
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["respond"])

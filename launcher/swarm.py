@@ -4,8 +4,9 @@
     launcher/swarm up [--dry-run]   start every manifest session that isn't already running
     launcher/swarm ls               list live sessions from the heartbeat tracking issues
     launcher/swarm stop <session>   end one session the launcher started (name or session id)
-    launcher/swarm launch <role> --issue N [--model M] [--force] [--dry-run]
-                                    start one session on issue N (L3)
+    launcher/swarm launch <role> --issue N [--pr M] [--model M] [--force] [--dry-run]
+                                    start one session on issue N (L3); with --pr, it
+                                    responds to requested changes on PR M (GOV-0011)
     launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
     launcher/swarm watch [--dry-run]
                                     the v2 wake-up loop: start sessions on triggers, within
@@ -65,12 +66,16 @@ START_GRACE = 60      # seconds a session may take to write its pid file before 
 STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
 
-def opener(role: str, issue: int | None = None) -> str:
+def opener(role: str, issue: int | None = None, pr: int | None = None) -> str:
     """The prompt ops/swarm-session uses when given no args (it passes args on unchanged).
 
     With an issue, it names it: the heartbeat's `working_on` detection matches
-    "issue #N" in a prompt, so the session's current issue is set with no hook change."""
-    then = f"work on issue #{issue}" if issue else "begin"
+    "issue #N" in a prompt, so the session's current issue is set with no hook change.
+    With a PR too, the session responds to requested changes on it (GOV-0011)."""
+    if issue and pr:
+        then = f"respond to the requested changes on PR #{pr}, which closes issue #{issue}"
+    else:
+        then = f"work on issue #{issue}" if issue else "begin"
     return f"You are the {role} for productswarm. Read CLAUDE.md, PRODUCT.md and roles/{role}.md, then {then}."
 
 
@@ -123,11 +128,12 @@ class Started:
     started: float          # unix time the window was opened
     issue: int | None = None  # set by `swarm launch --issue`
     by: str | None = None     # "watch" if `swarm watch` started it (counts toward its ceiling)
+    pr: int | None = None     # set by `swarm launch --pr`: respond on this PR (GOV-0011)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Started":
         return cls(**{k: d[k] for k in ("name", "role", "model", "session_id", "started")},
-                   issue=d.get("issue"), by=d.get("by"))
+                   issue=d.get("issue"), by=d.get("by"), pr=d.get("pr"))
 
 
 @dataclass
@@ -278,7 +284,7 @@ class Launcher:
             "cd", shlex.quote(str(wt)), "&&",
             "echo $$ >|", shlex.quote(str(self.pid_file(s.session_id))), "&&",
             "exec", shlex.quote(str(wt / "ops" / "swarm-session")), shlex.quote(s.role),
-            "--model", shlex.quote(s.model), "--session-id", s.session_id, shlex.quote(opener(s.role, s.issue)),
+            "--model", shlex.quote(s.model), "--session-id", s.session_id, shlex.quote(opener(s.role, s.issue, s.pr)),
         ])
         return "exec /bin/bash -c " + shlex.quote(inner)
 
@@ -306,6 +312,7 @@ class Launcher:
     def start(self, entry: Started, live: list[Started], dry_run: bool = False) -> bool:
         """Open one session's window and record it. Returns False if it couldn't start."""
         on = f"  on #{entry.issue}" if entry.issue else ""
+        on += f", PR #{entry.pr}" if entry.pr else ""
         if dry_run:
             self.out(f"would start: {entry.name}  {entry.model}{on}\n"
                      f"  git worktree add --detach {self.worktree(entry.session_id)} origin/main\n"
@@ -542,10 +549,11 @@ def holders(n: int, model: dict, started: list[Started]) -> list[str]:
     return out
 
 
-def launch_name(role: str, n: int, taken: set[str]) -> str:
-    name, k = f"{role}-issue-{n}", 2
+def launch_name(role: str, n: int, taken: set[str], pr: int | None = None) -> str:
+    base = f"{role}-pr-{pr}" if pr else f"{role}-issue-{n}"
+    name, k = base, 2
     while name in taken:
-        name, k = f"{role}-issue-{n}-{k}", k + 1
+        name, k = f"{base}-{k}", k + 1
     return name
 
 
@@ -562,7 +570,7 @@ def gh_issue(repo: str, n: int) -> tuple[dict | None, list[dict]]:
 
 
 def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, force: bool = False,
-           dry_run: bool = False, idle_minutes: int = 15,
+           dry_run: bool = False, idle_minutes: int = 15, pr: int | None = None,
            get_issue: Callable = gh_issue, get_heartbeat: Callable = heartbeat,
            owner: Callable[[], str] = owner_login) -> int:
     issue, events = get_issue(repo, n)
@@ -579,8 +587,8 @@ def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, forc
         return 1
     if taken:
         launcher.out(f"--force: starting another session on #{n} alongside {'; '.join(taken)}")
-    entry = Started(name=launch_name(role, n, {e.name for e in live}), role=role, model=model,
-                    session_id=str(uuid.uuid4()), started=launcher.clock(), issue=n)
+    entry = Started(name=launch_name(role, n, {e.name for e in live}, pr), role=role, model=model,
+                    session_id=str(uuid.uuid4()), started=launcher.clock(), issue=n, pr=pr)
     return 0 if launcher.start(entry, live, dry_run) else 1
 
 
@@ -613,6 +621,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
     p_launch.add_argument("role")
     p_launch.add_argument("--issue", type=int, required=True, help="the issue to work on")
+    p_launch.add_argument("--pr", type=int,
+                          help="respond to requested changes on this PR, which closes --issue (GOV-0011)")
     p_launch.add_argument("--model", help="default: the manifest's model for the role")
     p_launch.add_argument("--force", action="store_true",
                           help="start even if a live session is already on the issue")
@@ -651,7 +661,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                 launcher.out(f"swarm launch: {e}")
                 return 1
             return launch(launcher, args.role, args.issue, model, repo=repo, force=args.force,
-                          dry_run=args.dry_run, idle_minutes=args.idle_minutes)
+                          dry_run=args.dry_run, idle_minutes=args.idle_minutes, pr=args.pr)
         if args.cmd == "up":
             try:
                 sessions = manifest.load(args.manifest)

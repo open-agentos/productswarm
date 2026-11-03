@@ -426,11 +426,11 @@ def hb(sid, issue_n, status="active", role="builder"):
 
 
 class LaunchTest(Base):
-    def go(self, it=None, events=None, sessions=(), force=False, n=49, dry_run=False):
+    def go(self, it=None, events=None, sessions=(), force=False, n=49, dry_run=False, pr=None):
         it = issue(n) if it is None else it
         events = [labeled("ready", OWNER)] if events is None else events
         return swarm.launch(self.l, "builder", n, "claude-sonnet-5-5", repo="o/r", force=force,
-                            dry_run=dry_run,
+                            dry_run=dry_run, pr=pr,
                             get_issue=lambda repo, num: (it if it != "missing" else None, events),
                             get_heartbeat=lambda repo, idle, now: {"sessions": list(sessions)},
                             owner=lambda: OWNER)
@@ -449,6 +449,13 @@ class LaunchTest(Base):
         (e,) = self.l.live()
         self.assertEqual((e.name, e.issue), ("builder-issue-49", 49))
 
+    def test_pr_names_it_in_the_opener_and_the_session(self):
+        self.assertEqual(self.go(pr=70), 0)
+        (cmd,) = self.fake.commands
+        self.assertIn("then respond to the requested changes on PR #70, which closes issue #49.", cmd)
+        (e,) = self.l.live()
+        self.assertEqual((e.name, e.issue, e.pr), ("builder-pr-70", 49, 70))
+
     def test_opener_matches_the_heartbeat_working_on_rule(self):
         hook = Path(__file__).resolve().parent.parent / "heartbeat" / "hook.py"
         import importlib.util
@@ -457,6 +464,7 @@ class LaunchTest(Base):
         spec.loader.exec_module(h)
         self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(swarm.opener("builder", 49)), ["49"])
         self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(swarm.opener("builder")), [])
+        self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(swarm.opener("builder", 49, 70)), ["49"])
 
     def test_missing_closed_or_pr(self):
         self.assertIn("#49 doesn't exist", self.refused("missing"))

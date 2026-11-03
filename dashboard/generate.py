@@ -5,7 +5,8 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
   - heartbeat events from the comments on `[heartbeat]` tracking issues (GOV-0003,
     heartbeat/SCHEMA.md). Only the GitHub copy is read, which never carries prompt
     text (GOV-0002); the local spool is not touched;
-  - open PRs and the issues they close;
+  - open PRs, the issues they close, and the reviewer App's reviews on each non-draft
+    PR (GOV-0011's round count and Authority line);
   - open `gov:question` issues.
 
 Builds a page showing each session's role, current issue, last activity and status,
@@ -47,6 +48,12 @@ REMOTE_FIELDS = set(REQUIRED) | {"issue", "pr", "gov_question", "cost_usd", "tok
 QUIET_EVENTS = {"heartbeat", "prompt_submitted"}
 STATUS_ORDER = {"blocked": 0, "active": 1, "idle": 2, "stopped": 3}
 
+REVIEWER = "productswarm-reviewer[bot]"
+CHANGES = "CHANGES_REQUESTED"
+ROUNDS = 2         # builder rounds per PR before the owner steps in (GOV-0011)
+# The rubric line roles/reviewer.md asks for: "- **Authority:** pass|fail".
+AUTHORITY_RE = re.compile(r"^[\s>*-]*Authority\s*:?[\s*]*:?\s*(pass|fail)\b", re.I | re.M)
+
 
 # ---------------------------------------------------------------- reading GitHub
 
@@ -80,10 +87,37 @@ def fetch(repo: str, now: dt.datetime, days: int) -> dict:
     prs = gh_json("pr", "list", "--repo", repo, "--state", "open", "--limit", "100", "--json",
                   "number,title,url,author,isDraft,createdAt,reviewDecision,closingIssuesReferences,"
                   "headRefOid")
-    return {"repo": repo, "issues": list(issues.values()), "comments": comments, "prs": prs or []}
+    reviews = {p["number"]: gh_items(f"repos/{repo}/pulls/{p['number']}/reviews?per_page=100")
+               for p in prs or [] if not p.get("isDraft")}
+    return {"repo": repo, "issues": list(issues.values()), "comments": comments, "prs": prs or [],
+            "reviews": reviews}
 
 
 # ---------------------------------------------------------------- deriving state
+
+def reviewer_state(reviews: list[dict], head: str | None) -> dict:
+    """The reviewer App's reviews on one PR (REST order, oldest first), as GOV-0011 reads
+    them: how many times it requested changes, on any head, and its latest review at
+    `head` with that review's Authority line. Keeps no review text (GOV-0002)."""
+    mine = [r for r in reviews if (r.get("user") or {}).get("login") == REVIEWER]
+    at_head = [r for r in mine if head and r.get("commit_id") == head]
+    last = at_head[-1] if at_head else None
+    m = AUTHORITY_RE.search((last or {}).get("body") or "")
+    return {"changes_requested": sum(r.get("state") == CHANGES for r in mine),
+            "at_head": last.get("state") if last else None,
+            "authority": m.group(1).lower() if m else None}
+
+
+def needs_owner(r: dict) -> str | None:
+    """Why GOV-0011 hands this PR to the owner instead of the builder, else None."""
+    if r["at_head"] is None:
+        return None
+    if r["authority"] == "fail":
+        return "overstep: needs the owner"
+    if r["at_head"] == CHANGES and r["changes_requested"] > ROUNDS:
+        return f"changes requested {r['changes_requested']} times: needs the owner"
+    return None
+
 
 def parse_ts(s: str) -> dt.datetime | None:
     try:
@@ -229,6 +263,9 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
                     "author": (p.get("author") or {}).get("login", ""), "draft": p.get("isDraft"),
                     "review": p.get("reviewDecision") or "", "created_ts": parse_ts(p["createdAt"]),
                     "closes": closes, "head": p.get("headRefOid")})
+        prs[-1]["reviewer"] = rv = reviewer_state((data.get("reviews") or {}).get(p["number"], []),
+                                                  p.get("headRefOid"))
+        prs[-1]["needs_owner"] = needs_owner(rv)
 
     today = now.date()
     days = [today - dt.timedelta(days=i) for i in range(SPEND_DAYS)]
@@ -288,7 +325,8 @@ def needs_you(m: dict) -> list[dict]:
                           "url": q["url"], "detail": ", ".join(bits), "since": q["created_ts"]})
     for p in m["prs"]:
         if not p["draft"]:
-            state = p["review"].replace("_", " ").lower() or "awaiting review"
+            state = (p.get("needs_owner")
+                     or p["review"].replace("_", " ").lower() or "awaiting review")
             closes = ", ".join(f"#{c['number']}" for c in p["closes"])
             items.append({"kind": "pr", "ref": f"PR #{p['number']}", "title": p["title"],
                           "url": p["url"],
