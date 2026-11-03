@@ -1,6 +1,6 @@
 # Product brief: productswarm
 
-**Owner:** @mattmcalister · **Status:** v0 (swarm dashboard) done · v1 (local launcher) done
+**Owner:** @mattmcalister · **Status:** v0 (swarm dashboard) done · v1 (local launcher) done · v2 (wake-up loop) done · v3 (evals, digest and Actions) in progress
 
 ## Problem
 
@@ -139,6 +139,64 @@ GOV-0009 named three design questions. The owner has answered each, and later qu
 - #126 / GOV-0012 Hard budget: a loop-started run gets `--max-budget-usd` from its role's `spend_cap_usd`, plus a `--max-turns` ceiling, and ends at either. Sessions Matt starts stay warn-only (GOV-0008).
 - #131 / GOV-0013 Headless permissions: loop-started runs use `--permission-mode auto`, plus `--disallowedTools` for `gh pr merge` and label edits.
 - #127 Overlapping builders: hold a `[build]` while a live builder or open PR shares its GOV record. This is the owner's direction on that question, not a ruling (GOV-0006).
+
+## v3: evals, digest and Actions
+
+GOV-0015 makes v3 three stages, in order: **B** quality evals, then **F** a phone-friendly "needs you" digest, then **C stage 1**, the reviewer running in GitHub Actions on events. C stage 2 (builders and docs in Actions) comes after these and is not planned.
+
+### Stage B: evals (done)
+
+B is read-only: it scores past PRs against a rubric and checks the reviewer against a bar for C stage 2 that the owner set.
+
+| # | Issue | What | PR |
+|---|---|---|---|
+| B1 | #172 | Eval rubric and the pre-registered bar for C stage 2 (`evals/README.md`) | #197 |
+| B2 | #173 | `evals/gather.py` picks the PR sample and gathers its issues, records and reviews | #181 |
+| B3 | #174 | Score the sampled PRs against the rubric (`evals/results.md`) | #200 |
+| B4 | #175 | Reviewer calibration and the result against the bar | #202 |
+| B5 | #176 | `swarm cost` prints cost per merged PR from `watch.json` (local only) | #185 |
+
+Result (`evals/results.md`, #202): **inconclusive, not passed.** The eval and the reviewer agreed on all 15 reviewed PRs, but the sample held no real defect, so the "misses" line of the bar wasn't tested. C stage 2 stays gated. The owner decides separately how to test whether the reviewer blocks a real defect.
+
+### Stage F: needs-you digest
+
+| # | Issue | What | PR |
+|---|---|---|---|
+| F1 | #210 | Needs you: flag `gov:question`s past their time to live | |
+| F2 | #211 | `dashboard/digest.py`: render the needs-you list as phone-friendly Markdown | |
+| F3 | #212 | `dashboard/digest.py --update`: keep the pinned digest issue current | |
+| F4 | #213 | Digest workflow: propose `.github/workflows/digest.yml` for the owner to commit | |
+
+### Stage C1: reviewer in Actions
+
+| # | Issue | What | PR |
+|---|---|---|---|
+| C1.1 | #214 | `launcher/actions_review.py check`: should this PR event start a reviewer run? | |
+| C1.2 | #215 | `launcher/actions_review.py run`: one reviewer pass in Actions with GOV-0012, GOV-0013 and GOV-0014 limits | |
+| C1.3 | #216 | `swarm watch`: a `review_in_actions` switch so the local loop leaves `[review]` to Actions | |
+| C1.4 | #217 | Reviewer workflow: propose `.github/workflows/reviewer.yml` for the owner to commit | |
+
+Order: B → F → C stage 1. C stage 2 is not planned.
+
+### Non-goals for v3 now
+
+Each of these needs its own `product-scope` question:
+
+- C stage 2: builders and docs running in Actions;
+- the launchd local loop (option A of #167), which GOV-0015 leaves out of v3;
+- a kit for other repos (D) and other model providers (E), deferred as #167 describes.
+
+Workflow files stay the owner's: the swarm proposes them, and the owner commits them.
+
+### v3 design decisions
+
+C stage 1's sub-questions, raised when the stage came next (GOV-0015):
+
+- #205 / GOV-0016 Public job log: a reviewer run in Actions prints only `result`, `subtype`, `num_turns` and `total_cost_usd`; no transcript, no artifact.
+- #206 / GOV-0017 Trigger events and secrets: runs start only on `pull_request` for same-repo, non-draft PRs by a swarm App or the owner, and a no-secrets check job gates the job with secrets. Never `pull_request_target`, `issue_comment` or `workflow_run` on untrusted input.
+- #207 / GOV-0018 Reviewer App key: it moves to secrets of a default-branch-only Actions environment, and the job mints a repo-only token with `pull_requests: write`, `contents: read` and `issues: read`.
+- #208 Model credential for reviewer runs in Actions: open. The owner's direction on that question, not a ruling (GOV-0006), is a Claude subscription token for now, with an API key as the goal.
+- #209 / GOV-0019 Workflow and coexistence with `swarm watch`: runs on `pull_request` pushes plus `workflow_dispatch`, one concurrency group per PR, never on its own reviews or comments, and skips a reviewed head. A `swarm.toml` switch makes `swarm watch` leave `[review]` to Actions.
 
 ## Open decisions
 
