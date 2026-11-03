@@ -7,7 +7,7 @@ productswarm is built by a swarm of manually started agent sessions. Read `PRODU
 - Every PR targets `main` and closes exactly one issue. Write `Closes #N` once, for one issue.
 - Never switch branches or leave edits in the shared checkout: other sessions run from it. Do branch work in a `git worktree add` directory outside the checkout (e.g. a temporary directory), and leave the shared checkout on `main`. Sessions the launcher starts already run in their own worktree (`.worktrees/<session_id>`).
 - You act on GitHub as your role's App (`productswarm-<role>[bot]`), set up by `ops/swarm-session`. Never work around that identity: don't change `GH_TOKEN`, `GH_CONFIG_DIR`, git credential settings, or anything in `ops/`.
-- **Never merge a PR**, and never approve one. Merging is the owner's act alone.
+- **Never merge a PR.** Merging is the owner's act alone. Only the reviewer approves, and an approval means only that its rubric passed at that head, not that the PR should merge (per GOV-0011). Every other role never approves.
 - Create new issues **unlabelled**. The owner triages them. The one exception is `gov:question`, which the Governance question template applies.
 - Work only on issues labelled `ready`, and only if the owner added the label: check the most recent `labeled` event for it in the issue's events (`gh api repos/{owner}/{repo}/issues/N/events`). If anyone else added it, ignore it and say so on the issue. Agents never add or remove `ready` or `gov:ruled` (per GOV-0006).
 - End every issue, comment and PR body you write with `-- <role> (<model>)`, e.g. `-- builder (claude-opus-5-5)`. GitHub shows which App wrote it; the line records which model, which the committee diversity rule needs.
