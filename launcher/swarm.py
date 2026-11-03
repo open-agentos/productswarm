@@ -16,7 +16,9 @@ window to its heartbeat tracking issue: the hook uses Claude Code's session id.
 
 Each session runs in its own git worktree, `.worktrees/<session id>` in this checkout,
 detached at origin/main, so sessions never share a working tree (#93). The launcher
-writes the heartbeat hook entries into the worktree's .claude/settings.local.json.
+writes the heartbeat hook entries into the worktree's .claude/settings.local.json,
+pointing at the pinned copy in ~/.productswarm/runtime (heartbeat/install.py), which
+each launcher run first refreshes to origin/main.
 Once a session has exited, its worktree is removed if it is clean and its HEAD is on
 origin; otherwise it is kept and `swarm ls` lists it. Work is never deleted.
 
@@ -103,13 +105,7 @@ def process_command(pid: int) -> str | None:
     return r.stdout.strip() or None
 
 
-def run_git(args: list[str]) -> tuple[int, str]:
-    """Run git; (exit code, combined output)."""
-    try:
-        r = subprocess.run(["git", *args], capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError) as e:
-        return 1, str(e)
-    return r.returncode, (r.stdout + r.stderr).strip()
+run_git = install.run_git
 
 
 # ---------------------------------------------------------------- local state
@@ -143,6 +139,7 @@ class Launcher:
     git: Callable[[list[str]], tuple[int, str]] = run_git
     kept: list[Path] = field(default_factory=list)   # exited sessions' worktrees with work in them
     fetched: bool = False
+    hook: str | None = None         # the pinned hook path, once refreshed in this run
 
     @property
     def dir(self) -> Path:
@@ -210,8 +207,12 @@ class Launcher:
         return self.root / WORKTREES / sid
 
     def hook_path(self) -> str:
-        """The hook command's script path, written into each session's settings."""
-        return install.PROJECT_HOOK
+        """The hook script every session runs: the pinned copy at origin/main (#93, step C),
+        refreshed once per launcher run, so only merged code runs as a hook."""
+        if self.hook is None:
+            self.fetch_main()
+            self.hook = install.refresh_runtime(self.root, self.home / "runtime", self.git)
+        return self.hook
 
     def git_ok(self, *args: str) -> str:
         rc, out = self.git(list(args))
@@ -226,12 +227,11 @@ class Launcher:
 
     def prepare(self, s: Started) -> None:
         """Create the session's worktree at origin/main and write its hook settings."""
-        self.fetch_main()
+        hook = self.hook_path()          # fetches, and refreshes the pinned copy first
         wt = self.worktree(s.session_id)
         self.git_ok("-C", str(self.root), "worktree", "add", "-q", "--detach", str(wt), "origin/main")
         base = install.read_settings(self.root / ".claude" / "settings.local.json")
-        install.write_settings(wt / ".claude" / "settings.local.json",
-                               install.with_hooks(base, hook=self.hook_path()))
+        install.write_settings(wt / ".claude" / "settings.local.json", install.with_hooks(base, hook=hook))
 
     def removable(self, wt: Path) -> bool:
         """Clean (nothing uncommitted or untracked) and HEAD is on a remote branch."""

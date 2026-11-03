@@ -79,6 +79,7 @@ class FakeGit:
             return 1, f"fatal: {sub} failed"
         if args[2:4] == ["worktree", "add"]:
             Path(args[-2]).mkdir(parents=True)
+            (Path(args[-2]) / ".git").write_text("gitdir: x\n")
         elif args[2:4] == ["worktree", "remove"]:
             import shutil
             shutil.rmtree(args[-1])
@@ -201,7 +202,9 @@ class WorktreeTest(Base):
 
     def test_each_session_gets_a_worktree_at_origin_main(self):
         self.l.up([S("builder"), S("docs")])
-        self.assertEqual(self.git.subs(), ["fetch", "worktree add", "worktree add"])   # one fetch
+        # One fetch, the pinned hook copy, then a worktree per session.
+        self.assertEqual(self.git.subs(), ["fetch", "worktree add", "worktree add", "worktree add"])
+        self.assertEqual(self.git.calls[1][-2], str(self.home / "runtime"))
         for e in self.l.load():
             wt = self.root / ".worktrees" / e.session_id
             self.assertIn(["-C", str(self.root), "worktree", "add", "-q", "--detach", str(wt), "origin/main"],
@@ -218,6 +221,26 @@ class WorktreeTest(Base):
         self.assertEqual(got["permissions"], {"allow": ["Bash(ls)"]})
         self.assertEqual(sorted(got["hooks"]), sorted(["SessionStart", "UserPromptSubmit", "PostToolUse",
                                                        "Stop", "SessionEnd"]))
+
+    def test_hooks_run_from_the_pinned_copy(self):
+        self.l.up([S("builder")])
+        (e,) = self.l.load()
+        got = (self.root / ".worktrees" / e.session_id / ".claude" / "settings.local.json").read_text()
+        self.assertIn(f'python3 -I \\"{self.home}/runtime/heartbeat/hook.py\\" SessionStart', got)
+        self.assertNotIn("CLAUDE_PROJECT_DIR", got)
+
+    def test_existing_pinned_copy_is_moved_to_origin_main(self):
+        rt = self.home / "runtime"
+        rt.mkdir()
+        (rt / ".git").write_text("gitdir: x\n")
+        self.l.up([S("builder")])
+        self.assertIn(["-C", str(rt), "checkout", "-q", "--detach", "--force", "origin/main"], self.git.calls)
+
+    def test_pinned_copy_failure_starts_nothing(self):
+        self.git.fail = "worktree"
+        self.assertEqual(self.l.up([S("builder")]), 1)
+        self.assertEqual(self.fake.commands, [])
+        self.assertIn("can't refresh the pinned hook copy", self.lines[-1])
 
     def test_git_failure_starts_nothing(self):
         self.git.fail = "fetch"
@@ -593,7 +616,10 @@ class RealShellTest(unittest.TestCase):
                 self.assertEqual(l.pid(e), procs[0].pid)       # both exec's kept the pid
                 self.assertIn(f"cd {wt} && ", procs[0].args[2])
                 settings = json.loads((wt / ".claude" / "settings.local.json").read_text())
-                self.assertIn("heartbeat/hook.py", json.dumps(settings["hooks"]["SessionStart"]))
+                self.assertIn(f"{home}/runtime/heartbeat/hook.py", json.dumps(settings["hooks"]["SessionStart"]))
+                rev = lambda d, r: subprocess.run(["git", "-C", str(d), "rev-parse", r],
+                                                  capture_output=True, text=True).stdout
+                self.assertEqual(rev(home / "runtime", "HEAD"), rev(root, "origin/main"))   # pinned copy
                 self.assertEqual(subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
                                                 capture_output=True, text=True).stdout, "")
                 self.assertEqual(l.up([S("builder")]), 0)      # already running

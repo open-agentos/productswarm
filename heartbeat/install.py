@@ -8,17 +8,54 @@ Writes the hooks into .claude/settings.local.json, which is per-machine and not
 committed. Other settings in that file are kept. Running it twice is harmless.
 The hook only does anything in sessions started with ops/swarm-session.
 
+The hooks run from a pinned copy, not from the session's own files (#93): a detached
+git worktree at ~/.productswarm/runtime (or $PRODUCTSWARM_HOME/runtime), checked out
+at origin/main. So only code merged to main ever runs as a hook, and a session
+editing heartbeat/hook.py on a branch doesn't run its own edits with its App's
+credentials. Installing refreshes the copy, and so does every launcher start.
+
 The launcher writes the same entries into each session's worktree with with_hooks().
 """
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
 SETTINGS = ROOT / ".claude" / "settings.local.json"
 EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]
 MARK = "heartbeat/hook.py"
 PROJECT_HOOK = f"$CLAUDE_PROJECT_DIR/{MARK}"
+
+
+def runtime_dir() -> Path:
+    return Path(os.environ.get("PRODUCTSWARM_HOME", "~/.productswarm")).expanduser() / "runtime"
+
+
+def run_git(args: list[str]) -> tuple[int, str]:
+    """Run git; (exit code, combined output)."""
+    try:
+        r = subprocess.run(["git", *args], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def refresh_runtime(root: Path, runtime: Path,
+                    git: Callable[[list[str]], tuple[int, str]] = run_git) -> str:
+    """Point the pinned copy at origin/main, creating it if needed; return its hook path.
+
+    The caller fetches origin first. Raises RuntimeError if git fails."""
+    if (runtime / ".git").exists():
+        args = ["-C", str(runtime), "checkout", "-q", "--detach", "--force", "origin/main"]
+    else:
+        args = ["-C", str(root), "worktree", "add", "-q", "--detach", str(runtime), "origin/main"]
+    rc, out = git(args)
+    if rc:
+        raise RuntimeError(f"can't refresh the pinned hook copy at {runtime}: {out[:300]}")
+    return str(runtime / MARK)
 
 
 def entry(event: str, hook: str = PROJECT_HOOK) -> dict:
@@ -66,9 +103,20 @@ def write_settings(path: Path, settings: dict) -> None:
 
 def main(argv: list[str]) -> int:
     uninstall = "--uninstall" in argv
-    write_settings(SETTINGS, with_hooks(read_settings(SETTINGS), uninstall=uninstall))
-    print(f"heartbeat {'disabled' if uninstall else 'enabled'} in {SETTINGS.relative_to(ROOT)}. "
-          "Takes effect in sessions started from now on.")
+    hook = PROJECT_HOOK
+    if not uninstall:
+        rc, out = run_git(["-C", str(ROOT), "fetch", "-q", "origin", "main"])
+        if rc:
+            print(f"heartbeat: git fetch failed: {out[:300]}", file=sys.stderr)
+            return 1
+        try:
+            hook = refresh_runtime(ROOT, runtime_dir())
+        except RuntimeError as e:
+            print(f"heartbeat: {e}", file=sys.stderr)
+            return 1
+    write_settings(SETTINGS, with_hooks(read_settings(SETTINGS), hook=hook, uninstall=uninstall))
+    print(f"heartbeat {'disabled' if uninstall else f'enabled (hooks run from {runtime_dir()})'} "
+          f"in {SETTINGS.relative_to(ROOT)}. Takes effect in sessions started from now on.")
     return 0
 
 
