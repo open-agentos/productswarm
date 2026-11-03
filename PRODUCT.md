@@ -1,6 +1,6 @@
 # Product brief: productswarm
 
-**Owner:** @mattmcalister · **Status:** v0 (swarm dashboard) done · v1 (local launcher) in scope per GOV-0005
+**Owner:** @mattmcalister · **Status:** v0 (swarm dashboard) done · v1 (local launcher) done
 
 ## Problem
 
@@ -41,14 +41,14 @@ GOV-0005 makes v1 a lightweight launcher that runs on Matt's machine. It calls `
 
 ### What we're building
 
-| # | Issue | What |
-|---|---|---|
-| L1 | #47 | Swarm manifest: a committed file listing roles, how many of each, the model per role and an optional per-session spend cap |
-| L2 | #48 | `swarm up / ls / stop`: start every session in the manifest, list live sessions from heartbeat data, stop one |
-| L3 | #49 | Issue handoff: start a session on a given issue; refuse if a live session is already working on it |
-| L4 | #52 | Spend cap per session |
-| L5 | #50 | "Needs you" list: one ordered list of what's waiting on Matt (PRs to merge, open `gov:question`s, blocked or idle sessions), as `swarm inbox` and at the top of the dashboard |
-| L6 | #51 | The reviewer runs by default and reviews each open PR once |
+| # | Issue | What | PR |
+|---|---|---|---|
+| L1 | #47 | Swarm manifest: a committed file listing roles, how many of each, the model per role and an optional per-session spend cap | #64 |
+| L2 | #48 | `swarm up / ls / stop`: start every session in the manifest, list live sessions from heartbeat data, stop one | #65 |
+| L3 | #49 | Issue handoff: start a session on a given issue; refuse if a live session is already working on it | #70 |
+| L4 | #52 | Spend cap per session | #74 |
+| L5 | #50 | "Needs you" list: one ordered list of what's waiting on Matt (PRs to merge, open `gov:question`s, blocked or idle sessions), as `swarm inbox` and at the top of the dashboard | #71 |
+| L6 | #51 | The reviewer runs by default and reviews each open PR once | #72 |
 
 Order: L1 → L2 → L3, then L5 and L6, then L4.
 
