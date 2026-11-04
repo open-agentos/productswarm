@@ -21,10 +21,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import ghql
+
 LAUNCHER = Path(__file__).resolve().parent.parent / "launcher"
 
 WINDOW_DAYS = 7
-MAX_RUNS = 30               # the newest runs in the window, at most
+MAX_RUNS = 15               # the newest runs in the window, at most: one jobs call each (#392)
 NUDGE_ACTOR = "github-actions[bot]"   # reviewer-nudge.yml's dispatches show this actor
 REVIEWER = "productswarm-reviewer[bot]"
 NO_ACTIONS = "can't read Actions runs: the token needs `actions: read`"
@@ -58,6 +60,32 @@ def _gh(path: str, jq: str, paginate: bool) -> list[dict]:
     return [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
 
 
+PR_BATCH = 20   # PRs per GraphQL query: about one rate-limit point each
+PR_FIELD = ("p%d: pullRequest(number: %d) { "
+            "reviews(first: 100) { totalCount nodes { author { login __typename } commit { oid } "
+            "submittedAt state } } "
+            "commits(first: 100) { totalCount nodes { commit { oid committedDate } } } }")
+
+
+def pr_reviews_and_commits(repo: str, numbers: list[int]) -> dict[int, tuple[list[dict], list[dict]]]:
+    """Each PR's reviews and commits in REST's shape (only the fields this section reads),
+    oldest first, from one GraphQL query per PR_BATCH PRs (#392). A PR with more than 100 of
+    either, or one the query didn't return, falls back to REST."""
+    out = {}
+    for n, pr in ghql.batched(repo, numbers, PR_FIELD, PR_BATCH).items():
+        rv, cm = ghql.complete((pr or {}).get("reviews")), ghql.complete((pr or {}).get("commits"))
+        reviews = (_gh(f"repos/{repo}/pulls/{n}/reviews?per_page=100", ".[]", True) if rv is None else
+                   [{"user": {"login": ghql.login(x.get("author"))},
+                     "commit_id": (x.get("commit") or {}).get("oid"),
+                     "submitted_at": x.get("submittedAt"), "state": x.get("state")} for x in rv])
+        commits = (_gh(f"repos/{repo}/pulls/{n}/commits?per_page=100", ".[]", True) if cm is None else
+                   [{"sha": (x.get("commit") or {}).get("oid"),
+                     "commit": {"committer": {"date": (x.get("commit") or {}).get("committedDate")}}}
+                    for x in cm])
+        out[n] = (reviews, commits)
+    return out
+
+
 def fetch(repo: str, now: dt.datetime, reviews: dict[int, list[dict]]) -> dict:
     """The section's raw data. `reviews` is generate.fetch()'s reviews on open PRs, reused
     so those aren't read twice. Never raises: a failure is kept as an error line."""
@@ -74,15 +102,20 @@ def fetch(repo: str, now: dt.datetime, reviews: dict[int, list[dict]]) -> dict:
     data = {"runs": runs, "jobs": jobs, "reviews": {}, "commits": {}}
     # Reviews and head dates for every PR a sweep reviewed in the window, plus open PRs.
     prs = {parsed[0] for js in jobs.values() for j in js if (parsed := parse_review_job(j.get("name")))}
+
+    def reviewed(rv: list[dict]) -> bool:
+        return any((r.get("user") or {}).get("login") == REVIEWER for r in rv)
+
     try:
+        # Open PRs' reviews are reused; one GraphQL query per PR_BATCH PRs reads the rest (#392).
+        wanted = sorted((prs - set(reviews)) | {n for n, rv in reviews.items() if reviewed(rv)})
+        read = pr_reviews_and_commits(repo, wanted)
         for n in sorted(prs | set(reviews)):
-            rv = reviews.get(n)
-            if rv is None:
-                rv = _gh(f"repos/{repo}/pulls/{n}/reviews?per_page=100", ".[]", True)
+            rv = reviews[n] if n in reviews else read[n][0]
             data["reviews"][n] = rv
-            if any((r.get("user") or {}).get("login") == REVIEWER for r in rv):
-                data["commits"][n] = _gh(f"repos/{repo}/pulls/{n}/commits?per_page=100", ".[]", True)
-    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
+            if reviewed(rv):
+                data["commits"][n] = read[n][1]
+    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError) as e:
         data["times_error"] = f"can't read reviews: {str(e)[:200]}"
     return data
 

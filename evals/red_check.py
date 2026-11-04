@@ -48,8 +48,10 @@ ENDED_RED = "ended while red"
 
 # ---------------------------------------------------------------- reading GitHub
 
-def fetch(repo: str) -> dict:
-    """The start PR and every builder-App PR updated since, with its reviews."""
+def fetch(repo: str, reviews=None) -> dict:
+    """The start PR and every builder-App PR updated since, with its reviews. `reviews`, if
+    given, reads them all at once (PR numbers -> {number: REST-shaped reviews}); the
+    dashboard passes a batched GraphQL reader so a rebuild isn't one call per PR (#392)."""
     refs = gather.gh_json("issue", "view", str(START_ISSUE), "--repo", repo,
                           "--json", "closedByPullRequestsReferences")
     merged = []
@@ -64,8 +66,10 @@ def fetch(repo: str) -> dict:
                          "--author", "app/" + generate.BUILDER,
                          "--search", f"updated:>={start['mergedAt'][:10]}", "--limit", "1000",
                          "--json", "number,state,author,closingIssuesReferences")
+    batch = reviews([p["number"] for p in prs]) if reviews else {}
     for p in prs:
-        p["reviews"] = gather.gh_api_list(f"repos/{repo}/pulls/{p['number']}/reviews?per_page=100")
+        p["reviews"] = batch[p["number"]] if p["number"] in batch else \
+            gather.gh_api_list(f"repos/{repo}/pulls/{p['number']}/reviews?per_page=100")
     return {"start": start, "prs": prs}
 
 
