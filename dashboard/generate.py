@@ -29,6 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import committees
 import governance
 import progress
 import reviewer_runs
@@ -80,11 +81,12 @@ def gh_json(*args: str) -> object:
 
 
 def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
-          with_actions: bool = False) -> dict:
+          with_actions: bool = False, with_committees: bool = False) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
-    also reads the v3 progress section's data (progress.py), and `with_actions` the Actions
-    reviewer section's (reviewer_runs.py); only the page shows them, so swarm's snapshot()
-    and the digest leave both off and make no Actions API calls."""
+    also reads the v3 progress section's data (progress.py), `with_actions` the Actions
+    reviewer section's (reviewer_runs.py), and `with_committees` the committee Discussions
+    (committees.py, GraphQL). Only the page shows them, so swarm's snapshot() and the digest
+    leave all three off and make no Actions or GraphQL calls; main() asks for them."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
     for path in (f"repos/{repo}/issues?state=open&per_page=100",
@@ -106,7 +108,8 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
     return {"repo": repo, "issues": list(issues.values()), "comments": comments, "prs": prs or [],
             "reviews": reviews, "index": index,
             "progress": progress.fetch(repo, gh_json) if with_progress else None,
-            "actions": reviewer_runs.fetch(repo, now, reviews) if with_actions else None}
+            "actions": reviewer_runs.fetch(repo, now, reviews) if with_actions else None,
+            "committees": committees.fetch(repo, gh_items, gh_json) if with_committees else None}
 
 
 # ---------------------------------------------------------------- deriving state
@@ -327,6 +330,7 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
             "progress": progress.build(data["progress"]) if data.get("progress") else None,
             "reviewer_runs": reviewer_runs.build(
                 data.get("actions"), [p for p in prs if not p["draft"] and unreviewed(p)], now),
+            "committees": committees.build(data.get("committees")),
             "spend": {"per_day": per_day, "today": per_day[today],
                       "unpriced": [s for s in sessions if s["cost"] is None]}}
 
@@ -655,7 +659,8 @@ def main(argv: list[str]) -> int:
         return 2
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     try:
-        data = fetch(repo, now, args.days, with_progress=True, with_actions=True)
+        data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
+                     with_committees=True)
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
         return 1
