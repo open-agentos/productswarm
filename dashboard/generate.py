@@ -27,6 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import committees
 import spend
 
 HERE = Path(__file__).resolve().parent
@@ -74,8 +75,11 @@ def gh_json(*args: str) -> object:
     return json.loads(r.stdout or "null")
 
 
-def fetch(repo: str, now: dt.datetime, days: int) -> dict:
-    """Everything the page needs, as plain API data. build() does the rest."""
+def fetch(repo: str, now: dt.datetime, days: int, with_committees: bool = False) -> dict:
+    """Everything the page needs, as plain API data. build() does the rest.
+
+    Committee Discussions cost GraphQL calls only the page uses, so `swarm inbox`, `swarm
+    watch` and the digest leave them out; main() asks for them."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
     for path in (f"repos/{repo}/issues?state=open&per_page=100",
@@ -91,7 +95,8 @@ def fetch(repo: str, now: dt.datetime, days: int) -> dict:
     reviews = {p["number"]: gh_items(f"repos/{repo}/pulls/{p['number']}/reviews?per_page=100")
                for p in prs or [] if not p.get("isDraft")}
     return {"repo": repo, "issues": list(issues.values()), "comments": comments, "prs": prs or [],
-            "reviews": reviews}
+            "reviews": reviews,
+            "committees": committees.fetch(repo, gh_items, gh_json) if with_committees else None}
 
 
 # ---------------------------------------------------------------- deriving state
@@ -305,6 +310,7 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
     return {"repo": repo, "now": now, "idle_minutes": int(idle_after.total_seconds() // 60),
             "issue_titles": {n: i["title"] for n, i in issues.items()},
             "sessions": sessions, "prs": prs, "gov": gov,
+            "committees": committees.build(data.get("committees")),
             "spend": {"per_day": per_day, "today": per_day[today],
                       "unpriced": [s for s in sessions if s["cost"] is None]}}
 
@@ -637,7 +643,7 @@ def main(argv: list[str]) -> int:
         return 2
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     try:
-        data = fetch(repo, now, args.days)
+        data = fetch(repo, now, args.days, with_committees=True)
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
         return 1
