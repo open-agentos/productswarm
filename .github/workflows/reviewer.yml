@@ -1,52 +1,80 @@
-# Runs one reviewer pass in GitHub Actions per new PR head (v3 C stage 1, GOV-0015).
-# Events, concurrency and skip rule: GOV-0019. Trusted authors and the check gate: GOV-0017.
-# Reviewer App key and token scopes: GOV-0018. Job log: GOV-0016. Model credential: the
-# owner's direction on #208 (a subscription token for now; an API key is the goal).
+# The Actions reviewer as a reconciler on main (#255 stage 1, GOV-0020): on a schedule or a
+# dispatch, `plan` reads repo state and lists the open PRs needing a review now, then one
+# `review` job runs per listed PR. Every run starts from main, so GOV-0018's main-only
+# environment accepts it. GOV-0020 amends GOV-0017 (trusted authors, forks and drafts are
+# now plan's policy) and GOV-0019's events (pull_request no longer starts a review; an
+# early nudge is #261). Concurrency and the skip rule: GOV-0019, #258. Reviewer App key and
+# token scopes: GOV-0018. Job log: GOV-0016. Model credential: the owner's direction on
+# #208 (a subscription token for now; an API key is the goal).
 # Committed by the owner: the Apps have no `workflows` permission (#32).
 name: Reviewer
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    # GOV-0010's interval. GitHub may start scheduled runs late, or skip one under load;
+    # the next sweep picks up whatever was missed.
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       pr:
-        description: PR number to review
-        required: true
+        description: PR number to review (leave empty to sweep every open PR)
+        required: false
         type: string
 
 permissions: {}
 
 jobs:
-  check:
-    # No secrets, no environment. Decides whether a run may start (GOV-0017, GOV-0019).
+  plan:
+    # No secrets, no environment. Decides which PRs to review now (GOV-0020, #257, #258).
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    concurrency:
+      group: reviewer-plan
+      cancel-in-progress: false
     permissions:
-      contents: read
-      pull-requests: read
+      contents: read        # checkout, and head commit dates (#258)
+      pull-requests: read   # open PRs and their reviews
+      actions: read         # this workflow's earlier runs and jobs (#258)
     outputs:
-      run: ${{ steps.check.outputs.run }}
-      pr: ${{ steps.check.outputs.pr }}
+      prs: ${{ steps.plan.outputs.prs }}
+      any: ${{ steps.plan.outputs.any }}
     steps:
-      # Always main, never the PR head: the check's own code must not come from the PR.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-      - id: check
+      - id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 launcher/actions_review.py check
+          PR_INPUT: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          pr="${PR_INPUT#\#}"
+          if [ -z "$pr" ]; then
+            python3 launcher/actions_review.py plan
+          elif [[ "$pr" =~ ^[0-9]+$ ]]; then
+            python3 launcher/actions_review.py plan --pr "$pr"
+          else
+            echo "plan: the pr input must be a PR number"
+            echo "prs=[]" >> "$GITHUB_OUTPUT"
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
   review:
-    needs: check
-    if: needs.check.outputs.run == 'true'
+    needs: plan
+    if: needs.plan.outputs.any == 'true'
+    # plan finds earlier attempts by this exact name (REVIEW_JOB in actions_review.py, #258).
+    name: "review #${{ matrix.pr }} ${{ matrix.head }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.prs) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: reviewer
     concurrency:
-      group: reviewer-pr-${{ needs.check.outputs.pr }}
+      group: reviewer-pr-${{ matrix.pr }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -65,7 +93,7 @@ jobs:
           APP_ID: ${{ secrets.REVIEWER_APP_ID }}
           APP_KEY: ${{ secrets.REVIEWER_APP_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          PR: ${{ needs.check.outputs.pr }}
+          PR: ${{ matrix.pr }}
         run: |
           set -euo pipefail
           echo "::add-mask::$CLAUDE_CODE_OAUTH_TOKEN"
