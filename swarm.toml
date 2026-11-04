@@ -42,6 +42,7 @@ interval_minutes = 5
 max_live = 2
 max_turns = 200
 review_in_actions = true
+actions_max_reviews = 2
 
 [[session]]
 role = "planner"
