@@ -70,6 +70,7 @@ The digest issue isn't a `[heartbeat]` tracking issue or a `gov:question`, so it
 - **Open PRs** and the issues they close.
 - **`gov:question` issues**: the open ones, with the sessions blocked on each, and `gov:lapsed` ones closed within `--days`.
 - **`governance/INDEX.md`**, from the checkout the page is built in (`dashboard.yml` checks out `main`).
+- **v3 progress:** see [v3 progress](#v3-progress).
 - **Committee Discussions** (`committees.py`, #353): every Discussion in the "Committees" category, through `gh api graphql`, plus the `gov:question` each one serves (from a `<!-- productswarm-committee question=N -->` marker, else the `Committee for #N:` title) and that question's record in `governance/decisions/` (front matter `question: "#N"`). Members come from the `## Members` or `### Members` table, the post order from rule 1 under `Rules`, and round posts are top-level comments headed `Round N: <seat>` by that seat's App. From each post it keeps only the round, seat, author, time, link, signature model and the first bold phrase of its Recommendation. From the owner's comments on the question it keeps only whether the convening, summary and ruling comments exist, when, and their links, so no cost line or other text reaches the page. It derives status (convened, round N, summary, ratified, record), §7.2 diversity, the next seat, rounds used of 3 and posts per member per UTC day against §8's 6. A Discussion that doesn't match #314's layout shows as "unparsed". A token that can't read Discussions gives a note and the rest of the page still builds. Only the page reads these (`fetch(..., with_committees=True)` in `main()`); `swarm inbox`, `swarm watch` and the digest skip the GraphQL calls. The page shows them from #354.
 
 ## Governance
@@ -81,6 +82,20 @@ The digest issue isn't a `[heartbeat]` tracking issue or a `gov:question`, so it
 - **Lapsed questions:** questions labelled `gov:lapsed`, open, or closed within `--days`, each with its time to live. A muted line notes that a lapsed default is not precedent (GOVERNANCE.md §8).
 
 The needs-you list and its past-TTL flag don't change. This section is for reading, not for acting on. It needs no new token permission: the index comes from the checkout, and the questions come from the issues the page already fetches.
+
+## v3 progress
+
+A section from `progress.py` (#357) shows where v3 stands. Only the page shows it: `digest.py` and `swarm inbox` don't read it.
+
+| Line | Where it comes from |
+|---|---|
+| One row per GOV-0015 stage (B, F, C stage 1) | the `### Stage …` tables in PRODUCT.md's v3 section in the checkout: "N of M issues closed" over the `#N`s in each table's `Issue` column, with the open ones linked. A heading's own "(done)" shows as done. Rows with no issue number are skipped. |
+| C stage 2 | "not planned (GOV-0015)" while PRODUCT.md's v3 section says so |
+| Eval bar | the `**Result: …**` line under "Against the bar" in `evals/results.md`, linked; "unknown" if there's no such line |
+| Planted-defect gate | #331's state: "not run" while it's open, "done, see #331" once it's closed. The result comment has no fixed wording, so it isn't parsed. |
+| Red check | `evals/red_check.py`'s own `fetch()`, `count()` and `summary()`: reds counted of the first 5, how many reached the 2-round bound, and whether to revisit (more than 2) once all 5 are settled. Before #329's PR merges it says so. No cost is shown (`evals/README.md`). |
+
+The stage issues' states, and #331's, come from one GraphQL query, since closed issues may be older than `--days`. `red_check.py` imports `generate` at load, so `progress.py` imports it inside a function, not at load. Everything is read with the workflow's existing `issues: read` and `pull-requests: read`. If a read fails, that line says "couldn't read" and the rest of the page still publishes.
 
 ## Status
 

@@ -132,12 +132,21 @@ def report(data: dict, rows: list[dict]) -> list[str]:
         blocks = f" (block {', '.join(map(str, r['blocks']))})" if r["blocks"] else ""
         lines.append(f"PR #{r['number']}  {r['state']}  {r['reds']} "
                      f"red{'' if r['reds'] == 1 else 's'}{blocks}  {r['outcome']}")
-    at_bound = sum(r["outcome"] == BOUND for r in rows)
-    lines.append(f"red check (#311): {len(rows)} of {COUNT} counted, {at_bound} reached the "
+    s = summary(rows)
+    lines.append(f"red check (#311): {s['counted']} of {COUNT} counted, {s['at_bound']} reached the "
                  f"{generate.ROUNDS}-round bound; revisit if more than {REVISIT_OVER}")
-    if len(rows) == COUNT and all(r["settled"] for r in rows):
-        lines.append(f"revisit: {'yes' if at_bound > REVISIT_OVER else 'no'}")
+    if s["revisit"] is not None:
+        lines.append(f"revisit: {'yes' if s['revisit'] else 'no'}")
     return lines
+
+
+def summary(rows: list[dict]) -> dict:
+    """The count as numbers: report() prints it, and the dashboard's v3 section (#357) shows it.
+    `revisit` is None until all COUNT reds are counted and settled."""
+    at_bound = sum(r["outcome"] == BOUND for r in rows)
+    settled = len(rows) == COUNT and all(r["settled"] for r in rows)
+    return {"counted": len(rows), "at_bound": at_bound,
+            "revisit": (at_bound > REVISIT_OVER) if settled else None}
 
 
 # ---------------------------------------------------------------- CLI
