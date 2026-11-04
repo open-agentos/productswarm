@@ -265,7 +265,12 @@ class CommandTest(Base):
         for d in ("Bash(gh pr merge *)", "Bash(gh issue edit * --add-label *)",
                   "Bash(gh issue edit * --remove-label *)", "Bash(gh pr edit * --add-label *)",
                   "Bash(gh pr edit * --remove-label *)", "Bash(gh label *)",
-                  "Bash(gh api *labels*)", "Bash(gh api *merge*)"):
+                  "Bash(gh api *merge*)"):
+            self.assertIn(d, swarm.DENY)
+
+    def test_deny_patterns_cover_closing(self):
+        # Closing a PR or an issue is an owner act too (#361).
+        for d in ("Bash(gh pr close *)", "Bash(gh issue close *)"):
             self.assertIn(d, swarm.DENY)
 
     def test_budget_and_ceiling_survive_the_state_file(self):

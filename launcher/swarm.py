@@ -92,7 +92,8 @@ DENY = (
     "Bash(gh pr edit * --add-label *)", "Bash(gh pr edit * --remove-label *)",
     "Bash(gh pr edit * --add-label=*)", "Bash(gh pr edit * --remove-label=*)",
     "Bash(gh label *)",
-    "Bash(gh api *labels*)", "Bash(gh api *merge*)",
+    "Bash(gh api *merge*)",
+    "Bash(gh pr close *)", "Bash(gh issue close *)",
 )
 START_GRACE = 60      # seconds a session may take to write its pid file before it counts as failed
 STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
