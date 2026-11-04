@@ -120,14 +120,14 @@ class ReviewerStateTest(unittest.TestCase):
 
     def test_third_request_on_an_older_head_is_back_with_the_reviewer(self):
         _, detail = self.detail([review("CHANGES_REQUESTED", c) for c in ("c1", "c2", "c3")])
-        self.assertEqual(detail, "awaiting review, closes #4")
+        self.assertEqual(detail, "no reviewer review at hhhhhhh, closes #4")   # #332
 
     def test_overstep_at_head_needs_the_owner_whatever_the_state(self):
         for state in ("COMMENTED", "CHANGES_REQUESTED"):
             _, detail = self.detail([review(state, self.HEAD, authority="fail")])
             self.assertEqual(detail, "overstep: needs the owner, closes #4")
         _, detail = self.detail([review("COMMENTED", "old", authority="fail")])  # an older head
-        self.assertEqual(detail, "awaiting review, closes #4")
+        self.assertEqual(detail, "no reviewer review at hhhhhhh, closes #4")   # #332
 
     def test_changes_on_a_pr_the_builder_did_not_open_need_the_owner(self):
         """#178: the builder responds only on its own PR (GOV-0011)."""
@@ -156,6 +156,55 @@ class ReviewerStateTest(unittest.TestCase):
         m = g.build({"repo": "r", "issues": [], "comments": {}, "prs": [pr(40, 30)]}, NOW,
                     g.dt.timedelta(minutes=15))
         self.assertEqual(m["prs"][0]["reviewer"]["at_head"], None)
+
+
+class UnreviewedHeadTest(unittest.TestCase):
+    """#332: a non-draft builder PR with no reviewer-App review at its head is flagged, so
+    the owner sees it before merging (#200, #269 and #275 were merged unreviewed)."""
+    HEAD = "abcdef0" + "1" * 33
+
+    def details(self, reviews, author="app/productswarm-builder", draft=False, decision=""):
+        p = {**pr(40, 30, draft=draft, review=decision, closes=[4]), "headRefOid": self.HEAD,
+             "author": {"login": author}}
+        m = g.build({"repo": "open-agentos/productswarm", "issues": [issue(4, "x")], "comments": {},
+                     "prs": [p], "reviews": {40: reviews}}, NOW, g.dt.timedelta(minutes=15))
+        return [i["detail"] for i in g.needs_you(m) if i["kind"] == "pr"]
+
+    def test_no_reviewer_review(self):
+        self.assertEqual(self.details([]), ["no reviewer review at abcdef0, closes #4"])
+
+    def test_reviewed_at_an_older_head_only(self):
+        self.assertEqual(self.details([review("APPROVED", "old"), review("COMMENTED", "older")]),
+                         ["no reviewer review at abcdef0, closes #4"])
+
+    def test_owner_approval_only(self):
+        owner = review("APPROVED", self.HEAD, login="mattmcalister")
+        self.assertEqual(self.details([owner], decision="APPROVED"),
+                         ["no reviewer review at abcdef0, closes #4"])
+
+    def test_reviewed_at_head_is_not_flagged(self):
+        for state, decision, want in [("APPROVED", "APPROVED", "approved"),
+                                      ("COMMENTED", "", "awaiting review")]:
+            self.assertEqual(self.details([review(state, self.HEAD)], decision=decision),
+                             [f"{want}, closes #4"])
+
+    def test_rest_login_form_is_a_builder_pr(self):
+        self.assertEqual(self.details([], author="productswarm-builder[bot]"),
+                         ["no reviewer review at abcdef0, closes #4"])
+
+    def test_draft_is_not_flagged(self):
+        self.assertEqual(self.details([], draft=True), [])
+
+    def test_non_builder_pr_is_not_flagged(self):
+        for author in ("app/productswarm-docs", "mattmcalister"):
+            self.assertEqual(self.details([], author=author), ["awaiting review, closes #4"])
+
+    def test_digest_line_shows_it(self):
+        p = {**pr(40, 30, closes=[4]), "headRefOid": self.HEAD}
+        m = g.build({"repo": "r", "issues": [issue(4, "x")], "comments": {}, "prs": [p],
+                     "reviews": {40: []}}, NOW, g.dt.timedelta(minutes=15))
+        (item,) = g.needs_you(m)
+        self.assertIn("no reviewer review at abcdef0", g.needs_line(item, NOW))
 
 
 def ttl_body(ttl):
