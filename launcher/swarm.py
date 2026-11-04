@@ -114,15 +114,17 @@ def opener(role: str, issue: int | None = None, pr: int | None = None) -> str:
     return f"You are the {role} for productswarm. Read CLAUDE.md, PRODUCT.md and roles/{role}.md, then {then}."
 
 
-def headless_flags(budget_usd: float, max_turns: int) -> list[str]:
+def headless_flags(budget_usd: float, max_turns: int, extra_deny: tuple[str, ...] = ()) -> list[str]:
     """The flags after `-p <opener>` for a headless run, as an argv (not shell-quoted):
     GOV-0013's permission mode and denies, GOV-0012's budget and turn ceiling, and a JSON
     result. Shared by runs `swarm watch` starts and reviewer runs in Actions (#215).
+    extra_deny adds patterns after DENY for one kind of run only: reviewer runs in Actions
+    pass actions_review.REVIEWER_DENY (#389); runs `swarm watch` starts pass none.
 
     --disallowedTools takes several values, so another flag must follow it: otherwise
     claude would read the next word as one more pattern."""
     return ["--permission-mode", "auto",
-            "--disallowedTools", *DENY,
+            "--disallowedTools", *DENY, *extra_deny,
             "--max-budget-usd", f"{budget_usd:g}", "--max-turns", str(max_turns),
             "--output-format", "json"]
 

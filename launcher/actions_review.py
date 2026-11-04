@@ -42,7 +42,8 @@ plus CLOCK_SKEW) is held, with that reason in the log. It needs `actions: read` 
 limits as a run `swarm watch` starts:
 
 - the claude argv is swarm.headless_flags(), the flags Launcher.headless_args() quotes:
-  `--permission-mode auto` and `--disallowedTools` (GOV-0013), `--max-budget-usd` from the
+  `--permission-mode auto` and `--disallowedTools` (GOV-0013) plus REVIEWER_DENY, which
+  denies creating issues in these runs only (#389), `--max-budget-usd` from the
   reviewer's spend_cap_usd and `--max-turns` from [watch] max_turns in swarm.toml (GOV-0012),
   and `--output-format json`. The budget holds under a subscription token too: there
   total_cost_usd is Claude Code's estimate, not a bill, but it's still the ceiling;
@@ -400,10 +401,25 @@ def reviewer_entry(pr: int, manifest_path: Path | str, session_id: str, started:
                          budget_usd=rev.spend_cap_usd, max_turns=limits.max_turns)
 
 
+# Reviewer runs in Actions only, on top of swarm.DENY (#389): never create an issue. The
+# reviewer token has `issues: read` (#384's log), yet GraphQL createIssue, which `gh issue
+# create` uses, accepted it (#364). A backstop like DENY, not a fence: e.g. a GraphQL query
+# read from a file (`-F query=@q.graphql`) gets past it. Not in swarm.DENY: the planner
+# opens issues as its job.
+REVIEWER_DENY = (
+    "Bash(gh issue create *)",               # gh's own command (it uses GraphQL createIssue)
+    "Bash(gh api graphql *createIssue*)",    # the mutation, called directly
+    "Bash(gh api *repos/*/issues)",          # REST create, path last: `gh api -X POST repos/o/r/issues`
+    "Bash(gh api *repos/*/issues *)",        # REST create, flags after the path, any of -X/--method/-f/-F/--input
+)
+
+
 def claude_argv(e: swarm.Started) -> list[str]:
-    """What ops/swarm-session would exec for this run, with swarm.headless_flags()."""
+    """What ops/swarm-session would exec for this run, with swarm.headless_flags() and
+    REVIEWER_DENY."""
     return ["claude", "--model", e.model, "--session-id", e.session_id,
-            "-p", swarm.opener(e.role, e.issue, e.pr), *swarm.headless_flags(e.budget_usd, e.max_turns)]
+            "-p", swarm.opener(e.role, e.issue, e.pr),
+            *swarm.headless_flags(e.budget_usd, e.max_turns, REVIEWER_DENY)]
 
 
 def hook_settings(root: Path) -> dict:
