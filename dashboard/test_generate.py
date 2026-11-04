@@ -165,7 +165,11 @@ FAKE_GH = r"""#!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]
 data = json.load(open(os.environ["FAKE_GH_DATA"]))
-if a[:1] == ["api"]:
+if a[:2] == ["api", "graphql"]:
+    print(json.dumps(data.get("graphql", {})))
+elif a[:2] == ["issue", "view"]:
+    print(json.dumps(data.get("issue_view", {})))
+elif a[:1] == ["api"]:
     path = a[2]
     key = "open" if "state=open" in path else "closed" if "state=closed" in path else path.split("?")[0]
     for item in data.get(key, []):
@@ -193,6 +197,8 @@ class EndToEndTest(unittest.TestCase):
                 "closed": [],
                 f"repos/{REPO}/issues/50/comments": [comment([e])],
                 "prs": [],
+                "graphql": {"data": {"repository": {"i331": {"state": "OPEN"}}}},
+                "issue_view": {"closedByPullRequestsReferences": []},
             }))
             env = {"PATH": f"{d}{os.pathsep}{os.environ['PATH']}", "FAKE_GH_DATA": str(d / "data.json")}
             old = {k: os.environ.get(k) for k in env}
@@ -209,6 +215,9 @@ class EndToEndTest(unittest.TestCase):
             page = (d / "out" / "index.html").read_text()
             self.assertIn("#4 Dashboard generator", page)
             self.assertIn("s-active", page)
+            self.assertIn("<h2>v3 progress</h2>", page)
+            self.assertIn("(<a href=\"https://github.com/open-agentos/productswarm/issues/331\">#331</a>): not run", page)
+            self.assertIn("not started: no reds count until", page)
 
 
 if __name__ == "__main__":
