@@ -614,7 +614,7 @@ class ManifestWatchTest(unittest.TestCase):
             manifest.parse_all(text)
         self.assertEqual(c.exception.problems, [
             "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live, max_turns, "
-            "review_in_actions)",
+            "review_in_actions, actions_max_reviews)",
             "watch: interval_minutes must be a positive number, got 0",
             "watch: max_live must be a whole number of at least 1, got 1.5"])
         with self.assertRaises(manifest.ManifestError) as c:

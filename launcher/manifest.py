@@ -14,7 +14,9 @@ max_turns (#147, GOV-0012) is the turn ceiling for the headless runs swarm watch
 positive whole number. It may be left out here, so `swarm up` still works, but `swarm watch`
 then refuses to start anything. review_in_actions (#216, GOV-0019) is an optional true or
 false, default false: when true, `swarm watch` leaves every [review] trigger to the GitHub
-Actions reviewer and starts nothing for it. load_watch() returns them, or None if the
+Actions reviewer and starts nothing for it. actions_max_reviews (#257) is the most PRs one
+`actions_review.py plan` lists: a whole number of at least 1, optional; with it left out,
+plan lists nothing. load_watch() returns them, or None if the
 manifest has no [watch] table.
 """
 from __future__ import annotations
@@ -30,7 +32,7 @@ DEFAULT_PATH = ROOT / "swarm.toml"
 REQUIRED = ("role", "count", "model")
 OPTIONAL = ("spend_cap_usd",)
 WATCH_KEYS = ("interval_minutes", "max_live")     # required in [watch]
-WATCH_OPTIONAL = ("max_turns", "review_in_actions")   # watch refuses to start without max_turns
+WATCH_OPTIONAL = ("max_turns", "review_in_actions", "actions_max_reviews")   # watch refuses to start without max_turns
 
 
 class ManifestError(ValueError):
@@ -63,6 +65,7 @@ class WatchLimits:
     max_live: int               # most live sessions it may have started at once
     max_turns: int | None = None    # --max-turns for each headless run (GOV-0012); None: watch refuses
     review_in_actions: bool = False  # leave [review] to the Actions reviewer (GOV-0019)
+    actions_max_reviews: int | None = None  # most PRs one Actions plan lists (#257); None: none
 
 
 def _is_number(v) -> bool:
@@ -129,6 +132,10 @@ def _check_watch(table) -> list[str]:
         v = table["max_turns"]
         if not isinstance(v, int) or isinstance(v, bool) or v < 1:
             problems.append(f"watch: max_turns must be a whole number of at least 1, got {v!r}")
+    if "actions_max_reviews" in table:
+        v = table["actions_max_reviews"]
+        if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+            problems.append(f"watch: actions_max_reviews must be a whole number of at least 1, got {v!r}")
     if "review_in_actions" in table:
         v = table["review_in_actions"]
         if not isinstance(v, bool):
@@ -177,7 +184,8 @@ def parse_all(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "ro
                                     spend_cap_usd=None if cap is None else float(cap)))
     w = data.get("watch")
     limits = None if w is None else WatchLimits(float(w["interval_minutes"]), w["max_live"],
-                                                w.get("max_turns"), w.get("review_in_actions", False))
+                                                w.get("max_turns"), w.get("review_in_actions", False),
+                                                w.get("actions_max_reviews"))
     return sessions, limits
 
 
@@ -218,9 +226,11 @@ def main(argv: list[str]) -> int:
         print(f"{s.name}\t{s.model}\t{cap}")
     if limits:
         turns = "no max_turns" if limits.max_turns is None else f"max {limits.max_turns} turns a run"
+        planned = ("no actions_max_reviews" if limits.actions_max_reviews is None
+                   else f"at most {limits.actions_max_reviews} Actions reviews a sweep")
         reviews = "[review] left to Actions" if limits.review_in_actions else "[review] local"
         print(f"watch\tevery {limits.interval_minutes:g} min\tat most {limits.max_live} live\t{turns}"
-              f"\t{reviews}")
+              f"\t{planned}\t{reviews}")
     return 0
 
 

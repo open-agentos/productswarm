@@ -192,5 +192,46 @@ class ReviewInActionsTest(Base):
         self.assertIs(m.load_watch().review_in_actions, False)
 
 
+class ActionsMaxReviewsTest(Base):
+    """[watch] actions_max_reviews (#257): optional, a whole number of at least 1."""
+    WATCH = "[watch]\ninterval_minutes = 5\nmax_live = 2\nmax_turns = 200\n"
+
+    def limits(self, extra=""):
+        return m.parse_all(self.WATCH + extra + session(), Path("swarm.toml"), self.roles)[1]
+
+    def test_missing_is_none(self):
+        self.assertIsNone(self.limits().actions_max_reviews)
+
+    def test_valid(self):
+        for v in (1, 2, 10):
+            self.assertEqual(self.limits(f"actions_max_reviews = {v}\n").actions_max_reviews, v)
+
+    def test_wrong_type(self):
+        for bad in ('"2"', "2.0", "true", "[]"):
+            with self.subTest(value=bad):
+                with self.assertRaises(m.ManifestError) as cm:
+                    self.limits(f"actions_max_reviews = {bad}\n")
+                self.assertEqual(len(cm.exception.problems), 1)
+                self.assertIn("watch: actions_max_reviews must be a whole number of at least 1",
+                              cm.exception.problems[0])
+
+    def test_below_one(self):
+        for bad in ("0", "-1"):
+            with self.subTest(value=bad):
+                with self.assertRaises(m.ManifestError) as cm:
+                    self.limits(f"actions_max_reviews = {bad}\n")
+                self.assertIn("at least 1, got", cm.exception.problems[0])
+
+    def test_cli_shows_it(self):
+        path = self.dir / "swarm.toml"
+        for extra, shown in (("actions_max_reviews = 2\n", "at most 2 Actions reviews a sweep"),
+                             ("", "no actions_max_reviews")):
+            path.write_text(self.WATCH + extra + session())
+            out = io.StringIO()
+            with redirect_stdout(out), unittest.mock.patch.object(m, "ROOT", self.dir):
+                self.assertEqual(m.main(["manifest.py", str(path)]), 0)
+            self.assertIn(shown, out.getvalue().splitlines()[-1].split("\t"))
+
+
 if __name__ == "__main__":
     unittest.main()

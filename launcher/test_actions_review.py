@@ -102,6 +102,11 @@ class Check(unittest.TestCase):
         _, o = self.run_check(self.event(head_repo=None))
         self.assertEqual(o["run"], "false")
 
+    def test_non_hex_head_does_not_run(self):       # #257: only hex SHAs reach an output
+        _, o = self.run_check(self.event(sha="::set-output name=run::true"))
+        self.assertEqual(o, {"run": "false", "pr": "70"})
+        self.assertEqual(self.lines, ["run=false: PR #70 has no head SHA"])
+
     def test_draft_does_not_run(self):
         _, o = self.run_check(self.event(draft=True))
         self.assertEqual(o, {"run": "false", "pr": "70"})
@@ -196,6 +201,221 @@ class SharedRule(unittest.TestCase):
                    {"commit_id": SHA2, "user": None}]
         self.assertEqual(watch.reviewed_heads(reviews), {SHA1})
         self.assertEqual(watch.reviewed_heads([]), set())
+
+
+PLAN_TOML = """[watch]
+interval_minutes = 5
+max_live = 2
+max_turns = 200
+{cap}
+
+[[session]]
+role = "reviewer"
+count = 1
+model = "claude-test-1"
+spend_cap_usd = 5
+"""
+SHA3 = "c" * 40
+
+
+class Plan(unittest.TestCase):
+    """`plan` (#257): canned PR lists only; no test calls GitHub."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.toml = self.dir / "swarm.toml"
+        self.cap("actions_max_reviews = 2")
+        self.open_prs = []           # canned GET /pulls?state=open
+        self.prs = {}                # PR -> canned REST PR, for --pr
+        self.reviews = {}            # PR -> canned REST reviews
+        self.reads = []
+        self.lines = []
+
+    def cap(self, line):
+        self.toml.write_text(PLAN_TOML.format(cap=line))
+
+    def run_plan(self, pr_arg=None, env=None, **kw):
+        out = self.dir / "output"
+        out.write_text("")
+        e = {"GITHUB_REPOSITORY": REPO, "GITHUB_OUTPUT": str(out), **(env or {})}
+
+        def list_prs(repo):
+            self.reads.append(("list", repo))
+            return self.open_prs
+
+        def get_pr(repo, n):
+            self.reads.append(("pr", repo, n))
+            return self.prs[n]
+
+        def get_reviews(repo, n):
+            self.reads.append(("reviews", repo, n))
+            return self.reviews.get(n, [])
+
+        args = dict(owner=lambda: OWNER, list_prs=list_prs, get_pr=get_pr, get_reviews=get_reviews,
+                    manifest_path=self.toml, out=self.lines.append)
+        args.update(kw)
+        code = actions_review.plan(e, pr=pr_arg, **args)
+        outputs = dict(x.split("=", 1) for x in out.read_text().splitlines())
+        return code, json.loads(outputs["prs"]), outputs["any"]
+
+    def test_mixed_authors(self):
+        self.open_prs = [pr(71, author=OWNER, sha=SHA2), pr(70), pr(72, author="someone-else"),
+                         pr(73, author="productswarm-reviewer[bot]")]
+        self.cap("actions_max_reviews = 5")
+        code, prs, any_ = self.run_plan()
+        self.assertEqual((code, any_), (0, "true"))
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}, {"pr": 71, "head": SHA2}])
+        self.assertEqual(self.lines[:4], [
+            "in: PR #70 by productswarm-builder[bot]: head aaaaaaa not reviewed by the reviewer",
+            "in: PR #71 by mattmcalister: head bbbbbbb not reviewed by the reviewer",
+            "out: PR #72 was opened by someone other than a swarm App or the owner (#206)",
+            "out: PR #73 was opened by someone other than a swarm App or the owner (#206)"])
+        self.assertEqual(self.lines[-1], "plan: 2 PR(s) to review")
+        # reviews read only for eligible PRs
+        self.assertEqual([r for r in self.reads if r[0] == "reviews"],
+                         [("reviews", REPO, 70), ("reviews", REPO, 71)])
+
+    def test_fork_head_is_out(self):
+        self.open_prs = [pr(70, head_repo="someone/productswarm"), pr(71, head_repo=None)]
+        code, prs, any_ = self.run_plan()
+        self.assertEqual((code, prs, any_), (0, [], "false"))
+        self.assertIn("not in open-agentos/productswarm", self.lines[0])
+        self.assertIn("not in open-agentos/productswarm", self.lines[1])
+
+    def test_draft_is_out(self):
+        self.open_prs = [pr(70, draft=True)]
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [])
+        self.assertEqual(self.lines[0], "out: PR #70 is a draft")
+
+    def test_reviewed_head_is_out(self):
+        self.open_prs = [pr(70)]
+        self.reviews[70] = [review(SHA1)]
+        _, prs, any_ = self.run_plan()
+        self.assertEqual((prs, any_), ([], "false"))
+        self.assertEqual(self.lines[0], "out: PR #70: the reviewer already reviewed head aaaaaaa")
+
+    def test_someone_elses_review_does_not_count(self):
+        self.open_prs = [pr(70)]
+        self.reviews[70] = [review(SHA1, login=OWNER)]
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_new_head_after_a_review_is_in(self):
+        self.open_prs = [pr(70, sha=SHA2)]
+        self.reviews[70] = [review(SHA1, state="CHANGES_REQUESTED")]
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA2}])
+
+    def test_pr_arg_in(self):
+        self.prs[71] = pr(71)
+        self.open_prs = [pr(70)]
+        code, prs, any_ = self.run_plan(pr_arg=71)
+        self.assertEqual((code, prs, any_), (0, [{"pr": 71, "head": SHA1}], "true"))
+        self.assertNotIn(("list", REPO), self.reads)
+        self.assertEqual(self.lines[-1], "plan: 1 PR(s) to review (--pr 71)")
+
+    def test_pr_arg_out_under_the_same_rules(self):
+        for bad in (pr(71, draft=True), pr(71, state="closed"), pr(71, author="someone-else"),
+                    pr(71, head_repo="someone/productswarm")):
+            with self.subTest(pr=bad):
+                self.prs[71] = bad
+                code, prs, any_ = self.run_plan(pr_arg=71)
+                self.assertEqual((code, prs, any_), (0, [], "false"))
+        self.prs[71] = pr(71)
+        self.reviews[71] = [review(SHA1)]
+        self.assertEqual(self.run_plan(pr_arg=71)[1], [])
+
+    def test_cap_takes_the_oldest_first(self):
+        self.open_prs = [pr(74, sha=SHA3), pr(72, sha=SHA2), pr(73, draft=True), pr(70)]
+        code, prs, any_ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}, {"pr": 72, "head": SHA2}])
+        self.assertEqual(self.lines[:4], [
+            "in: PR #70 by productswarm-builder[bot]: head aaaaaaa not reviewed by the reviewer",
+            "in: PR #72 by productswarm-builder[bot]: head bbbbbbb not reviewed by the reviewer",
+            "out: PR #73 is a draft",
+            "out: PR #74: head ccccccc waits for the next sweep (cap 2)"])
+
+    def test_cap_of_one(self):
+        self.cap("actions_max_reviews = 1")
+        self.open_prs = [pr(72, sha=SHA2), pr(70)]
+        self.assertEqual(self.run_plan()[1], [{"pr": 70, "head": SHA1}])
+
+    def test_key_missing_lists_nothing(self):
+        self.cap("")
+        self.open_prs = [pr(70)]
+        code, prs, any_ = self.run_plan()
+        self.assertEqual((code, prs, any_), (0, [], "false"))
+        self.assertEqual(self.lines, ["plan: nothing listed: swarm.toml sets no [watch] "
+                                      "actions_max_reviews (#257)"])
+        self.assertEqual(self.reads, [])
+
+    def test_no_watch_table_lists_nothing(self):
+        self.toml.write_text(PLAN_TOML.split("\n\n", 1)[1].replace("{cap}", ""))
+        code, prs, any_ = self.run_plan()
+        self.assertEqual((code, prs, any_), (0, [], "false"))
+
+    def test_bad_swarm_toml_fails_closed(self):
+        for bad in ("actions_max_reviews = 0", "actions_max_reviews = \"2\"", "nonsense ="):
+            with self.subTest(line=bad):
+                self.cap(bad)
+                self.lines = []
+                code, prs, any_ = self.run_plan()
+                self.assertEqual((code, prs, any_), (1, [], "false"))
+                self.assertEqual(self.lines, ["plan: can't decide (ManifestError)"])
+
+    def test_github_unreadable_fails_closed(self):
+        def boom(*a):
+            raise RuntimeError("gh api failed: secret-looking stderr")
+        for kw in ({"list_prs": boom}, {"get_reviews": boom}):
+            with self.subTest(failing=list(kw)):
+                self.open_prs = [pr(70)]
+                self.lines = []
+                code, prs, any_ = self.run_plan(**kw)
+                self.assertEqual((code, prs, any_), (1, [], "false"))
+                self.assertEqual(self.lines, ["plan: can't decide (RuntimeError)"])
+        self.lines = []
+        self.assertEqual(self.run_plan(pr_arg=99)[0], 1)      # --pr N GitHub can't find
+        self.assertEqual(self.lines, ["plan: can't decide (KeyError)"])
+
+    def test_no_repository_fails_closed(self):
+        code, prs, any_ = self.run_plan(env={"GITHUB_REPOSITORY": ""})
+        self.assertEqual((code, prs, any_), (1, [], "false"))
+
+    def test_only_ints_and_hex_shas_reach_the_output(self):
+        weird = pr(70, sha="::set-output name=any::true")
+        weird["number"] = 70
+        upper = pr(71, sha="A" * 40)
+        self.open_prs = [weird, upper, pr(72, sha=SHA2), "not a dict"]
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 72, "head": SHA2}])
+        text = "\n".join(self.lines) + (self.dir / "output").read_text()
+        self.assertNotIn("::", text)
+        self.assertNotIn("ignore previous", text)
+
+    def test_pr_text_is_never_printed(self):
+        self.open_prs = [pr(70), pr(71, draft=True), pr(72, author="someone-else")]
+        self.run_plan()
+        text = "\n".join(self.lines)
+        self.assertNotIn("ignore previous", text)
+        self.assertNotIn("set-output", text)
+
+    def test_hold_seam_leaves_a_head_out(self):
+        self.open_prs = [pr(70), pr(72, sha=SHA2), pr(74, sha=SHA3)]
+        held = lambda n, sha: "a run is in flight" if n == 70 else None
+        _, prs, _ = self.run_plan(hold=held)
+        self.assertEqual(prs, [{"pr": 72, "head": SHA2}, {"pr": 74, "head": SHA3}])
+        self.assertEqual(self.lines[0], "out: PR #70: a run is in flight")
+
+    def test_main_parses_plan(self):
+        with unittest.mock.patch.object(actions_review, "plan", return_value=0) as p:
+            self.assertEqual(actions_review.main(["plan", "--pr", "71"]), 0)
+        p.assert_called_once_with(pr=71, manifest_path=None)
+        with unittest.mock.patch.object(actions_review, "plan", return_value=0) as p:
+            actions_review.main(["plan"])
+        p.assert_called_once_with(pr=None, manifest_path=None)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,12 @@
 #                     on. Set it back to false (and disable the workflow if Actions should
 #                     stop reviewing) to fall back to local reviews. Changing it is a
 #                     `ci-and-workflows` call for the owner, not a `spend` one.
+#
+#   actions_max_reviews optional, a whole number of at least 1 (#257, #255). The most open
+#                     PRs one `actions_review.py plan` sweep lists for the Actions reviewer,
+#                     oldest first; the rest wait for the next sweep. Left out, plan lists
+#                     nothing. 2 (today's max_live) is the builder's suggested value: the
+#                     owner sets it. Changing it is a `spend` decision.
 [watch]
 interval_minutes = 5
 max_live = 2
