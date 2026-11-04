@@ -7,10 +7,12 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
     text (GOV-0002); the local spool is not touched;
   - open PRs, the issues they close, and the reviewer App's reviews on each non-draft
     PR (GOV-0011's round count and Authority line);
-  - open `gov:question` issues.
+  - open `gov:question` issues, `gov:lapsed` ones closed in the window, and
+    governance/INDEX.md from the checkout (the governance section, #355).
 
 Builds a page showing each session's role, current issue, last activity and status,
-the open PRs, and the open gov questions with the sessions waiting on them.
+the open PRs, and a governance section: recent decision records, the open gov questions
+with the sessions waiting on them, and lapsed questions.
 Stdlib only, no JavaScript, per the default in gov question #26.
 
     python3 dashboard/generate.py                 # writes dashboard/out/index.html
@@ -27,6 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import governance
 import spend
 
 HERE = Path(__file__).resolve().parent
@@ -90,8 +93,12 @@ def fetch(repo: str, now: dt.datetime, days: int) -> dict:
                   "headRefOid")
     reviews = {p["number"]: gh_items(f"repos/{repo}/pulls/{p['number']}/reviews?per_page=100")
                for p in prs or [] if not p.get("isDraft")}
+    try:
+        index = governance.INDEX.read_text(encoding="utf-8")
+    except OSError:
+        index = None   # the section says so; the rest of the page still builds
     return {"repo": repo, "issues": list(issues.values()), "comments": comments, "prs": prs or [],
-            "reviews": reviews}
+            "reviews": reviews, "index": index}
 
 
 # ---------------------------------------------------------------- deriving state
@@ -261,7 +268,7 @@ def over_cap(cost: float | None, cap: float | None) -> bool:
 
 
 def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
-          caps: dict[str, float] | None = None) -> dict:
+          caps: dict[str, float] | None = None, window: int = DAYS) -> dict:
     repo = data["repo"]
     issues = {i["number"]: i for i in data["issues"]}
     open_issues = {n for n, i in issues.items() if i.get("state") == "open"}
@@ -284,6 +291,7 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
                         "labels": [lb for lb in labels if lb != "gov:question"],
                         "created_ts": parse_ts(it["created_at"]),
                         "ttl": time_to_live(it.get("body")),
+                        "fields": governance.question_fields(it.get("body"), labels),
                         "waiting": [s for s in sessions if s["gov_question"] == n]})
 
     prs = []
@@ -304,7 +312,10 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
 
     return {"repo": repo, "now": now, "idle_minutes": int(idle_after.total_seconds() // 60),
             "issue_titles": {n: i["title"] for n, i in issues.items()},
-            "sessions": sessions, "prs": prs, "gov": gov,
+            "sessions": sessions, "prs": prs, "gov": gov, "days": window,
+            "governance": governance.build(data.get("index"), gov, data["issues"], now,
+                                           now - dt.timedelta(days=window), parse_ts,
+                                           time_to_live, ttl_date),
             "spend": {"per_day": per_day, "today": per_day[today],
                       "unpriced": [s for s in sessions if s["cost"] is None]}}
 
@@ -434,6 +445,7 @@ body { margin:0; padding:24px 16px; background:var(--bg); color:var(--fg);
   font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
 main { max-width:1100px; margin:0 auto; }
 h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:16px; margin:28px 0 8px; }
+h3 { font-size:14px; margin:16px 0 6px; }
 a { color:var(--link); text-decoration:none; } a:hover { text-decoration:underline; }
 .muted { color:var(--muted); }
 .needs { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 0; }
@@ -578,20 +590,7 @@ def render(m: dict) -> str:
     else:
         out.append('<p class="muted">None.</p>')
 
-    out.append("<h2>Open gov questions</h2>")
-    if m["gov"]:
-        rows = []
-        for g in m["gov"]:
-            waiting = ", ".join(f"{esc(s['role'])} <code>{esc(s['session_id'][:8])}</code>"
-                                for s in g["waiting"])
-            rows.append(f"<tr><td><a href=\"{esc(g['url'])}\">#{g['number']}</a> {esc(g['title'])}</td>"
-                        f"<td>{esc(', '.join(g['labels']))}</td>"
-                        f"<td>{waiting or NONE}</td>"
-                        f"<td title=\"{esc(stamp(g['created_ts']))}\">{esc(ago(g['created_ts'], now))}</td></tr>")
-        out.append('<div class="scroll"><table><tr><th>Question</th><th>Labels</th>'
-                   f'<th>Sessions waiting</th><th>Opened</th></tr>{"".join(rows)}</table></div>')
-    else:
-        out.append('<p class="muted">None.</p>')
+    out.append(governance.render(m["governance"], repo, now, m["days"], ago, stamp))
 
     sp = m["spend"]
     out.append("<h2>Spend per day (est.)</h2>")
@@ -641,7 +640,8 @@ def main(argv: list[str]) -> int:
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
         return 1
-    model = build(data, now, dt.timedelta(minutes=args.idle_minutes), caps=load_caps())
+    model = build(data, now, dt.timedelta(minutes=args.idle_minutes), caps=load_caps(),
+                  window=args.days)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render(model), encoding="utf-8")
