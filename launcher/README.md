@@ -81,7 +81,7 @@ If `swarm.toml` sets `review_in_actions = true` (see "Leaving reviews to Actions
 
 Nothing new is posted to GitHub. What the launcher started is recorded under `~/.productswarm/launcher/` (or `$PRODUCTSWARM_HOME/launcher/`):
 
-- `sessions.json` holds each session's name, role, model, session ID and start time.
+- `sessions.json` holds each session's name, role, model, session ID and start time. Every `swarm` process that changes it first takes a lock on `sessions.lock`, and each write goes through its own temp file, so a `swarm launch` during a `swarm watch` check isn't lost (#272). A session is recorded before its window opens. If a `.pid` file belongs to a running session that has no entry, `live()` (used by `ls`, `stop`, `launch` and `watch`) rebuilds the entry from the process's command line as `<role>-recovered-<id>` and says so once. `swarm stop` then works on it again.
 - `.worktrees/<session-id>/` in this checkout is the session's working tree (see `up`).
 - `<session-id>.pid` is written by the window's shell before it hands over to `swarm-session`, so the PID it holds is Claude Code's.
 - `watch.json` holds what `swarm watch` has acted on, what it is holding or skipping, and how each run it started ended (see below).

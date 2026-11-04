@@ -737,6 +737,8 @@ class ReviewInActionsTest(unittest.TestCase):
             with self.subTest(review_in_actions=value):
                 (self.home / "launcher" / "watch.json").unlink(missing_ok=True)
                 self.l.save([])
+                for f in (self.home / "launcher").glob("*.pid"):   # else live() recovers it (#272)
+                    f.unlink()
                 self.manifest(ALL_CAPPED, review_in_actions=value)
                 self.assertEqual(self.watcher().tick(NOW)[0].kind, "review")
                 self.assertEqual(self.l.load()[0].name, "reviewer-watch")

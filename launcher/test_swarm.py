@@ -411,6 +411,71 @@ class StopTest(Base):
         self.assertEqual(self.fake.signals, [])
 
 
+def _writer(home: str, tag: str, n: int) -> None:
+    """One `swarm` process: n launches, each followed by a watcher-style live() (#272)."""
+    l = swarm.Launcher(Path(home), root=Path(home) / "repo", proc=lambda pid: None,
+                       clock=time.time, out=lambda s: None, git=lambda a: (0, ""))
+    for i in range(n):
+        l.add(swarm.Started(f"{tag}-{i}", "builder", M, f"{tag}-{i}", time.time()))
+        l.live()
+
+
+class StateLockTest(Base):
+    """#272: concurrent swarm processes share sessions.json without losing entries."""
+
+    def test_concurrent_writers_lose_nothing(self):
+        import multiprocessing as mp
+        ctx = mp.get_context("spawn")
+        procs = [ctx.Process(target=_writer, args=(str(self.home), f"w{k}", 25)) for k in range(4)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(60)
+        self.assertEqual([p.exitcode for p in procs], [0] * 4)        # no FileNotFoundError
+        names = {e.name for e in self.l.load()}
+        self.assertEqual(names, {f"w{k}-{i}" for k in range(4) for i in range(25)})
+        self.assertEqual(list((self.home / "launcher").glob("*.tmp")), [])
+
+    def orphan(self, opener="You are the docs for productswarm. Read CLAUDE.md, PRODUCT.md "
+                            "and roles/docs.md, then work on issue #255.", flags=""):
+        sid = str(uuid.uuid4())
+        self.fake.procs[4242] = f"claude --model {M} --session-id {sid} {flags}{opener}"
+        (self.home / "launcher" / f"{sid}.pid").write_text("4242\n")
+        return sid
+
+    def test_running_pid_file_with_no_entry_is_recovered(self):
+        sid = self.orphan(flags="-p ")
+        (e,) = self.l.live()
+        self.assertEqual((e.name, e.role, e.model, e.session_id, e.issue, e.pr, e.by),
+                         (f"docs-recovered-{sid[:8]}", "docs", M, sid, 255, None, "watch"))
+        self.assertEqual(self.l.load(), [e])                           # written back
+        self.assertTrue(any(x.startswith(f"recovered: docs-recovered-{sid[:8]}") for x in self.lines))
+        self.lines.clear()
+        self.l.live()
+        self.assertFalse(any(x.startswith("recovered") for x in self.lines))   # reported once
+        self.assertEqual(self.l.stop(e.name), 0)                       # and stoppable again
+        self.assertEqual(self.fake.signals, [(4242, signal.SIGTERM)])
+
+    def test_recovered_entry_keeps_issue_and_pr(self):
+        self.orphan(opener=swarm.opener("builder", 73, 72))
+        (e,) = self.l.running()                                        # dry run: nothing written
+        self.assertEqual((e.role, e.issue, e.pr, e.by), ("builder", 73, 72, None))
+        self.assertEqual(self.l.load(), [])
+
+    def test_pid_file_of_an_ended_process_is_not_recovered(self):
+        sid = self.orphan()
+        self.fake.procs[4242] = "/usr/bin/other"                       # pid reused
+        self.assertEqual(self.l.live(), [])
+        self.assertTrue((self.home / "launcher" / f"{sid}.pid").exists())   # left alone
+
+    def test_entry_is_recorded_before_the_window_opens(self):
+        seen = []
+        run = self.fake.run
+        self.l.run = lambda cmd: (seen.append([e.name for e in self.l.load()]), run(cmd))
+        self.l.up([S("builder")])
+        self.assertEqual(seen, [["builder-1"]])
+
+
 class LsTest(Base):
     def test_rows_join_heartbeat_with_launcher_state(self):
         now = dt.datetime(2026, 11, 2, 18, 0, tzinfo=dt.timezone.utc)
