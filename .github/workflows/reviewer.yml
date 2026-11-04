@@ -113,11 +113,15 @@ jobs:
           echo "::add-mask::$jwt"
           api() { curl -fsS -H "Authorization: Bearer $jwt" -H "Accept: application/vnd.github+json" "$@"; }
           inst=$(api "https://api.github.com/repos/$GITHUB_REPOSITORY/installation" | jq -r .id)
-          GH_TOKEN=$(api -X POST "https://api.github.com/app/installations/$inst/access_tokens" \
-            -d "{\"repositories\":[\"${GITHUB_REPOSITORY#*/}\"],\"permissions\":{\"pull_requests\":\"write\",\"contents\":\"read\",\"issues\":\"read\"}}" \
-            | jq -r .token)
+          resp=$(api -X POST "https://api.github.com/app/installations/$inst/access_tokens" \
+            -d "{\"repositories\":[\"${GITHUB_REPOSITORY#*/}\"],\"permissions\":{\"pull_requests\":\"write\",\"contents\":\"read\",\"issues\":\"read\"}}")
+          GH_TOKEN=$(jq -r .token <<<"$resp")
           echo "::add-mask::$GH_TOKEN"
           unset jwt
+          # #364: print the scopes GitHub granted (not secret; never print $resp itself).
+          granted=$(jq -c '.permissions // {}' <<<"$resp")
+          unset resp
+          echo "token permissions: $granted"
           export GH_TOKEN
           # Prints only result, subtype, num_turns and total_cost_usd (GOV-0016).
           # Exit 0 done, 3 at budget or turn ceiling, 1 error, 2 refused.
