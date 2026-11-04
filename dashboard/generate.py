@@ -32,6 +32,7 @@ from pathlib import Path
 import committees
 import governance
 import progress
+import reviewer_runs
 import spend
 
 HERE = Path(__file__).resolve().parent
@@ -80,11 +81,12 @@ def gh_json(*args: str) -> object:
 
 
 def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
-          with_committees: bool = False) -> dict:
+          with_actions: bool = False, with_committees: bool = False) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
-    also reads the v3 progress section's data (progress.py), and `with_committees` the
-    committee Discussions (committees.py, GraphQL). Only the page shows them, so `swarm
-    inbox`, `swarm watch` and the digest leave both off; main() asks for them."""
+    also reads the v3 progress section's data (progress.py), `with_actions` the Actions
+    reviewer section's (reviewer_runs.py), and `with_committees` the committee Discussions
+    (committees.py, GraphQL). Only the page shows them, so swarm's snapshot() and the digest
+    leave all three off and make no Actions or GraphQL calls; main() asks for them."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
     for path in (f"repos/{repo}/issues?state=open&per_page=100",
@@ -106,6 +108,7 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
     return {"repo": repo, "issues": list(issues.values()), "comments": comments, "prs": prs or [],
             "reviews": reviews, "index": index,
             "progress": progress.fetch(repo, gh_json) if with_progress else None,
+            "actions": reviewer_runs.fetch(repo, now, reviews) if with_actions else None,
             "committees": committees.fetch(repo, gh_items, gh_json) if with_committees else None}
 
 
@@ -325,6 +328,8 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
                                            now - dt.timedelta(days=window), parse_ts,
                                            time_to_live, ttl_date),
             "progress": progress.build(data["progress"]) if data.get("progress") else None,
+            "reviewer_runs": reviewer_runs.build(
+                data.get("actions"), [p for p in prs if not p["draft"] and unreviewed(p)], now),
             "committees": committees.build(data.get("committees")),
             "spend": {"per_day": per_day, "today": per_day[today],
                       "unpriced": [s for s in sessions if s["cost"] is None]}}
@@ -552,6 +557,9 @@ def needs_section(m: dict) -> str:
     return f'<h2>Needs you ({len(items)})</h2><ol class="inbox">{"".join(lis)}</ol>'
 
 
+REFRESH_SECONDS = 300  # an open page reloads itself; plain HTML, no script (#26, #351)
+
+
 def render(m: dict) -> str:
     repo, now, titles = m["repo"], m["now"], m["issue_titles"]
     live = [s for s in m["sessions"] if s["status"] != "stopped"]
@@ -566,6 +574,7 @@ def render(m: dict) -> str:
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         '<meta name="robots" content="noindex, nofollow">',  # published publicly; see #33
+        f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">',
         f"<title>Swarm dashboard · {esc(repo)}</title><style>{CSS}</style></head><body><main>",
         f"<h1>Swarm dashboard</h1><div class=\"muted\">{esc(repo)} · generated {esc(stamp(now))}"
         f" · idle after {m['idle_minutes']} min without an event</div>",
@@ -604,6 +613,7 @@ def render(m: dict) -> str:
 
     if m.get("progress"):
         out.append(progress.render(m["progress"], repo))
+    out.append(reviewer_runs.render(m["reviewer_runs"], repo, now, ago, stamp))
 
     sp = m["spend"]
     out.append("<h2>Spend per day (est.)</h2>")
@@ -649,7 +659,8 @@ def main(argv: list[str]) -> int:
         return 2
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     try:
-        data = fetch(repo, now, args.days, with_progress=True, with_committees=True)
+        data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
+                     with_committees=True)
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
         return 1

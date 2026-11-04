@@ -17,6 +17,8 @@ It reads GitHub through `gh api`, so inside a swarm session it acts as the role'
 
 `.github/workflows/dashboard.yml` regenerates the page every 15 minutes (plus a manual run) and publishes it to GitHub Pages at <https://open-agentos.github.io/productswarm/>. It runs on a schedule only, never on issue, comment or PR events, and its token can read the repo but not write to it (`pages` and `id-token` are only for the deploy), per the owner's choice on #32.
 
+GitHub runs that schedule hours apart here, so the nudge in `.github/workflows/digest-nudge.yml` (shared with the digest) dispatches `dashboard.yml` on `main` when something happens: an issue or PR is opened, closed, reopened or relabelled, a PR is pushed or reviewed, or a Discussion post or comment is created or edited (#351). The nudge passes no event data and holds no secrets; `dashboard.yml` itself still runs only on its schedule and dispatch, and the schedule stays as the safety net. An open page reloads itself every 300 seconds with a `<meta http-equiv="refresh">` tag (plain HTML, no script), so it picks up a rebuild within about five minutes.
+
 The page is **public**, because this repo is. It shows nothing that isn't already public in the repo's issues and comments, and it carries `noindex` so search engines skip it, per the owner's choice on #33. GitHub may delay scheduled runs, and disables them on public repos after 60 days without repo activity.
 
 ## Needs you
@@ -71,6 +73,7 @@ The digest issue isn't a `[heartbeat]` tracking issue or a `gov:question`, so it
 - **`gov:question` issues**: the open ones, with the sessions blocked on each, and `gov:lapsed` ones closed within `--days`.
 - **`governance/INDEX.md`**, from the checkout the page is built in (`dashboard.yml` checks out `main`).
 - **v3 progress:** see [v3 progress](#v3-progress).
+- **Reviewer workflow runs and jobs** from the Actions API, and the reviews and commits of the PRs they reviewed (see [Actions reviewer](#actions-reviewer)). Never job logs.
 - **Committee Discussions** (`committees.py`, #353): every Discussion in the "Committees" category, through `gh api graphql`, plus the `gov:question` each one serves (from a `<!-- productswarm-committee question=N -->` marker, else the `Committee for #N:` title) and that question's record in `governance/decisions/` (front matter `question: "#N"`). Members come from the `## Members` or `### Members` table, the post order from rule 1 under `Rules`, and round posts are top-level comments headed `Round N: <seat>` by that seat's App. From each post it keeps only the round, seat, author, time, link, signature model and the first bold phrase of its Recommendation. From the owner's comments on the question it keeps only whether the convening, summary and ruling comments exist, when, and their links, so no cost line or other text reaches the page. It derives status (convened, round N, summary, ratified, record), §7.2 diversity, the next seat, rounds used of 3 and posts per member per UTC day against §8's 6. A Discussion that doesn't match #314's layout shows as "unparsed". A token that can't read Discussions gives a note and the rest of the page still builds. Only the page reads these (`fetch(..., with_committees=True)` in `main()`); `swarm inbox`, `swarm watch` and the digest skip the GraphQL calls. The page shows them from #354.
 
 ## Governance
@@ -96,6 +99,17 @@ A section from `progress.py` (#357) shows where v3 stands. Only the page shows i
 | Red check | `evals/red_check.py`'s own `fetch()`, `count()` and `summary()`: reds counted of the first 5, how many reached the 2-round bound, and whether to revisit (more than 2) once all 5 are settled. Before #329's PR merges it says so. No cost is shown (`evals/README.md`). |
 
 The stage issues' states, and #331's, come from one GraphQL query, since closed issues may be older than `--days`. `red_check.py` imports `generate` at load, so `progress.py` imports it inside a function, not at load. Everything is read with the workflow's existing `issues: read` and `pull-requests: read`. If a read fails, that line says "couldn't read" and the rest of the page still publishes.
+
+## Actions reviewer
+
+`reviewer_runs.py` builds this section (#356). It covers the last 7 days:
+
+- **Sweeps:** runs of `reviewer.yml` (the newest 30 at most), each with when and how it started (`schedule`, `nudge` for a `workflow_dispatch` by `github-actions[bot]` from `reviewer-nudge.yml`, or `manual (<login>)` for a person's dispatch), its conclusion, and the `review #N <sha>` jobs it ran (`REVIEW_JOB` in `launcher/actions_review.py`). A successful sweep with no review jobs says "nothing to review".
+- **Success rate:** "N of M review jobs succeeded", counting finished review jobs, not sweeps, and listing the ones that didn't succeed.
+- **Commit to review:** for each head the reviewer App reviewed in the window, the time from that commit's committer date to the App's first review of it; the median and the longest. GitHub doesn't give push time, so this is commit time. A review counts for the commit it was made on, never for a later head.
+- **Unreviewed builder heads:** a count of the builder PRs `unreviewed()` flags, linked. They're in the needs-you list too.
+
+Only the page reads it (`fetch(..., with_actions=True)` in `main()`): `swarm ls`, `swarm inbox`, `swarm watch` and the digest make no Actions API calls. It reads run, job, review and commit metadata only. It **shows no cost** and never fetches job logs, where GOV-0016 puts `total_cost_usd` (#348). It needs `actions: read` on the workflow's token; without it the section shows one muted line ("can't read Actions runs: the token needs `actions: read`") and the rest of the page still builds.
 
 ## Status
 
