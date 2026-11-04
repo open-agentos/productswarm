@@ -116,6 +116,13 @@ def pr_role(author: str) -> str | None:
     return m.group(1) if m else None
 
 
+def past_bound(changes_requested: int) -> bool:
+    """GOV-0011's round bound: the builder gets ROUNDS rounds, so the reviewer App's
+    (ROUNDS + 1)th "changes requested" on a PR sends it to the owner. evals/red_check.py
+    (#330) counts with this too."""
+    return changes_requested > ROUNDS
+
+
 def needs_owner(r: dict, author: str) -> str | None:
     """Why GOV-0011 hands this PR to the owner instead of the builder, else None.
 
@@ -128,7 +135,7 @@ def needs_owner(r: dict, author: str) -> str | None:
     role = pr_role(author)
     if r["at_head"] == CHANGES and f"productswarm-{role}" != BUILDER:
         return f"changes requested on a {role or 'non-swarm'} PR: needs the owner"
-    if r["at_head"] == CHANGES and r["changes_requested"] > ROUNDS:
+    if r["at_head"] == CHANGES and past_bound(r["changes_requested"]):
         return f"changes requested {r['changes_requested']} times: needs the owner"
     return None
 

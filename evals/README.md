@@ -181,3 +181,15 @@ How the rubric scores #175's nine cases (`evals/results.md`) and #251 and #289, 
 | 9. #104 at `30d6f84`, #116, #117, a prompt behind a merged ruling | follow the merged ruling and cite it | Scored on the ruling: a `broken` mark if the change breaks it. The prompt's lag isn't a mark |
 | #251, closes no issue | red, Block 6 | Scope `no`: `would request changes`. Agree |
 | #289, closes no issue (it should have been a draft) | red, Block 6 | Scope `no`: `would request changes`. Agree |
+
+## Red cost check (outside the bar)
+
+`python3 evals/red_check.py [--repo owner/name]` (#330) is part C of GOV-0021 (the owner's ruling on #311): after the first **5** builder-App reds under the new reviewer rule, revisit the rule if **more than 2** reach GOV-0011's 2-round bound. It measures what red costs, not whether red is right, so it's reported on its own and isn't part of the bar above.
+
+- **Start:** the merge time of the PR that closes #329 (the reviewer prompt), looked up from GitHub. Until that merges it says so and counts nothing.
+- **A red:** a `CHANGES_REQUESTED` review by `productswarm-reviewer[bot]`, submitted after the start, on a PR `productswarm-builder[bot]` opened. A PR counts once however many reds it gets, and only reds after the start count. The first 5 such PRs, by the time of their first red, are counted.
+- **The bound:** `past_bound()` in `dashboard/generate.py`, the rule `needs_owner()` uses: a third red reaches it.
+- **Per PR:** number, state, how many reds (with any `Block N` numbers they cite), and one of `fixed in 1 round`, `fixed in 2 rounds` (the reviewer's latest review isn't a red), `reached the bound`, `still open`, `ended while red` (merged or closed with a red as the latest review), or `not responded: [respond] skips it` (the PR doesn't close exactly one issue, so the loop leaves it to the owner).
+- **Summary:** `red check (#311): k of 5 counted, m reached the 2-round bound; revisit if more than 2`, then `revisit: yes|no` once all 5 have settled (merged, closed or at the bound). The 5 and the 2 are the owner's numbers (`COUNT`, `REVISIT_OVER`).
+
+It's read-only (every call goes through `gather.py`'s guard), prints no review text, counts rounds rather than dollars, and doesn't read `watch.json`. When it first prints `revisit: …`, whoever ran it posts that line on #330 for the owner.
