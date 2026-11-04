@@ -1,7 +1,8 @@
 """The reviewer in GitHub Actions, v3 C stage 1 (GOV-0015). C1 (#214) is `check`; C2
-(#215) is `run`.
+(#215) is `run`. `plan` (#257) is the reconciler's first part (#255, stage 1).
 
     python3 launcher/actions_review.py check
+    python3 launcher/actions_review.py plan [--pr N] [--manifest PATH]
     python3 launcher/actions_review.py run --pr N [--dry-run]
 
 `check` decides whether a pull-request event should start a reviewer run. It runs in the
@@ -23,6 +24,20 @@ Its only GitHub calls are reads through `gh` with the job's default token: the r
 the PR, and the PR itself for workflow_dispatch (whose payload has only the number). It
 reads no secrets and writes nothing to GitHub. If it can't decide (a missing payload, or
 GitHub can't be read), it writes run=false and exits 1.
+
+`plan` asks "which open PRs need a review now?" instead of "did this event ask for one?",
+so it doesn't depend on PR events (#255). It reads the open PRs and keeps each that passes
+the same per-PR rules as `check` (eligible() and judge(), shared): open, not a draft, a
+swarm App or the owner as author, head in this repo, head not yet reviewed by the reviewer
+App. `--pr N` (the workflow_dispatch input) considers only PR N, under the same rules. At
+most [watch] actions_max_reviews PRs go in, lowest number (oldest) first; the rest wait for
+the next sweep. With that key unset it lists nothing and says so (as GOV-0012 does for a
+missing max_turns). It writes `prs=<JSON list of {"pr": N, "head": "<sha>"}>` and
+`any=true|false` to $GITHUB_OUTPUT, ints and hex SHAs only, and prints one line per PR
+considered (numbers, SHAs, known logins and rule names; never PR text). Like `check` it
+reads GitHub with the job's default token, reads no secrets and writes nothing to GitHub.
+If it can't decide (GitHub unreadable, a bad swarm.toml) it writes any=false, prs=[] and
+exits 1. hold= is the seam for in-flight and already-attempted heads (part 2).
 
 `run --pr N` runs one reviewer pass on PR N, in the workflow's second job, with the same
 limits as a run `swarm watch` starts:
@@ -59,6 +74,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -81,6 +97,7 @@ import install  # noqa: E402
 # The Apps whose PRs the Actions reviewer reviews (#206). The reviewer itself opens none.
 AUTHORS = {f"productswarm-{r}[bot]" for r in ("planner", "builder", "docs")}
 EVENTS = {"pull_request", "workflow_dispatch"}
+SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 # `run` (#215)
 CREDENTIALS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")   # either; neither preferred (#208)
@@ -105,8 +122,15 @@ def decide(event: str, payload: dict, repo: str, owner: str,
         if not raw.isdigit():
             return False, None, "workflow_dispatch needs a PR number in its `pr` input"
         pr = get_pr(int(raw))
+    return judge(pr, repo, owner, get_reviews)
+
+
+def eligible(pr: dict, repo: str, owner: str) -> tuple[bool, int | None, str]:
+    """GOV-0017's rules for one PR that need no further GitHub read: open, not a draft, a
+    swarm App or the owner as author, head in this repo, a hex head SHA. `check` and
+    `plan` share it (#257)."""
     n = pr.get("number")
-    if not isinstance(n, int):
+    if not isinstance(n, int) or isinstance(n, bool):
         return False, None, "the PR has no number"
     if pr.get("state") != "open":
         return False, n, f"PR #{n} is not open"
@@ -118,12 +142,30 @@ def decide(event: str, payload: dict, repo: str, owner: str,
     head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
     if head_repo != repo:
         return False, n, f"PR #{n}'s head is not in {repo} (a fork, or a deleted repo)"
-    sha = (pr.get("head") or {}).get("sha") or ""
-    if not sha:
+    if not head_sha(pr):
         return False, n, f"PR #{n} has no head SHA"
+    return True, n, f"PR #{n} by {author}"
+
+
+def head_sha(pr: dict) -> str:
+    """The PR's head SHA if it is 40 lowercase hex digits, else "": nothing else from
+    GitHub reaches an output."""
+    sha = (pr.get("head") or {}).get("sha")
+    return sha if isinstance(sha, str) and SHA_RE.fullmatch(sha) else ""
+
+
+def judge(pr: dict, repo: str, owner: str, get_reviews: Callable[[int], list[dict]]
+          ) -> tuple[bool, int | None, str]:
+    """(review it, pr number, why) for one PR: eligible(), then the head not yet reviewed
+    by the reviewer App (watch.reviewed_heads(), the rule [review] uses). Reviews are read
+    only for an eligible PR."""
+    ok, n, why = eligible(pr, repo, owner)
+    if not ok:
+        return False, n, why
+    sha = head_sha(pr)
     if sha in watch.reviewed_heads(get_reviews(n)):
         return False, n, f"PR #{n}: the reviewer already reviewed head {sha[:7]}"
-    return True, n, f"PR #{n} by {author}: head {sha[:7]} not reviewed by the reviewer"
+    return True, n, f"{why}: head {sha[:7]} not reviewed by the reviewer"
 
 
 def write_output(path: str | None, run: bool, n: int | None) -> None:
@@ -156,6 +198,97 @@ def check(env: dict | None = None, owner: Callable[[], str] = swarm.owner_login,
         return 1
     write_output(output, run, n)
     out(f"run={'true' if run else 'false'}: {why}")
+    return 0
+
+
+# ---------------------------------------------------------------- plan (#257)
+
+def max_reviews(manifest_path: Path | str) -> int | None:
+    """[watch] actions_max_reviews from swarm.toml: the most PRs one plan lists, or None
+    if it is unset (then plan lists nothing, as a missing max_turns starts nothing,
+    GOV-0012). Raises ManifestError (a ValueError) on a bad swarm.toml."""
+    limits = manifest.load_watch(manifest_path)
+    return None if limits is None else limits.actions_max_reviews
+
+
+def no_hold(n: int, sha: str) -> str | None:
+    """The seam for part 2 (in-flight and already-attempted heads): a reason to leave
+    PR n at head sha out of the plan, or None. Today nothing is held."""
+    return None
+
+
+def make_plan(prs: list[dict], repo: str, owner: str, cap: int,
+              get_reviews: Callable[[int], list[dict]],
+              hold: Callable[[int, str], str | None] = no_hold
+              ) -> tuple[list[dict], list[str]]:
+    """([{"pr": N, "head": sha}, ...], one line per PR considered). Oldest PR (lowest
+    number) first; at most cap PRs go in, the rest wait for the next sweep. Pure apart
+    from get_reviews, so tests feed it canned PR lists."""
+    def number(pr):
+        n = pr.get("number") if isinstance(pr, dict) else None
+        return n if isinstance(n, int) and not isinstance(n, bool) else 0
+    chosen, lines = [], []
+    for pr in sorted((x for x in prs if isinstance(x, dict)), key=number):
+        ok, n, why = judge(pr, repo, owner, get_reviews)
+        if ok:
+            sha = head_sha(pr)
+            held = hold(n, sha)
+            if held:
+                ok, why = False, f"PR #{n}: {held}"
+            elif len(chosen) >= cap:
+                ok, why = False, f"PR #{n}: head {sha[:7]} waits for the next sweep (cap {cap})"
+            else:
+                chosen.append({"pr": n, "head": sha})
+        lines.append(f"{'in' if ok else 'out'}: {why}")
+    return chosen, lines
+
+
+def write_plan(path: str | None, chosen: list[dict]) -> None:
+    """prs= and any= lines for the next job: ints and hex SHAs only."""
+    if not path:
+        return
+    safe = [{"pr": int(c["pr"]), "head": c["head"]} for c in chosen if SHA_RE.fullmatch(c["head"])]
+    with open(path, "a") as f:
+        f.write(f"prs={json.dumps(safe, separators=(',', ':'))}\nany={'true' if safe else 'false'}\n")
+
+
+def plan(env: dict | None = None, pr: int | None = None, owner: Callable[[], str] = swarm.owner_login,
+         list_prs: Callable[[str], list[dict]] | None = None,
+         get_pr: Callable[[str, int], dict] | None = None,
+         get_reviews: Callable[[str, int], list[dict]] | None = None,
+         manifest_path: Path | str | None = None,
+         hold: Callable[[int, str], str | None] = no_hold,
+         out: Callable[[str], None] = print) -> int:
+    """List the open PRs the reviewer should review now (or only PR pr, for --pr). Reads
+    with the job's default token, writes nothing to GitHub, reads no secrets. Exit 0 when
+    it decided (even on an empty plan), 1 when it couldn't (then any=false, prs=[])."""
+    env = os.environ if env is None else env
+    g = swarm.dashboard()
+    list_prs = list_prs or (lambda repo: g.gh_items(f"repos/{repo}/pulls?state=open&per_page=100"))
+    get_pr = get_pr or (lambda repo, n: g.gh_json("api", f"repos/{repo}/pulls/{n}"))
+    get_reviews = get_reviews or (lambda repo, n: g.gh_items(f"repos/{repo}/pulls/{n}/reviews?per_page=100"))
+    output = env.get("GITHUB_OUTPUT")
+    repo = env.get("GITHUB_REPOSITORY") or ""
+    try:
+        if not repo:
+            raise ValueError("no GITHUB_REPOSITORY")
+        cap = max_reviews(manifest_path or swarm.ROOT / "swarm.toml")
+        if cap is None:
+            write_plan(output, [])
+            out("plan: nothing listed: swarm.toml sets no [watch] actions_max_reviews (#257)")
+            return 0
+        prs = [get_pr(repo, pr)] if pr is not None else list_prs(repo)
+        if not isinstance(prs, list):
+            raise ValueError("the PR list is not a list")
+        chosen, lines = make_plan(prs, repo, owner(), cap, lambda n: get_reviews(repo, n), hold)
+    except (KeyError, OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        write_plan(output, [])
+        out(f"plan: can't decide ({e.__class__.__name__})")
+        return 1
+    write_plan(output, chosen)
+    for line in lines:
+        out(line)
+    out(f"plan: {len(chosen)} PR(s) to review" + (f" (--pr {pr})" if pr is not None else ""))
     return 0
 
 
@@ -266,6 +399,9 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="actions_review.py", description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check", help="should this PR event start a reviewer run? (secret-free)")
+    p_plan = sub.add_parser("plan", help="which open PRs need a reviewer run now? (secret-free)")
+    p_plan.add_argument("--pr", type=int, default=None, help="consider only this PR")
+    p_plan.add_argument("--manifest", default=None, help="swarm.toml to read (default: the repo's)")
     p_run = sub.add_parser("run", help="one reviewer pass on one PR, with GOV-0012/0013/0014 limits")
     p_run.add_argument("--pr", type=int, required=True, help="the PR to review")
     p_run.add_argument("--dry-run", action="store_true", help="print the command; start nothing")
@@ -273,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if args.cmd == "check":
         return check()
+    if args.cmd == "plan":
+        return plan(pr=args.pr, manifest_path=args.manifest)
     if args.cmd == "run":
         return run(args.pr, dry_run=args.dry_run, manifest_path=args.manifest)
     return 2
