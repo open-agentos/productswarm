@@ -37,8 +37,18 @@ def limits(core=1000, graphql=1000):
                           "graphql": {"limit": 1000, "remaining": graphql, "reset": 1793830131}}}
 
 
-def runs(minutes_ago):
-    return {"workflow_runs": [{"updated_at": ts(minutes_ago)}] if minutes_ago is not None else []}
+def runs(*ids):
+    """The newest successful dashboard.yml runs, newest first."""
+    return {"workflow_runs": [{"id": i, "updated_at": ts(1)} for i in ids]}
+
+
+def jobs(published_minutes_ago=None):
+    """One run's jobs: deployed that long ago, or (None) a run that skipped and didn't deploy."""
+    deploy = ({"name": "Run actions/deploy-pages@368f825", "conclusion": "success",
+               "completed_at": ts(published_minutes_ago)} if published_minutes_ago is not None
+              else {"name": "Run actions/deploy-pages@368f825", "conclusion": "skipped", "completed_at": None})
+    return {"jobs": [{"name": "publish", "conclusion": "success",
+                      "steps": [{"name": "Generate", "conclusion": "success"}, deploy]}]}
 
 
 class SpacingTest(unittest.TestCase):
@@ -50,17 +60,29 @@ class SpacingTest(unittest.TestCase):
         self.assertFalse(g.nudged({**NUDGE, "GITHUB_EVENT_NAME": "schedule"}))
         self.assertFalse(g.nudged({}))
 
-    def test_skip_when_last_success_is_recent(self):
-        with mock.patch.object(g, "gh_json", return_value=runs(2)) as gh:
-            self.assertIn("2m ago", g.too_soon(REPO, NOW))
-        self.assertEqual(gh.call_count, 1)
-        self.assertIn("actions/workflows/dashboard.yml/runs?status=success&per_page=1", gh.call_args[0][1])
+    def test_skip_when_last_publish_is_recent(self):
+        with mock.patch.object(g, "gh_json", side_effect=[runs(7), jobs(2)]) as gh:
+            self.assertIn("last published 2m ago", g.too_soon(REPO, NOW))
+        self.assertEqual(gh.call_count, 2)
+        self.assertIn("actions/workflows/dashboard.yml/runs?status=success&per_page=5", gh.call_args_list[0][0][1])
+        self.assertIn("actions/runs/7/jobs", gh.call_args_list[1][0][1])
 
-    def test_runs_when_last_success_is_old_missing_or_unreadable(self):
-        for answer in (runs(6), runs(None)):
-            with mock.patch.object(g, "gh_json", return_value=answer):
+    def test_skipped_runs_do_not_restart_the_wait(self):
+        # The two newest successes skipped (their deploy step was skipped); the last publish was
+        # 6 minutes ago, so this nudge rebuilds rather than skipping against a skip.
+        with mock.patch.object(g, "gh_json", side_effect=[runs(9, 8, 7), jobs(), jobs(), jobs(6)]) as gh:
+            self.assertIsNone(g.too_soon(REPO, NOW))
+        self.assertEqual(gh.call_count, 4)
+        with mock.patch.object(g, "gh_json", side_effect=[runs(9, 8), jobs(), jobs(3)]):
+            self.assertIn("last published 3m ago", g.too_soon(REPO, NOW))
+
+    def test_runs_when_nothing_published_recently_or_unreadable(self):
+        for answers in ([runs(7), jobs(6)], [runs()], [runs(1, 2, 3, 4, 5)] + [jobs()] * 5):
+            with mock.patch.object(g, "gh_json", side_effect=answers):
                 self.assertIsNone(g.too_soon(REPO, NOW))
         with mock.patch.object(g, "gh_json", side_effect=RuntimeError("HTTP 403")):
+            self.assertIsNone(g.too_soon(REPO, NOW))
+        with mock.patch.object(g, "gh_json", side_effect=[runs(7), RuntimeError("HTTP 403")]):
             self.assertIsNone(g.too_soon(REPO, NOW))
 
 
@@ -85,9 +107,10 @@ class MainSkipTest(unittest.TestCase):
             return rc, out.exists(), buf.getvalue(), fetch.call_count
 
     def test_nudge_soon_after_a_rebuild_skips(self):
-        now = dt.datetime.now(dt.timezone.utc)
-        recent = {"workflow_runs": [{"updated_at": (now - dt.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")}]}
-        rc, written, printed, fetched = self.main(NUDGE, [recent])
+        stamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent = {"jobs": [{"steps": [{"name": "Run actions/deploy-pages@368f825", "conclusion": "success",
+                                       "completed_at": stamp}]}]}
+        rc, written, printed, fetched = self.main(NUDGE, [runs(7), recent])
         self.assertEqual((rc, written, fetched), (0, False, 0))
         self.assertEqual(printed.count("\n"), 1)
         self.assertIn("skipped, not published", printed)
@@ -286,7 +309,7 @@ class BatchedTest(unittest.TestCase):
         self.assertEqual(ghql.login({"login": "productswarm-reviewer", "__typename": "Bot"}),
                          "productswarm-reviewer[bot]")
         self.assertEqual(ghql.login({"login": "mattmcalister", "__typename": "User"}), "mattmcalister")
-        self.assertEqual(ghql.login(None), "")
+        self.assertEqual(ghql.login(None), "ghost")
 
 
 class RedReviewsTest(unittest.TestCase):

@@ -16,9 +16,10 @@ QUERY = "query($owner: String!, $name: String!) { repository(owner: $owner, name
 
 def login(author: dict | None) -> str:
     """REST's login. GraphQL names an App `slug` (a Bot), REST `slug[bot]`. A user can't have
-    `[bot]` in their login, so only a real App ever gets the suffix."""
+    `[bot]` in their login, so only a real App ever gets the suffix. A deleted author is null
+    in GraphQL and `ghost` in REST."""
     if not author:
-        return ""
+        return "ghost"
     return author["login"] + "[bot]" if author.get("__typename") == "Bot" else author["login"]
 
 

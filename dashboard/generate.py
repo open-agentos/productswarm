@@ -701,16 +701,35 @@ def nudged(env=None) -> bool:
     return env.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and actor == NUDGE_ACTOR
 
 
+PUBLISH_STEP = "deploy-pages"            # the step of a dashboard.yml run that publishes
+LOOK_BACK = 5                           # successful runs checked for the last one that published
+
+
+def last_published(repo: str) -> dt.datetime | None:
+    """When dashboard.yml last published: the newest of the last LOOK_BACK successful runs whose
+    deploy step succeeded. A run that skipped (spacing or allowance) also ends `success` once
+    its upload and deploy steps are conditional, so a run's own status isn't enough. One call
+    for the runs, then one jobs call per run until a published one; None if none of them did."""
+    runs = gh_json("api", f"repos/{repo}/actions/workflows/{WORKFLOW}/runs?status=success&per_page={LOOK_BACK}")
+    for run in runs["workflow_runs"][:LOOK_BACK]:   # type: ignore[index]
+        jobs = gh_json("api", f"repos/{repo}/actions/runs/{run['id']}/jobs")
+        for job in jobs["jobs"]:   # type: ignore[index]
+            for step in job.get("steps") or []:
+                if PUBLISH_STEP in (step.get("name") or "") and step.get("conclusion") == "success":
+                    return parse_ts(step.get("completed_at") or run["updated_at"])
+    return None
+
+
 def too_soon(repo: str, now: dt.datetime) -> str | None:
-    """Why a nudged rebuild should wait, or None: the last successful dashboard.yml run
-    finished less than SPACING ago. One Actions API call; if it fails, the rebuild runs."""
+    """Why a nudged rebuild should wait, or None: dashboard.yml last published less than
+    SPACING ago. Measured from a published run, not a skipped one, so a stream of nudges can't
+    keep restarting the wait. If the Actions API can't be read, the rebuild runs."""
     try:
-        runs = gh_json("api", f"repos/{repo}/actions/workflows/{WORKFLOW}/runs?status=success&per_page=1")
-        last = parse_ts(runs["workflow_runs"][0]["updated_at"])   # type: ignore[index]
-    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError, TypeError):
+        last = last_published(repo)
+    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return None
     if last and now - last < SPACING:
-        return f"last rebuild finished {ago(last, now)}; nudged rebuilds wait {SPACING.seconds // 60} minutes"
+        return f"last published {ago(last, now)}; nudged rebuilds wait {SPACING.seconds // 60} minutes"
     return None
 
 
