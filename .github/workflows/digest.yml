@@ -1,45 +1,30 @@
-# Nudges the digest (digest.yml) to update now when something that can change the
-# needs-you list happens, instead of waiting for its schedule, which GitHub runs hours
-# late or not at all here (#308). The nudge decides nothing: it dispatches digest.yml on
-# main with no inputs, so no event data reaches the dispatch, and digest.py reads repo
-# state as on any other run. The schedule stays as the safety net.
-# `issues` events fire for issues anyone opens; all that does is start a digest run that
-# reads repo state. Fork PRs get a read-only token, so their jobs are skipped.
-# The token's actions: write can also start, cancel or re-run workflows in this repo, as
-# with reviewer-nudge.yml (#261).
-# Committed by the owner: the Apps have no `workflows` permission (#32).
-name: Digest nudge
+# Keeps the pinned needs-you digest issue current (v3 F4, #213).
+# Separate from dashboard.yml so that one stays read-only (per the owner's choice on #32).
+name: Digest
 
 on:
-  issues:
-    types: [opened, closed, reopened, labeled, unlabeled]
-  pull_request:
-    types: [opened, closed, reopened, ready_for_review, synchronize]
-  pull_request_review:
-    types: [submitted]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: digest
+  cancel-in-progress: true
 
 jobs:
-  nudge:
-    # Issue events, or same-repo PRs. No secrets, no checkout, no environment.
-    if: >-
-      github.event_name == 'issues' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+  update:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
-    concurrency:
-      # One group for every event: a burst (several labels at once) cancels the waiting
-      # and running nudges, so only the last one dispatches. digest.yml's own `digest`
-      # group (cancel-in-progress) collapses dispatches that still overlap. Job-level, so
-      # a skipped fork-PR run never joins the group and cancels a real nudge.
-      group: digest-nudge
-      cancel-in-progress: true
-    permissions:
-      actions: write   # gh workflow run
+    timeout-minutes: 5
     steps:
-      - name: Dispatch a digest update
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Update digest issue
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: gh workflow run digest.yml --ref main
+        run: python3 dashboard/digest.py --update --repo "$GITHUB_REPOSITORY"
