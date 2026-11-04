@@ -99,3 +99,15 @@ The owner set these numbers on #172 before #174 ran. #175 reports against them. 
 For the committed `sample.json` (20 PRs, 15 of them with a reviewer review), N is 15, so line 1 needs at least 13 of 15 (85% of 15 is 12.75, rounded up).
 
 Whether C stage 2 goes ahead is the owner's call. The bar only says whether it may be proposed.
+
+## Red cost check (outside the bar)
+
+`python3 evals/red_check.py [--repo owner/name]` (#330) is part C of the owner's ruling on #311: after the first **5** builder-App reds under the new reviewer rule, revisit the rule if **more than 2** reach GOV-0011's 2-round bound. It measures what red costs, not whether red is right, so it's reported on its own and isn't part of the bar above.
+
+- **Start:** the merge time of the PR that closes #329 (the reviewer prompt), looked up from GitHub. Until that merges it says so and counts nothing.
+- **A red:** a `CHANGES_REQUESTED` review by `productswarm-reviewer[bot]`, submitted after the start, on a PR `productswarm-builder[bot]` opened. A PR counts once however many reds it gets, and only reds after the start count. The first 5 such PRs, by the time of their first red, are counted.
+- **The bound:** `past_bound()` in `dashboard/generate.py`, the rule `needs_owner()` uses: a third red reaches it.
+- **Per PR:** number, state, how many reds (with any `Block N` numbers they cite), and one of `fixed in 1 round`, `fixed in 2 rounds` (the reviewer's latest review isn't a red), `reached the bound`, `still open`, `ended while red` (merged or closed with a red as the latest review), or `not responded: [respond] skips it` (the PR doesn't close exactly one issue, so the loop leaves it to the owner).
+- **Summary:** `red check (#311): k of 5 counted, m reached the 2-round bound; revisit if more than 2`, then `revisit: yes|no` once all 5 have settled (merged, closed or at the bound). The 5 and the 2 are the owner's numbers (`COUNT`, `REVISIT_OVER`).
+
+It's read-only (every call goes through `gather.py`'s guard), prints no review text, counts rounds rather than dollars, and doesn't read `watch.json`. When it first prints `revisit: …`, whoever ran it posts that line on #330 for the owner.
