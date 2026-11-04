@@ -38,7 +38,9 @@ Once a session has exited, its worktree is removed if it is clean and its HEAD i
 origin; otherwise it is kept and `swarm ls` lists it. Work is never deleted.
 
 What the launcher started is recorded locally, never on GitHub:
-    ~/.productswarm/launcher/sessions.json   name, role, model, session id, start time
+    ~/.productswarm/launcher/sessions.json   name, role, model, session id, start time;
+                                             every read-change-write holds an flock on
+                                             sessions.lock beside it (#272)
     ~/.productswarm/launcher/<id>.pid        written by the window's shell before exec
     ~/.productswarm/launcher/<id>.result.json  a headless run's stdout: ops/swarm-session's
                                              one-line banner, then the JSON result (#147)
@@ -52,7 +54,9 @@ records `stopped` with no change to the hook (GOV-0002 to GOV-0004).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import os
 import re
@@ -60,6 +64,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -182,6 +187,19 @@ class Started:
                    budget_usd=d.get("budget_usd"), max_turns=d.get("max_turns"))
 
 
+def recovered(sid: str, cmd: str, started: float) -> Started:
+    """An entry for a running session that sessions.json lost (#272), from its command
+    line: `claude --model M --session-id SID [-p] <opener> ...`."""
+    model = re.search(r"--model (\S+)", cmd)
+    role = re.search(r"You are the (\w+) for productswarm", cmd)
+    issue = re.search(r"issue #(\d+)", cmd)
+    pr = re.search(r"PR #(\d+)", cmd)
+    r = role.group(1) if role else "unknown"
+    return Started(name=f"{r}-recovered-{sid[:8]}", role=r, model=model.group(1) if model else "unknown",
+                   session_id=sid, started=started, issue=int(issue.group(1)) if issue else None,
+                   pr=int(pr.group(1)) if pr else None, by="watch" if " -p " in cmd else None)
+
+
 @dataclass
 class Launcher:
     home: Path
@@ -222,10 +240,45 @@ class Launcher:
         return [Started.from_dict(d) for d in data]
 
     def save(self, entries: list[Started]) -> None:
+        """Write the state file atomically through a temp file of its own, so two writers
+        never rename each other's (#272). A read-change-write must also hold locked()."""
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = self.state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps([e.__dict__ for e in entries], indent=1) + "\n")
-        tmp.replace(self.state_file)
+        fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".sessions.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps([e.__dict__ for e in entries], indent=1) + "\n")
+            os.replace(tmp, self.state_file)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+    @property
+    def lock_file(self) -> Path:
+        return self.dir / "sessions.lock"
+
+    @contextlib.contextmanager
+    def locked(self):
+        """Hold an exclusive lock on the state file across a read-change-write, so a
+        `swarm launch` during a `swarm watch` tick is never lost (#272). Not re-entrant."""
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(self.lock_file, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+
+    def add(self, entry: Started) -> None:
+        """Record one entry, replacing any with the same session id (a recovered one)."""
+        with self.locked():
+            self.save([e for e in self.load() if e.session_id != entry.session_id] + [entry])
+
+    def remove(self, sid: str) -> None:
+        with self.locked():
+            entries = self.load()
+            rest = [e for e in entries if e.session_id != sid]
+            if len(rest) != len(entries):
+                self.save(rest)
 
     def pid(self, s: Started) -> int | None:
         try:
@@ -244,21 +297,49 @@ class Launcher:
         cmd = self.proc(pid)
         return "running" if cmd and f"--session-id {s.session_id}" in cmd else "exited"
 
+    def orphans(self, entries: list[Started]) -> list[Started]:
+        """Sessions with a pid file and a running process but no entry: an entry lost to a
+        concurrent write before #272. Rebuilt from the process's command line, which
+        carries the model, the session id and the opener (role, issue, PR)."""
+        known = {e.session_id for e in entries}
+        found = []
+        for f in sorted(self.dir.glob("*.pid")) if self.dir.is_dir() else []:
+            sid = f.stem
+            if sid in known or not UUID_RE.match(sid):
+                continue
+            try:
+                cmd = self.proc(int(f.read_text().strip()))
+                started = f.stat().st_mtime
+            except (OSError, ValueError):
+                continue
+            if not cmd or f"--session-id {sid}" not in cmd:
+                continue
+            found.append(recovered(sid, cmd, started))
+        return found
+
     def running(self) -> list[Started]:
         """Entries still running or starting, without touching the state file (for dry runs)."""
-        return [e for e in self.load() if self.state(e) != "exited"]
+        entries = self.load()
+        return [e for e in entries + self.orphans(entries) if self.state(e) != "exited"]
 
     def live(self) -> list[Started]:
         """Entries still running or starting. Exited ones are dropped from the state file,
-        and their worktrees removed if nothing would be lost (tidy)."""
-        entries = self.load()
-        live = [e for e in entries if self.state(e) != "exited"]
-        if len(live) != len(entries):
+        lost ones recovered into it (orphans), and exited sessions' worktrees removed if
+        nothing would be lost (tidy)."""
+        with self.locked():
+            entries = self.load()
+            live = [e for e in entries if self.state(e) != "exited"]
             for e in entries:
                 if e not in live:
                     self.pid_file(e.session_id).unlink(missing_ok=True)
                     (self.dir / f"{e.session_id}.stop.json").unlink(missing_ok=True)   # stophook.py
-            self.save(live)
+            found = self.orphans(entries)
+            for e in found:
+                self.out(f"recovered: {e.name}  {e.session_id} (running, but missing from "
+                         f"{self.state_file.name}; #272)")
+            live += found
+            if live != entries:
+                self.save(live)
         self.tidy(live)
         return live
 
@@ -397,15 +478,16 @@ class Launcher:
         except (RuntimeError, OSError) as e:
             self.out(f"failed to start {entry.name}: {e}")
             return False
+        self.add(entry)   # before the window opens, so its pid file never has no entry (#272)
         try:
             self.run(self.command(entry))
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             self.out(f"failed to start {entry.name}: {e}")
+            self.remove(entry.session_id)
             self.git(["-C", str(self.root), "worktree", "remove", "--force",
                       str(self.worktree(entry.session_id))])   # new and unused: nothing to lose
             return False
         live.append(entry)
-        self.save(live)   # after each start, so a later failure doesn't lose it
         self.out(f"started: {entry.name}  {entry.model}{on}  {entry.session_id}")
         return True
 
@@ -447,8 +529,8 @@ class Launcher:
                      f"check its Terminal window")
             return 1
         self.pid_file(s.session_id).unlink(missing_ok=True)
+        self.remove(s.session_id)
         rest = [e for e in live if e is not s]
-        self.save(rest)
         if self.worktree(s.session_id) in self.tidy(rest):
             self.out(f"worktree kept: {self.worktree(s.session_id)} (uncommitted or unpushed work)")
         if self.heartbeat_stopped(s.session_id):
