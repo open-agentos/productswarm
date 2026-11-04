@@ -46,6 +46,43 @@ Sign every post as usual: `-- <role> (<model>)`.
 BODY_314 = ("Committee deliberation for **#311: What should make the reviewer request changes?**\n\n"
             "Read #311 first.\n\n" + MEMBERS + "\n" + RULES)
 
+# The body .github/DISCUSSION_TEMPLATE/committees.yml posts, filled in for #311 (#371).
+FORM_311 = """### Question marker
+
+<!-- productswarm-committee question=311 -->
+
+### Question
+
+Committee deliberation for **#311: What should make the reviewer request changes rather than comment or approve?**
+
+The question, its options and the evidence are on #311; read it first. The convening comment, the convener's summary and the owner's ruling stay on #311.
+
+### Members
+
+| Role | Member | Model | Main evidence |
+|---|---|---|---|
+| **Proposer** | reviewer (`productswarm-reviewer[bot]`) | `claude-opus-5-5` | its own review history, `roles/reviewer.md`, GOV-0011 |
+| **Challenger** | builder (`productswarm-builder[bot]`) | `claude-sonnet-5-5` (this committee only) | the reviews it received and how it responded; GOV-0011's `[respond]` loop |
+| **Domain reviewer** | planner (`productswarm-planner[bot]`) | `claude-opus-5-5` | the B eval: `evals/README.md`, `evals/results.md`, the C stage 2 bar |
+
+Convener: the owner (`mattmcalister`), who also ratifies. Diversity rule (§7.2): two models **and** three evidence bases.
+
+### Rules
+
+1. **Rounds:** at most 3. In each round, members post in order: proposer, challenger, domain reviewer.
+2. **One post per member per round,** as a **top-level comment** in this Discussion, headed `Round N: <role>`. Replies to other members' points go inside that one post, quoting what they answer. No replies to your own post, and no extra posts (§8).
+3. **Structure:** **Position** / **Evidence** / **Concerns** / **Recommendation**. Evidence cites PRs, review links, record lines or `evals/results.md` cases, not recollection.
+4. **The goal is a rule the reviewer can apply mechanically,** with an answer for each of #175's nine cases and for #251 vs #289. Say which option (on #311) you back, or propose a variant.
+5. **No vote.** `product-scope` has no `vote_eligible` identities, so the committee recommends and the owner ratifies. State any dissent plainly; it goes into the record.
+6. **Stop early** if, after a round, all three recommendations agree. The convener then posts the summary on #311.
+
+Sign every post as usual: `-- <role> (<model>)`."""
+
+# The same form posted without filling in the members (placeholders left as they are).
+FORM_BLANK = FORM_311.replace("question=311", "question=NNN").replace(
+    "reviewer (`productswarm-reviewer[bot]`) | `claude-opus-5-5`",
+    "<role> (`productswarm-<role>[bot]`) | `<model>`")
+
 SEATS = {"proposer": ("reviewer", "claude-opus-5-5"), "challenger": ("builder", "claude-sonnet-5-5"),
          "domain reviewer": ("planner", "claude-opus-5-5")}
 
@@ -248,6 +285,21 @@ class CommitteeTest(unittest.TestCase):
         body = "<!-- productswarm-committee question=NNN -->\n\n" + BODY_314
         com = self.one([discussion(body=body)])
         self.assertEqual((com["question"], com["status"]), (311, "record GOV-0021"))
+
+    def test_form_body_for_311(self):
+        """The Discussion form's body parses like #314's, linked by its marker alone (#371)."""
+        com = self.one([discussion(title="Committee for #N: reviewer", body=FORM_311)])
+        ref = self.one([discussion()])
+        self.assertEqual((com["question"], com["status"]), (311, "record GOV-0021"))
+        drop = lambda ms: [{k: v for k, v in m.items() if k != "evidence"} for m in ms]
+        self.assertEqual(drop(com["members"]), drop(ref["members"]))
+        for key in ("diversity", "rounds_used", "next_seat", "missed", "notes"):
+            self.assertEqual(com[key], ref[key], key)
+        self.assertEqual(len(com["posts"]), 6)
+
+    def test_unfilled_form_is_unparsed(self):
+        com = self.one([discussion(number=405, title="Committee for #N: ", body=FORM_BLANK)])
+        self.assertEqual(com["status"], "unparsed")
 
     def test_marker_and_title_disagree(self):
         body = "<!-- productswarm-committee question=311 -->\n\n" + BODY_314

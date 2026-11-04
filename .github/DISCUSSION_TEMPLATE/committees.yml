@@ -1,0 +1,60 @@
+# Discussion form for the "Committees" category (#352, option 3; #371).
+# The file name must match the category slug. It keeps Discussion #314's layout, and adds a
+# hidden marker line that links the Discussion to its gov:question. dashboard/committees.py
+# reads the marker, the `### Members` table and the `### Rules` list, so keep those labels.
+title: "Committee for #N: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Convening a committee is the owner's act (GOVERNANCE.md §7.1). Replace every `NNN` below with the `gov:question`'s number, and `N` in the title too. Fill in each `<...>` placeholder. Don't edit rules 1, 2 and 6 or the signature line: the dashboard reads rule 1's order, and the members rely on all of them.
+  - type: textarea
+    id: marker
+    attributes:
+      label: Question marker
+      description: "Hidden in the posted Discussion. Change only `NNN`, to the question's number (e.g. `question=311`). Keep the line otherwise as it is: the dashboard reads it."
+      value: "<!-- productswarm-committee question=NNN -->"
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: The question's title, and a pointer to it.
+      value: |
+        Committee deliberation for **#NNN: <the question's title>**
+
+        The question, its options and the evidence are on #NNN; read it first. The convening comment, the convener's summary and the owner's ruling stay on #NNN.
+    validations:
+      required: true
+  - type: textarea
+    id: members
+    attributes:
+      label: Members
+      description: "One row per seat, in §7.1's order. Member names the role and its App (`productswarm-<role>[bot]`); Model is one model ID in backticks."
+      value: |
+        | Role | Member | Model | Main evidence |
+        |---|---|---|---|
+        | **Proposer** | <role> (`productswarm-<role>[bot]`) | `<model>` | <main evidence> |
+        | **Challenger** | <role> (`productswarm-<role>[bot]`) | `<model>` | <main evidence> |
+        | **Domain reviewer** | <role> (`productswarm-<role>[bot]`) | `<model>` | <main evidence> |
+
+        Convener: the owner (`mattmcalister`), who also ratifies. Diversity rule (§7.2): <how many models and evidence bases>.
+    validations:
+      required: true
+  - type: textarea
+    id: rules
+    attributes:
+      label: Rules
+      description: Fill in rules 3 to 5 for this question. Keep rules 1, 2 and 6 word for word.
+      value: |
+        1. **Rounds:** at most 3. In each round, members post in order: proposer, challenger, domain reviewer.
+        2. **One post per member per round,** as a **top-level comment** in this Discussion, headed `Round N: <role>`. Replies to other members' points go inside that one post, quoting what they answer. No replies to your own post, and no extra posts (§8).
+        3. **Structure:** **Position** / **Evidence** / **Concerns** / **Recommendation**. Evidence cites <what counts as evidence here>, not recollection.
+        4. **The goal is <what the committee must produce>.** Say which option (on #NNN) you back, or propose a variant.
+        5. **<Vote or no vote>.** <Whether the domain has `vote_eligible` identities, and so whether the committee votes or recommends for the owner to ratify.> State any dissent plainly; it goes into the record.
+        6. **Stop early** if, after a round, all three recommendations agree. The convener then posts the summary on #NNN.
+
+        Sign every post as usual: `-- <role> (<model>)`.
+    validations:
+      required: true
