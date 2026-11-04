@@ -47,9 +47,14 @@ limits as a run `swarm watch` starts:
   and `--output-format json`. The budget holds under a subscription token too: there
   total_cost_usd is Claude Code's estimate, not a bill, but it's still the ceiling;
 - the opener is the reviewer's, on PR N only, one pass, then stop;
-- the heartbeat hook (SWARM_ROLE=reviewer, as ops/swarm-session sets it) and the reviewer's
-  Stop hook (stophook.py, GOV-0014, as by="actions") are written into this checkout's
-  .claude/settings.local.json, so they run from the job's checkout of main;
+- the reviewer's Stop hook (stophook.py, GOV-0014, as by="actions") is written into this
+  checkout's .claude/settings.local.json, so it runs from the job's checkout of main;
+- the heartbeat is off (#307): its hooks are not installed (any already in the settings are
+  removed) and SWARM_ROLE is unset in claude's env, so hook.py does nothing even if run.
+  Its first flush used to open a `[heartbeat] reviewer` tracking issue whose event comments
+  were then refused, leaving an empty open issue per run. Actions runs don't appear on the
+  dashboard (the owner's direction on #240 and #307); the job log (GOV-0016) and the
+  Actions tab are their record;
 - the model credential is CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, whichever the job
   sets (the owner's direction on #208); it prefers neither and passes both through as is.
   With neither, it stops before starting anything;
@@ -60,8 +65,7 @@ Per GOV-0016 it writes claude's stdout (the JSON result) and stderr to files in 
 directory under $RUNNER_TEMP, which the runner throws away, and prints only `result`,
 `subtype`, `num_turns` and `total_cost_usd`, one JSON-encoded line each, never the
 transcript, tool output or environment. Each line starts with the field name, so nothing
-it prints can be read as an Actions workflow command (`::...`). The heartbeat's local spool
-and state live in that same directory and are never uploaded.
+it prints can be read as an Actions workflow command (`::...`).
 
 Exit: 0 done, 3 ended at its budget or turn ceiling, 1 an error or no result, 2 refused
 (not in Actions, no credential, or no reviewer cap or max_turns in swarm.toml), so the job
@@ -403,11 +407,12 @@ def claude_argv(e: swarm.Started) -> list[str]:
 
 
 def hook_settings(root: Path) -> dict:
-    """root's .claude/settings.local.json with the heartbeat hooks and the reviewer's Stop
-    hook, both from root (the job's checkout of main)."""
-    hook = str(root / install.MARK)
-    settings = install.with_hooks(install.read_settings(root / ".claude" / "settings.local.json"), hook=hook)
-    return stophook.with_stop_hook(settings, stophook.script_for(hook))
+    """root's .claude/settings.local.json with the reviewer's Stop hook from root (the job's
+    checkout of main) and no heartbeat hooks (#307): an Actions run posts nothing to GitHub
+    through the heartbeat."""
+    settings = install.with_hooks(install.read_settings(root / ".claude" / "settings.local.json"),
+                                  uninstall=True)
+    return stophook.with_stop_hook(settings, stophook.script_for(str(root / install.MARK)))
 
 
 def load_result(path: Path) -> dict | None:
@@ -462,7 +467,7 @@ def run(pr: int, dry_run: bool = False, env: dict | None = None, root: Path = sw
         return REFUSED
     argv = claude_argv(e)
     if dry_run:
-        out(f"dry run: from {root}, with SWARM_ROLE=reviewer and the heartbeat and Stop hooks, would run:")
+        out(f"dry run: from {root}, with the Stop hook and no heartbeat, would run:")
         out(shlex.join(argv))
         return DONE
     home = Path(tempfile.mkdtemp(prefix="productswarm-", dir=env.get("RUNNER_TEMP") or None))
@@ -470,7 +475,9 @@ def run(pr: int, dry_run: bool = False, env: dict | None = None, root: Path = sw
     (home / "launcher" / "sessions.json").write_text(json.dumps([e.__dict__]) + "\n")   # stophook.py reads it
     install.write_settings(root / ".claude" / "settings.local.json", hook_settings(root))
     result = home / "launcher" / f"{e.session_id}.result.json"
-    child = {**env, "SWARM_ROLE": e.role, "ANTHROPIC_MODEL": e.model, "PRODUCTSWARM_HOME": str(home)}
+    # No SWARM_ROLE: without it hook.py is a no-op, so no heartbeat posts from Actions (#307).
+    child = {k: v for k, v in env.items() if k != "SWARM_ROLE"}
+    child.update({"ANTHROPIC_MODEL": e.model, "PRODUCTSWARM_HOME": str(home)})
     out(f"run: reviewer on PR #{pr}, budget ${e.budget_usd:g}, at most {e.max_turns} turns")
     try:
         with open(result, "w") as so, open(home / "launcher" / f"{e.session_id}.stderr", "w") as se:
