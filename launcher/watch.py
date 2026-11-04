@@ -378,8 +378,8 @@ def gather(repo: str, idle_minutes: int, now: dt.datetime) -> World:
 
 def reviewed_heads(reviews: list[dict]) -> set[str]:
     """The commit SHAs the reviewer App has reviewed on one PR, from its REST reviews. A
-    head in this set is "already reviewed": the [review] trigger and the Actions check
-    (actions_review.py, #214) both use this rule, so they agree."""
+    head in this set is "already reviewed": the [review] trigger and the Actions reconciler
+    (actions_review.py plan, GOV-0020) both use this rule, so they agree."""
     return {r.get("commit_id") for r in reviews
             if (r.get("user") or {}).get("login") == REVIEWER and r.get("commit_id")}
 

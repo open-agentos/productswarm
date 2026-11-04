@@ -171,10 +171,17 @@ Result (`evals/results.md`, #202): **inconclusive, not passed.** The eval and th
 
 | # | Issue | What | PR |
 |---|---|---|---|
-| C1.1 | #214 | `launcher/actions_review.py check`: should this PR event start a reviewer run? | |
+| C1.1 | #214 | `launcher/actions_review.py check`: should this PR event start a reviewer run? Retired by #262: the reconciler's `plan` replaced it | |
 | C1.2 | #215 | `launcher/actions_review.py run`: one reviewer pass in Actions with GOV-0012, GOV-0013 and GOV-0014 limits | |
 | C1.3 | #216 | `swarm watch`: a `review_in_actions` switch so the local loop leaves `[review]` to Actions | |
 | C1.4 | #217 | Reviewer workflow: propose `.github/workflows/reviewer.yml` for the owner to commit | |
+| C1.5 | #257 | Reconciler: `actions_review.py plan` lists the open PRs needing a review now (GOV-0020) | #269 |
+| C1.6 | #258 | Reconciler: `plan` skips heads already in flight or already attempted, from the Actions run history | #275 |
+| C1.7 | #259 | Reconciler workflow: the scheduled `reviewer.yml`, committed by the owner | #279 |
+| C1.8 | #262 | Retire `actions_review.py check`; the launcher README and this brief describe the reconciler | |
+| C1.9 | #260 | Reconciler switch-over: `review_in_actions` on locally; a bot PR reviewed by the reconciler alone | |
+
+C1.5 to C1.9 are the reconciler (#255 stage 1, GOV-0020). Actions reviews now start from a sweep on `main` every 5 minutes, not from PR events, so one can lag a push by a few minutes or more. To review a PR now, or retry a failed one, the owner dispatches the workflow with its number (`gh workflow run reviewer.yml -f pr=N`). To fall back to local reviews, set `review_in_actions = false` and run `swarm watch` (`launcher/README.md`). #261 (PR pushes nudge an early sweep) is optional and comes after.
 
 Order: B → F → C stage 1. C stage 2 is not planned.
 
@@ -193,10 +200,11 @@ Workflow files stay the owner's: the swarm proposes them, and the owner commits 
 C stage 1's sub-questions, raised when the stage came next (GOV-0015):
 
 - #205 / GOV-0016 Public job log: a reviewer run in Actions prints only `result`, `subtype`, `num_turns` and `total_cost_usd`; no transcript, no artifact.
-- #206 / GOV-0017 Trigger events and secrets: runs start only on `pull_request` for same-repo, non-draft PRs by a swarm App or the owner, and a no-secrets check job gates the job with secrets. Never `pull_request_target`, `issue_comment` or `workflow_run` on untrusted input.
+- #206 / GOV-0017 Trigger events and secrets: reviews only same-repo, non-draft PRs by a swarm App or the owner, and a no-secrets job gates the job with secrets. Never `pull_request_target`, `issue_comment` or `workflow_run` on untrusted input. Runs now start from `main`'s reconciler, not `pull_request` (#255, GOV-0020).
 - #207 / GOV-0018 Reviewer App key: it moves to secrets of a default-branch-only Actions environment, and the job mints a repo-only token with `pull_requests: write`, `contents: read` and `issues: read`.
 - #208 Model credential for reviewer runs in Actions: open. The owner's direction on that question, not a ruling (GOV-0006), is a Claude subscription token for now, with an API key as the goal.
-- #209 / GOV-0019 Workflow and coexistence with `swarm watch`: runs on `pull_request` pushes plus `workflow_dispatch`, one concurrency group per PR, never on its own reviews or comments, and skips a reviewed head. A `swarm.toml` switch makes `swarm watch` leave `[review]` to Actions.
+- #209 / GOV-0019 Workflow and coexistence with `swarm watch`: one concurrency group per PR, never on its own reviews or comments, and skips a reviewed head. A `swarm.toml` switch makes `swarm watch` leave `[review]` to Actions. Its `pull_request` trigger is replaced by the reconciler (#255, GOV-0020).
+- #255 / GOV-0020 Reconciler: runs with the reviewer's secrets start only from a reconciler on `main` that sweeps on a schedule (or a dispatch), reads repo state and reviews each PR GOV-0017's rules allow. PR events may only nudge it (#261). It amends GOV-0017's and GOV-0019's `pull_request` trigger; GOV-0018 is unchanged.
 
 ## Open decisions
 
