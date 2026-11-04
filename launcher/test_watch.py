@@ -627,6 +627,65 @@ class StartTest(unittest.TestCase):
                 self.assertEqual(argv[1:3], ["pr", "list"], argv)
 
 
+HOLD_LOCK = """
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+os.ftruncate(fd, 0); os.write(fd, f"{os.getpid()}\\n".encode())
+print("locked", flush=True)
+time.sleep(60)
+"""
+
+
+class LockTest(unittest.TestCase):
+    """One watcher at a time (#273)."""
+    setUp = StartTest.setUp
+    manifest = StartTest.manifest
+    watcher = StartTest.watcher
+
+    def holder(self):
+        """Another process holding the lock as a running watcher does; killed at cleanup."""
+        p = subprocess.Popen([sys.executable, "-c", HOLD_LOCK, str(self.l.dir / watch.LOCK_FILE)],
+                             stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (p.kill(), p.wait(), p.stdout.close()))
+        self.assertEqual(p.stdout.readline().strip(), "locked")
+        return p
+
+    def test_a_second_watcher_is_refused_naming_the_running_ones_pid(self):
+        p = self.holder()
+        self.assertEqual(self.watcher().run(1, ticks=1, sleep=lambda s: None), 1)
+        self.assertEqual(self.fake.commands, [])
+        self.assertEqual(self.scene.reads, 0)
+        self.assertFalse(watch.state_path(self.l).exists())
+        (line,) = self.lines
+        self.assertIn(f"refused: another swarm watch is already running (pid {p.pid};", line)
+
+    def test_a_killed_watchers_lock_is_released(self):
+        p = self.holder()
+        p.kill()
+        p.wait()
+        self.assertEqual(self.watcher().run(1, ticks=1, sleep=lambda s: None), 0)
+        self.assertEqual(len(self.fake.commands), 4)
+
+    def test_the_lock_is_held_while_running_and_released_after(self):
+        w, seen = self.watcher(), []
+        w.tick = lambda now=None: seen.append(watch.take_lock(self.l))
+        self.assertEqual(w.run(1, ticks=1, sleep=lambda s: None), 0)
+        self.assertEqual(seen, [(None, str(os.getpid()))])   # held by this process, pid written
+        fd, _ = watch.take_lock(self.l)                      # free again once run() returns
+        self.assertIsNotNone(fd)
+        os.close(fd)
+
+    def test_a_dry_run_beside_a_running_watcher_works_and_writes_nothing(self):
+        self.holder()
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read)
+        self.assertEqual(w.run(1, ticks=2, sleep=lambda s: None), 0)
+        self.assertTrue(any(x.startswith("[build] #49") for x in self.lines))
+        self.assertFalse(any("refused" in x for x in self.lines))
+        self.assertEqual(self.fake.commands, [])
+        self.assertFalse(watch.state_path(self.l).exists())
+
+
 class ManifestWatchTest(unittest.TestCase):
     def test_repo_manifest_has_the_limits_from_88(self):
         import manifest

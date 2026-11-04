@@ -96,6 +96,12 @@ role's done-condition is met; see that module for the conditions and the guards.
 served, with a read-only `gh pr list` to find the PR that closes a run's issue. It only
 prints: no cost goes to GitHub or the repo.
 
+One watcher at a time (#273): without --dry-run, swarm watch holds an exclusive,
+non-blocking fcntl.flock on ~/.productswarm/launcher/watch.lock for its whole life, with
+its pid in the file. A second one exits at once, naming that pid. The kernel drops the
+lock when the process ends, even on a crash or `kill`, so there is no stale lock to clean
+up. --dry-run takes no lock and writes no watch.json, so it is safe beside a running one.
+
 It never stops a session (GOV-0008), never adds or removes labels, and never comments,
 approves or merges: its only GitHub calls are reads. Sessions it starts are recorded
 with by="watch", and `swarm ls` shows them as "by watch".
@@ -105,7 +111,9 @@ GitHub reads go through gather(); triggers() is pure, so tests feed it canned da
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
+import os
 import re
 import time
 import uuid
@@ -119,6 +127,7 @@ import swarm
 REVIEWER = swarm.dashboard().REVIEWER
 DEFAULT_INTERVAL = 5          # minutes, for --dry-run when swarm.toml has no [watch] table
 STATE_FILE = "watch.json"     # in the launcher's state directory
+LOCK_FILE = "watch.lock"      # held by the one running watcher (#273)
 REF_RE = re.compile(r"#(\d+)")
 GOV_RE = re.compile(r"\bGOV-\d{4}\b")
 LEFT_TO_ACTIONS = ("left to Actions: review_in_actions = true in swarm.toml, so the GitHub "
@@ -463,6 +472,31 @@ def save_state(launcher: "swarm.Launcher", st: dict) -> None:
     tmp.replace(path)
 
 
+def take_lock(launcher: "swarm.Launcher") -> tuple[int | None, str]:
+    """The one-watcher lock (#273): (fd, "") if this process now holds it, or (None, pid)
+    if another process does, with the pid it wrote ("" if not yet written). The lock lasts
+    until the fd is closed or the process ends; the file is never removed, since removing
+    it would let a second watcher lock a fresh file beside the first."""
+    launcher.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = launcher.dir / LOCK_FILE
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)   # no O_TRUNC: keep the holder's pid
+    except OSError as e:
+        raise RuntimeError(f"can't open {path}: {e}") from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pid = os.read(fd, 64).decode(errors="replace").strip()
+        os.close(fd)
+        return None, pid
+    except OSError as e:
+        os.close(fd)
+        raise RuntimeError(f"can't lock {path}: {e}") from None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd, ""
+
+
 def waiting(launcher: "swarm.Launcher") -> tuple[dt.datetime | None, list[dict]]:
     """For `swarm inbox`: when swarm watch last checked, and the triggers it is holding
     or skipping. Never raises: a missing or bad state file shows nothing."""
@@ -787,10 +821,22 @@ class Watch:
         if self.dry_run:
             self.launcher.out(f"swarm watch --dry-run: checking every {interval_minutes:g} min; "
                               f"starts nothing; Ctrl-C to stop")
-        else:
+            return self.loop(interval_minutes, ticks, sleep)
+        fd, holder = take_lock(self.launcher)
+        if fd is None:
+            self.launcher.out(f"swarm watch: refused: another swarm watch is already running "
+                              f"(pid {holder or 'unknown'}; lock {self.launcher.dir / LOCK_FILE}). "
+                              f"Stop it first; --dry-run is safe beside it (#273)")
+            return 1
+        try:
             self.launcher.out(f"swarm watch: checking every {interval_minutes:g} min; starts sessions "
                               f"within swarm.toml's [watch] limits and only for roles with a "
                               f"spend_cap_usd (GOV-0010); never stops one; Ctrl-C to stop")
+            return self.loop(interval_minutes, ticks, sleep)
+        finally:
+            os.close(fd)
+
+    def loop(self, interval_minutes: float, ticks: int | None, sleep: Callable[[float], None]) -> int:
         n = 0
         try:
             while ticks is None or n < ticks:

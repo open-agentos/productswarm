@@ -85,6 +85,7 @@ Nothing new is posted to GitHub. What the launcher started is recorded under `~/
 - `.worktrees/<session-id>/` in this checkout is the session's working tree (see `up`).
 - `<session-id>.pid` is written by the window's shell before it hands over to `swarm-session`, so the PID it holds is Claude Code's.
 - `watch.json` holds what `swarm watch` has acted on, what it is holding or skipping, and how each run it started ended (see below).
+- `watch.lock` is locked by the running `swarm watch` and holds its pid, so a second one refuses to start (see "One watcher at a time" below).
 - `<session-id>.stop.json` counts how many times the Stop hook has blocked a run `swarm watch` started, and `stophook.log` says why (see below).
 - `<session-id>.result.json` is a headless run's output (see "Headless runs" below). Its first line is `ops/swarm-session`'s banner (`swarm-session: <role> as …`), and its last line is the JSON result from `claude -p --output-format json`.
 
@@ -152,6 +153,8 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respo
 `swarm launch builder --issue N --pr M` starts the same session by hand. `--pr` only changes the opener, which names the PR and the issue; the refusal checks are still on #N.
 
 Each start is a fresh **headless** run in a new Terminal window (see below). The loop never re-prompts a running session. `--dry-run` prints `would start …` for each trigger, then the full headless command it would run on the next line, indented, and starts nothing. If there is no command to show (the role has no `spend_cap_usd`, or `[watch]` has no `max_turns`), that line says why. It keeps its memory only while it runs and writes nothing to disk.
+
+**One watcher at a time** (#273). Without `--dry-run`, `swarm watch` holds an exclusive lock on `~/.productswarm/launcher/watch.lock` (`fcntl.flock`, non-blocking) for as long as it runs, and writes its pid into the file. A second `swarm watch` exits at once with `refused: another swarm watch is already running (pid N; …)`. Two watchers would both act on the same triggers, because `watch.json`'s once-per-trigger memory assumes one. The kernel releases the lock when the process ends, on Ctrl-C, a crash or `kill`, so there is never a stale lock to clean up. Leave `watch.lock` in place: the pid in it matters only while a watcher holds the lock. `--dry-run` takes no lock and writes no `watch.json`, so it is safe to run beside a running watcher.
 
 ### Headless runs
 
