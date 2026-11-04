@@ -1,0 +1,37 @@
+# Nudges the reviewer reconciler (reviewer.yml) to sweep now when a same-repo PR is pushed,
+# instead of waiting for its schedule, which GitHub runs hours late here (#261). The nudge
+# decides nothing: it dispatches a full sweep on main with no pr input, so no PR data
+# reaches the dispatch, and plan works out from repo state what to review, as on any
+# other run (#255, GOV-0020). Correctness never depends on it; the schedule is the safety
+# net. Fork PRs get a read-only token and wait for the next scheduled sweep.
+# The token's actions: write can also start, cancel or re-run workflows in this repo; the
+# owner accepted that power on #261.
+# Committed by the owner: the Apps have no `workflows` permission (#32).
+name: Reviewer nudge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  nudge:
+    # Same-repo, non-draft PRs only. No secrets, no checkout, no environment.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    concurrency:
+      # Several quick pushes to one PR need only one nudge; plan's own group queues sweeps.
+      group: reviewer-nudge-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      actions: write   # gh workflow run
+    steps:
+      - name: Dispatch a reviewer sweep
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run reviewer.yml --ref main
