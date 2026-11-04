@@ -7,7 +7,9 @@ is met (#148, the second of three issues for the owner's answer on #125, option 
 The launcher writes this hook into a session's worktree .claude/settings.local.json
 only when `swarm watch` started it (by="watch"). It runs from the pinned copy of
 origin/main (#93), as the heartbeat hook does, so only merged code runs as a hook.
-Sessions started with `swarm up` and `swarm launch` don't get it.
+Sessions started with `swarm up` and `swarm launch` don't get it. A reviewer run in
+GitHub Actions (launcher/actions_review.py run, #215) gets it too, as by="actions", from
+the job's checkout of main.
 
 When Claude Code is about to stop, the hook reads GitHub (only reads, as the run's App,
 through the session's `gh`) and checks the run's done-condition:
@@ -22,6 +24,8 @@ through the session's `gh`) and checks the run's done-condition:
 | reviewer                                    | every open, non-draft PR that existed when the  |
 |                                             | run started has a reviewer review at its head   |
 |                                             | or one posted since the run started             |
+| reviewer on one PR (Actions, #215)          | that PR, if still open and not a draft, has a   |
+|                                             | reviewer review at its head or one since start  |
 | docs on a gov:ruled question ([record])     | a PR, open or merged, closes the question       |
 | any other run (e.g. an [answer] run)        | always                                          |
 
@@ -64,6 +68,9 @@ MARK = "launcher/stophook.py"
 TIMEOUT = 90          # seconds Claude Code gives the hook; past it the stop goes ahead
 GH_TIMEOUT = 20       # per gh call
 CHANGES = "CHANGES_REQUESTED"
+# Who starts runs this hook keeps going: `swarm watch`, and a reviewer run in Actions
+# (launcher/actions_review.py run, #215), which records its entry the same way.
+HEADLESS = ("watch", "actions")
 
 
 def app_login(role: str) -> str:
@@ -201,9 +208,14 @@ def closed_by(g: GitHub, repo: str, n: int) -> list[int]:
 def missing_review(g: GitHub, repo: str, e: swarm.Started) -> str | None:
     login = swarm.dashboard().REVIEWER
     todo = []
-    for p in g.items(f"repos/{repo}/pulls?state=open&per_page=100"):
-        if p.get("draft") or not (ts(p.get("created_at")) or 0) <= e.started:
-            continue        # drafts, and PRs opened after the run started, weren't its to review
+    if e.pr:     # a run on one PR (Actions, #215): only that PR is its to review
+        p = g.get(f"repos/{repo}/pulls/{e.pr}") or {}
+        prs = [p] if p.get("state") == "open" and not p.get("draft") else []
+    else:
+        prs = [p for p in g.items(f"repos/{repo}/pulls?state=open&per_page=100")
+               if not p.get("draft") and (ts(p.get("created_at")) or 0) <= e.started]
+        # drafts, and PRs opened after the run started, weren't its to review
+    for p in prs:
         head = (p.get("head") or {}).get("sha")
         reviews = [r for r in g.items(f"repos/{repo}/pulls/{p['number']}/reviews?per_page=100")
                    if mine(r, login)]
@@ -295,7 +307,7 @@ def decide(payload: dict, home: Path, repo: str | None, g: GitHub,
         return None
     sid = str(payload.get("session_id") or "")
     e = entry_for(home, sid)
-    if e is None or e.by != "watch" or not repo:
+    if e is None or e.by not in HEADLESS or not repo:
         return None
     count_file = home / "launcher" / f"{sid}.stop.json"
     try:
