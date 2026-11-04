@@ -211,7 +211,7 @@ def render(p: dict, repo: str) -> str:
         f'{"".join(rows)}</table></div>',
         "<ul>",
         f'<li><a href="{results_url}">Eval bar</a>: {esc(p["bar"] or "unknown")}</li>',
-        f"<li>Planted-defect gate ({link(repo, GATE_ISSUE)}): {esc(p["gate"] or "unknown")}</li>",
+        f"<li>Planted-defect gate ({link(repo, GATE_ISSUE)}): {esc(p['gate'] or 'unknown')}</li>",
         f"<li>Red check ({link(repo, RED_ISSUE)}): {red_line(p['red'], repo)}</li>",
         "</ul>",
     ])
