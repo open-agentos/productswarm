@@ -3,7 +3,7 @@
 > Decision rights for humans and AI agents working in this repository.
 > `AGENTS.md` / `CLAUDE.md` say **how to work**. This file says **who decides, how they decide, and what has already been decided**.
 
-**Status: Phase 0 — convention only.** Every step below is done by hand (by agents using `gh`, or by humans). Nothing enforces it yet except CODEOWNERS on `governance/`. Phase 0 exists to learn which questions agents actually raise.
+**Status: Phase 0 — mostly convention.** Most steps below are done by hand (by agents using `gh`, or by humans). What enforces it so far: CODEOWNERS and the "owner ratifies" ruleset on `main`, the launcher's denied tools for headless runs (GOV-0013), and the Actions reviewer's trust gate (GOV-0017, GOV-0020). Phase 0 exists to learn which questions agents actually raise.
 
 The three layers:
 
@@ -83,7 +83,7 @@ To log one, add a decision record (`shape: autonomous`, `status: in-force`) to t
 
 - **A ruling is a PR** that adds `governance/decisions/GOV-NNNN-<slug>.md` (copied from `GOV-0000-template.md`), updates `governance/INDEX.md`, and closes the question issue.
 - **Merge is ratification.** In Phase 0, only humans listed under `ratify` may merge to `governance/`. CODEOWNERS enforces this.
-- After merging, post a comment on the question issue with a one-line ruling and the record ID, then label the issue `gov:ruled`.
+- **In practice:** the owner answers on the question and adds `gov:ruled`, which is direction for that question only (GOV-0006). Docs drafts the record PR (GOV-0007), and its merge is the ruling. The record's ID goes in a one-line comment on the question.
 - **Expiry.** Every ruling carries `review_by`. Once that date has passed it is **not precedent** until someone re-affirms it in a new PR that bumps the date.
 - **Superseding.** A new record lists `supersedes: GOV-NNNN`, and the same PR sets the old record's status to `superseded`.
 
@@ -91,21 +91,31 @@ To log one, add a decision record (`shape: autonomous`, `status: in-force`) to t
 
 ## 7. Committees (Phase 0: convened by hand)
 
-1. **Convening.** The owner or a human posts a convening comment on the question that names the members and their roles:
+1. **Convening.** The owner, or a convener acting for the owner, posts a convening comment on the question. It names each member's seat, role, model and main evidence, and links the committee's Discussion (7.3). The seats are:
    - **proposer**
    - **challenger** (required; probes and stress-tests, not combative)
    - zero or more **domain reviewers**
-2. **Diversity rule.** A committee needs at least two different models **or** two different evidence bases. A panel made of one model with one context is one opinion counted several times.
-3. **Turns.** Each member posts **once per round** using this structure:
+2. **Diversity rule.** A committee needs at least two different models **or** two different evidence bases. A panel made of one model with one context is one opinion counted several times. The signature line on each post (`-- <role> (<model>)`) is how this is checked.
+3. **Where.** The rounds run in a GitHub Discussion in the **Committees** category, titled after the question. The Discussion's opening post names the question and the members and repeats these rules. The question issue keeps only the convening comment, the summary and the ruling. The decision record links both. (Piloted on #311 and Discussion #314.)
+4. **Turns.** Within a round, members post in order: proposer, challenger, then domain reviewers. Each reads the posts before theirs. Each member posts **once per round**, as one top-level comment headed `Round N: <seat> (<role>)`, using this structure:
    **Position** / **Evidence** / **Concerns** / **Recommendation or vote**
-4. **Bounds.** Maximum 3 rounds. After the last round, the convener posts a summary covering the recommendation, the dissent and the tally, and hands it to the ratifier.
-5. **Votes** count only from identities listed as `vote_eligible` for the domain. The tally goes into the decision record.
+   Answer other members inside your own post, quoting only the line you answer.
+5. **Bounds.** Maximum 3 rounds. **Stop early** if all recommendations match after a round. The convener then posts a summary on the question: the recommendation, the dissent, the tally, the disputes resolved along the way, and a link to every post. Then it goes to the ratifier.
+6. **Votes** count only from identities listed as `vote_eligible` for the domain, as a signed line in the member's post (`Vote: option N`). Discussion polls don't count: they can't show who voted or check eligibility. The tally goes into the decision record.
 
 ---
 
 ## 8. Budgets and loop safety
 
 - An agent posts **at most 6 comments per question per day**, and never replies to its own comment.
+- **Keep it brief.** Every comment, review and post puts its point (the answer, the ask or the state) in its first line, then gives only what the reader needs to act on it. Link evidence (a PR, a line, a run) rather than paste it, and don't restate what's already on the page. As upper limits, not targets:
+  - a comment on an issue or PR: **150 words**;
+  - a "stopping because…" or status comment: **3 lines**;
+  - a review: the rubric lines, then numbered findings of **one or two sentences each**, with evidence;
+  - a `gov:question`'s Context: **200 words**, with each option in one or two lines;
+  - a committee post: **500 words** in round 1 and **250** in later rounds, which say only what changed;
+  - a convener's summary: **400 words** plus links.
+  Go over a limit only when the reader can't act without the extra, and say why in one line.
 - Agents do not respond to `gov:` issues they weren't asked into, unless they hold relevant precedent or held knowledge.
 - **Lapsing.** If the time to live passes with no ruling, the default action stands and the issue is labelled `gov:lapsed`. **A lapsed default is not precedent.** The next agent to hit the same situation must ask again, and that repeat is itself the signal that a ruling is needed.
 
