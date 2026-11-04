@@ -74,7 +74,7 @@ The digest issue isn't a `[heartbeat]` tracking issue or a `gov:question`, so it
 - **`governance/INDEX.md`**, from the checkout the page is built in (`dashboard.yml` checks out `main`).
 - **v3 progress:** see [v3 progress](#v3-progress).
 - **Reviewer workflow runs and jobs** from the Actions API, and the reviews and commits of the PRs they reviewed (see [Actions reviewer](#actions-reviewer)). Never job logs.
-- **Committee Discussions** (`committees.py`, #353): every Discussion in the "Committees" category, through `gh api graphql`, plus the `gov:question` each one serves (from a `<!-- productswarm-committee question=N -->` marker, else the `Committee for #N:` title) and that question's record in `governance/decisions/` (front matter `question: "#N"`). Members come from the `## Members` or `### Members` table, the post order from rule 1 under `Rules`, and round posts are top-level comments headed `Round N: <seat>` by that seat's App. From each post it keeps only the round, seat, author, time, link, signature model and the first bold phrase of its Recommendation. From the owner's comments on the question it keeps only whether the convening, summary and ruling comments exist, when, and their links, so no cost line or other text reaches the page. It derives status (convened, round N, summary, ratified, record), §7.2 diversity, the next seat, rounds used of 3 and posts per member per UTC day against §8's 6. A Discussion that doesn't match #314's layout shows as "unparsed". A token that can't read Discussions gives a note and the rest of the page still builds. Only the page reads these (`fetch(..., with_committees=True)` in `main()`); `swarm inbox`, `swarm watch` and the digest skip the GraphQL calls. The page shows them from #354.
+- **Committee Discussions** (`committees.py`, #353): every Discussion in the "Committees" category, through `gh api graphql`, plus the `gov:question` each one serves (from a `<!-- productswarm-committee question=N -->` marker, else the `Committee for #N:` title) and that question's record in `governance/decisions/` (front matter `question: "#N"`). Members come from the `## Members` or `### Members` table, the post order from rule 1 under `Rules`, and round posts are top-level comments headed `Round N: <seat>` by that seat's App. From each post it keeps only the round, seat, author, time, link, signature model and the first bold phrase of its Recommendation. From the owner's comments on the question it keeps only whether the convening, summary and ruling comments exist, when, and their links, so no cost line or other text reaches the page. It derives status (convened, round N, summary, ratified, record), §7.2 diversity, the next seat, rounds used of 3 and posts per member per UTC day against §8's 6. A Discussion that doesn't match #314's layout shows as "unparsed". A token that can't read Discussions gives a note and the rest of the page still builds. Only the page reads these (`fetch(..., with_committees=True)` in `main()`); `swarm inbox`, `swarm watch` and the digest skip the GraphQL calls. The page shows them in the Committees section below.
 
 ## Governance
 
@@ -85,6 +85,21 @@ The digest issue isn't a `[heartbeat]` tracking issue or a `gov:question`, so it
 - **Lapsed questions:** questions labelled `gov:lapsed`, open, or closed within `--days`, each with its time to live. A muted line notes that a lapsed default is not precedent (GOVERNANCE.md §8).
 
 The needs-you list and its past-TTL flag don't change. This section is for reading, not for acting on. It needs no new token permission: the index comes from the checkout, and the questions come from the issues the page already fetches.
+
+## Committees
+
+`committees.render()` draws the committees `committees.py` reads (#354). Open committees come right after the needs-you list and its tiles. Committees that ended (record merged, or the question closed) go in a collapsed "N ended" `<details>`. With no committees there's no section.
+
+For each committee:
+
+- **Header:** the question, linked with its title, and the Discussion, then the timeline: convened → round 1 … round N → summary → ratified → record GOV-NNNN. Each step reached is dated and linked to its comment, round post or record file. The current step is bold and the steps not reached yet are muted.
+- **Members:** seat, role, model and evidence base from the Discussion's table, then "§7.2 diversity met: 2 models, 3 evidence bases" (or "not met").
+- **Round grid:** a row per member and a column per round. Each cell links to the post, shows its time (UTC) and that post's recommendation phrase. If a post's signature names another model than the table, the cell says "signed <model>". The next empty cell says "waiting on <seat>", which can open a new round's column. Before a summary, a post the reader counts as missed says "missed". Once a summary exists, the cells of rounds that never ran say "stopped early" if rule 6 stopped the committee. Other empty cells stay blank. The grid scrolls in its own box at phone width.
+- **Last line:** convergence ("all agree after round N" when every member's last-round phrase matches; otherwise "dissent: <seats>" for the seats whose latest phrase differs from the majority's, or "no majority"), "rounds used: N of 3" (§7.4), and "nobody over 6 posts a day" or a red "over 6 posts a day" with the seat, count and UTC day (§8).
+
+Phrases are compared as text, ignoring case and spacing. So #314 shows "dissent: proposer": its round-2 phrase is "Option 3 as 3c" and the other two say "Option 3 as 3c+E".
+
+Discussions that don't match #314's layout are listed as muted "Unparsed" links. Read problems ("can't read Discussions", a question that couldn't be read, a marker that disagrees with the title) go on one muted line. A repo with no Committees category shows nothing. The section shows no cost and no post or summary text beyond each recommendation phrase.
 
 ## v3 progress
 

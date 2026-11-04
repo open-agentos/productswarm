@@ -134,13 +134,14 @@ def question(summary=True, ruling=True):
             "comments": comments}
 
 
-class CommitteeTest(unittest.TestCase):
+class Fixture(unittest.TestCase):
+    """GOV-0021 recorded for #311, and build() over canned data."""
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.decisions = Path(tmp.name)
         (self.decisions / "GOV-0021-when.md").write_text(
-            '---\nid: GOV-0021\ntitle: x\nstatus: in-force\nkind: ruling\nquestion: "#311"\n---\n\nBody.\n')
+            '---\nid: GOV-0021\ntitle: x\nstatus: in-force\nkind: ruling\nquestion: "#311"\ndate: 2026-11-04\n---\n\nBody.\n')
         (self.decisions / "GOV-0001-other.md").write_text('---\nid: GOV-0001\nstatus: in-force\nquestion: "#3"\n---\n')
 
     def build(self, discussions, questions=None, notes=None):
@@ -152,6 +153,8 @@ class CommitteeTest(unittest.TestCase):
         (com,) = self.build(*a, **kw)["committees"]
         return com
 
+
+class CommitteeTest(Fixture):
     def test_314_with_311(self):
         com = self.one([discussion()])
         self.assertEqual(com["question"], 311)
@@ -173,7 +176,8 @@ class CommitteeTest(unittest.TestCase):
         self.assertEqual(com["over_limit"], [])
         self.assertFalse(any(p["model_differs"] for p in com["posts"]))
         self.assertTrue(com["ruled"])
-        self.assertEqual(com["record"], {"id": "GOV-0021", "status": "in-force"})
+        self.assertEqual(com["record"], {"id": "GOV-0021", "status": "in-force", "file": "GOV-0021-when.md",
+                                         "date": "2026-11-04"})
         self.assertEqual(set(com["owner_comments"]), {"convening", "summary", "ruling"})
         self.assertEqual(com["owner_comments"]["summary"]["url"], f"{QURL}#issuecomment-25")
         self.assertEqual(com["notes"], [])
@@ -328,7 +332,10 @@ class CommitteeTest(unittest.TestCase):
         now = dt.datetime(2026, 11, 4, 15, 0, tzinfo=dt.timezone.utc)
         model = g.build(data, now, dt.timedelta(minutes=15))
         self.assertEqual(model["committees"]["committees"][0]["status"], "record GOV-0021")
-        for text in (repr(model), g.render(model)):
+        page = g.render(model)
+        self.assertIn("<h2>Committees</h2>", page)
+        self.assertNotIn("<script", page.lower())
+        for text in (repr(model), page):
             self.assertNotIn("2.89", text)
             self.assertNotIn("Cost", text)
             self.assertNotIn("2 rounds of 3", text)   # nor any other summary text
@@ -340,6 +347,109 @@ class CommitteeTest(unittest.TestCase):
 
     def test_no_committee_data(self):
         self.assertEqual(c.build(None), {"committees": [], "notes": []})
+
+
+class RenderTest(Fixture):
+    def page(self, discussions, questions=None, notes=None):
+        return c.render(self.build(discussions, questions, notes), REPO)
+
+    def test_314_with_311(self):
+        html = self.page([discussion()])
+        self.assertIn("<details><summary>1 ended</summary>", html)    # record merged: collapsed
+        self.assertIn("No open committees.", html)
+        self.assertIn(f'<a href="{QURL}">#311</a>', html)               # no title in the canned issue
+        self.assertIn(f'<a href="{DURL}">#314</a>', html)
+        self.assertIn(f'<b class="now" title="current step"><a href="https://github.com/{REPO}/blob/main/'
+                      'governance/decisions/GOV-0021-when.md">record GOV-0021</a> '
+                      '<span class="muted">2026-11-04</span></b>', html)
+        for step in ("convened", "round 1", "round 2", "summary", "ratified"):
+            self.assertRegex(html, rf'<a href="[^"]+">{step}</a> <span class="muted">2026-11-04</span>')
+        self.assertEqual(html.count("</td><td><code>claude-"), 3)        # 3 members
+        self.assertIn("§7.2 diversity met: 2 models, 3 evidence bases", html)
+        grid = html[html.index('<table class="grid">'):]
+        grid = grid[:grid.index("</table>")]
+        self.assertEqual(grid.count("<th>Round "), 2)
+        self.assertEqual(grid.count("<tr>"), 4)                          # header + 3 members
+        self.assertEqual(grid.count(f'<a href="{DURL}#discussioncomment-'), 6)
+        self.assertIn(">11-04 14:18 UTC</a><br>Option 3, with changes 1 and 2 (3b)", grid)
+        # The proposer's round-2 phrase is "Option 3 as 3c", the others' "Option 3 as 3c+E".
+        self.assertIn("dissent: proposer · rounds used: 2 of 3 · nobody over 6 posts a day", html)
+
+    def test_all_agree_and_stopped_early(self):
+        (self.decisions / "GOV-0021-when.md").unlink()
+        agree = [post(1, s, m, "**Option 3 as 3c+E.**") for s, m in
+                 (("proposer", 18), ("challenger", 20), ("domain reviewer", 22))]
+        html = self.page([discussion(comments=agree)], {311: question(ruling=False)})
+        self.assertNotIn("<details>", html)                              # question still open
+        self.assertIn("all agree after round 1", html)
+        self.assertIn('<b class="now" title="current step"><a href="' + QURL + '#issuecomment-25">summary</a>', html)
+        self.assertEqual(html.count('<span class="muted">stopped early</span>'), 6)   # rounds 2 and 3
+        self.assertIn('<span class="muted">record</span>', html)
+
+    def test_mid_round_waiting_on_the_challenger(self):
+        (self.decisions / "GOV-0021-when.md").unlink()
+        html = self.page([discussion(comments=[post(*POSTS_314[0])])], {311: question(False, False)})
+        self.assertIn("<td><b>waiting on challenger</b></td>", html)
+        self.assertEqual(html.count("<th>Round "), 1)
+        self.assertNotIn("<details>", html)
+        self.assertIn('<b class="now" title="current step"><a href="', html)
+        self.assertIn('<span class="muted">summary</span> → <span class="muted">ratified</span>', html)
+
+    def test_waiting_cell_opens_the_next_round(self):
+        (self.decisions / "GOV-0021-when.md").unlink()
+        posts = [post(*p) for p in POSTS_314[:3]] + [post(*POSTS_314[3]), post(*POSTS_314[5])]
+        html = self.page([discussion(comments=posts)], {311: question(False, False)})
+        self.assertEqual(html.count("<th>Round "), 3)
+        self.assertIn("<tr><th>proposer</th>", html)
+        self.assertIn("<td><b>waiting on proposer</b></td>", html)
+        self.assertIn('<td><span class="muted">missed</span></td>', html)   # the challenger's round 2
+
+    def test_dissent(self):
+        (self.decisions / "GOV-0021-when.md").unlink()
+        posts = [post(1, "proposer", 18, "**Option 3**"), post(1, "challenger", 20, "**Option 1**"),
+                 post(1, "domain reviewer", 22, "**option  3**")]
+        html = self.page([discussion(comments=posts)], {311: question(False, False)})
+        self.assertIn("dissent: challenger · rounds used: 1 of 3", html)
+        posts[2] = post(1, "domain reviewer", 22, "**Option 2**")
+        html = self.page([discussion(comments=posts)], {311: question(False, False)})
+        self.assertIn("no majority after round 1", html)
+
+    def test_member_over_six_posts_a_day(self):
+        q = question()
+        q["comments"] += [{"user": {"login": "productswarm-builder[bot]"}, "created_at": at(40 + i),
+                           "body": "note", "html_url": f"{QURL}#issuecomment-b{i}"} for i in range(5)]
+        html = self.page([discussion()], {311: q})
+        self.assertIn('<span class="pill s-blocked">over 6 posts a day</span> challenger 7 on 2026-11-04', html)
+        self.assertNotIn("nobody over", html)
+
+    def test_unparsed_discussion(self):
+        html = self.page([discussion(), discussion(number=400, title="Committee chat", body="Anyone may post.")])
+        self.assertIn('<p class="muted">Unparsed: <a href="https://github.com/open-agentos/productswarm/'
+                      'discussions/400">#400 Committee chat</a></p>', html)
+        self.assertNotIn("#400: unparsed", html)
+
+    def test_cant_read_discussions(self):
+        html = self.page([], notes=[c.NO_ACCESS])
+        self.assertEqual(html, "<h2>Committees</h2>\n" + '<p class="muted">No open committees.</p>\n'
+                         f'<p class="muted">{g.esc(c.NO_ACCESS)}</p>')
+
+    def test_no_committees_no_section(self):
+        self.assertEqual(c.render(None, REPO), "")
+        self.assertEqual(self.page([]), "")
+        self.assertEqual(self.page([], notes=["no Committees Discussion category"]), "")
+        data = {"repo": REPO, "issues": [], "comments": {}, "prs": [], "reviews": {}, "committees": None}
+        now = dt.datetime(2026, 11, 4, 15, 0, tzinfo=dt.timezone.utc)
+        self.assertNotIn("Committees", g.render(g.build(data, now, dt.timedelta(minutes=15))))
+
+    def test_open_committees_come_after_needs_you(self):
+        (self.decisions / "GOV-0021-when.md").unlink()
+        data = {"repo": REPO, "issues": [], "comments": {}, "prs": [], "reviews": {},
+                "committees": {"discussions": [discussion(comments=[post(*POSTS_314[0])])],
+                               "questions": {311: question(False, False)}, "notes": []}}
+        now = dt.datetime(2026, 11, 4, 15, 0, tzinfo=dt.timezone.utc)
+        page = g.render(g.build(data, now, dt.timedelta(minutes=15)))
+        self.assertLess(page.index("Needs you"), page.index("<h2>Committees</h2>"))
+        self.assertLess(page.index("<h2>Committees</h2>"), page.index("<h2>Sessions</h2>"))
 
 
 def fake_gh_json(pages: dict, fail: str | None = None):
