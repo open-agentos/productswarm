@@ -24,12 +24,14 @@ import argparse
 import datetime as dt
 import html
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 import committees
+import ghql
 import governance
 import progress
 import reviewer_runs
@@ -80,6 +82,24 @@ def gh_json(*args: str) -> object:
     return json.loads(r.stdout or "null")
 
 
+COMMENTS_BATCH = 25   # tracking issues per GraphQL query: about one rate-limit point each
+COMMENTS_FIELD = ("i%d: issue(number: %d) { comments(first: 100) "
+                  "{ totalCount nodes { body author { login __typename } } } }")
+
+
+def tracking_comments(repo: str, numbers: list[int]) -> dict[int, list[dict]]:
+    """Each tracking issue's comments in REST's shape ({"user": {"login"}, "body"}), oldest
+    first: one GraphQL query per COMMENTS_BATCH issues, not one REST call per issue (#392).
+    An issue with more than 100 comments, or one the query didn't return, falls back to REST."""
+    out: dict[int, list[dict]] = {}
+    for n, issue in ghql.batched(repo, numbers, COMMENTS_FIELD, COMMENTS_BATCH).items():
+        nodes = ghql.complete((issue or {}).get("comments"))
+        out[n] = (gh_items(f"repos/{repo}/issues/{n}/comments?per_page=100") if nodes is None else
+                  [{"user": {"login": ghql.login(x.get("author"))}, "body": x.get("body") or ""}
+                   for x in nodes])
+    return out
+
+
 def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
           with_actions: bool = False, with_committees: bool = False) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
@@ -94,8 +114,7 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
         for it in gh_items(path):
             if "pull_request" not in it:
                 issues[it["number"]] = it
-    comments = {s["issue"]: gh_items(f"repos/{repo}/issues/{s['issue']}/comments?per_page=100")
-                for s in tracking_issues(issues.values())}
+    comments = tracking_comments(repo, [s["issue"] for s in tracking_issues(issues.values())])
     prs = gh_json("pr", "list", "--repo", repo, "--state", "open", "--limit", "100", "--json",
                   "number,title,url,author,isDraft,createdAt,reviewDecision,closingIssuesReferences,"
                   "headRefOid")
@@ -647,6 +666,73 @@ def default_repo() -> str | None:
     return m.group(1) if m else None
 
 
+# ---------------------------------------------------------------- staying inside the rate limit (#392)
+
+# What one run needs, with headroom. Against this repo on 2026-11-04 (#392's PR), a page
+# rebuild made 23 REST calls and 19 GraphQL queries (before #392: 258 and 9), and the digest
+# 5 and 8. The workflow token's allowance is 1,000 an hour of each, shared with the digest.
+PAGE_NEEDS = {"core": 80, "graphql": 50}
+DIGEST_NEEDS = {"core": 30, "graphql": 30}
+SPACING = dt.timedelta(minutes=5)       # a nudged rebuild waits this long after a published one
+WORKFLOW = "dashboard.yml"
+NUDGE_ACTOR = "github-actions[bot]"     # digest-nudge.yml's dispatches run as this actor
+
+
+def low_allowance(needs: dict[str, int]) -> str | None:
+    """Why there isn't enough rate-limit allowance left for a run, or None. `gh api rate_limit`
+    doesn't count against the allowance. If it can't be read, the run goes ahead."""
+    try:
+        res = gh_json("api", "rate_limit")["resources"]   # type: ignore[index]
+    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None
+    for kind, need in needs.items():
+        r = res.get(kind) or {}
+        if isinstance(r.get("remaining"), int) and r["remaining"] < need:
+            reset = dt.datetime.fromtimestamp(r.get("reset", 0), dt.timezone.utc)
+            return (f"{kind} API allowance low ({r['remaining']} of {r.get('limit')} left, a run needs "
+                    f"about {need}; resets {stamp(reset)})")
+    return None
+
+
+def nudged(env=None) -> bool:
+    """A workflow_dispatch from digest-nudge.yml, not a person's dispatch or the schedule."""
+    env = os.environ if env is None else env
+    actor = env.get("GITHUB_TRIGGERING_ACTOR") or env.get("GITHUB_ACTOR")
+    return env.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and actor == NUDGE_ACTOR
+
+
+PUBLISH_STEP = "deploy-pages"            # the step of a dashboard.yml run that publishes
+LOOK_BACK = 5                           # successful runs checked for the last one that published
+
+
+def last_published(repo: str) -> dt.datetime | None:
+    """When dashboard.yml last published: the newest of the last LOOK_BACK successful runs whose
+    deploy step succeeded. A run that skipped (spacing or allowance) also ends `success` once
+    its upload and deploy steps are conditional, so a run's own status isn't enough. One call
+    for the runs, then one jobs call per run until a published one; None if none of them did."""
+    runs = gh_json("api", f"repos/{repo}/actions/workflows/{WORKFLOW}/runs?status=success&per_page={LOOK_BACK}")
+    for run in runs["workflow_runs"][:LOOK_BACK]:   # type: ignore[index]
+        jobs = gh_json("api", f"repos/{repo}/actions/runs/{run['id']}/jobs")
+        for job in jobs["jobs"]:   # type: ignore[index]
+            for step in job.get("steps") or []:
+                if PUBLISH_STEP in (step.get("name") or "") and step.get("conclusion") == "success":
+                    return parse_ts(step.get("completed_at") or run["updated_at"])
+    return None
+
+
+def too_soon(repo: str, now: dt.datetime) -> str | None:
+    """Why a nudged rebuild should wait, or None: dashboard.yml last published less than
+    SPACING ago. Measured from a published run, not a skipped one, so a stream of nudges can't
+    keep restarting the wait. If the Actions API can't be read, the rebuild runs."""
+    try:
+        last = last_published(repo)
+    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None
+    if last and now - last < SPACING:
+        return f"last published {ago(last, now)}; nudged rebuilds wait {SPACING.seconds // 60} minutes"
+    return None
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Render the swarm dashboard to a static HTML file.")
     ap.add_argument("--repo", help="owner/name (default: this checkout's origin)")
@@ -661,6 +747,11 @@ def main(argv: list[str]) -> int:
         print("generate.py: can't tell the repo; pass --repo owner/name", file=sys.stderr)
         return 2
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    # Exit 0 without writing the page: the last good page stays up and the run isn't a failure.
+    skip = (too_soon(repo, now) if nudged() else None) or low_allowance(PAGE_NEEDS)
+    if skip:
+        print(f"generate.py: skipped, not published: {skip}")
+        return 0
     try:
         data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
                      with_committees=True)

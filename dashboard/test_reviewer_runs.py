@@ -129,6 +129,11 @@ class TimeTest(unittest.TestCase):
 FAKE_GH = r"""#!/usr/bin/env python3
 import json, os, sys
 a = sys.argv[1:]
+if a[:2] == ["api", "graphql"]:
+    with open(os.environ["FAKE_GH_LOG"], "a") as f:
+        f.write("graphql\n")
+    print(json.dumps(json.load(open(os.environ["FAKE_GH_DATA"])).get("graphql", {})))
+    sys.exit(0)
 path = next(x for x in a[1:] if not x.startswith("-") and "/" in x)
 with open(os.environ["FAKE_GH_LOG"], "a") as f:
     f.write(path + "\n")
@@ -167,15 +172,36 @@ class FetchTest(unittest.TestCase):
         out, log = self.fetch({
             f"{base}/actions/workflows/reviewer.yml/runs": [run(1)],
             f"{base}/actions/runs/1/jobs": [job("plan"), job(f"review #7 {A}")],
-            f"{base}/pulls/7/reviews": [review(A, 5)],
-            f"{base}/pulls/7/commits": [commit(A, 15)],
+            "graphql": {"data": {"repository": {"p7": {
+                "reviews": {"totalCount": 1, "nodes": [
+                    {"author": {"login": "productswarm-reviewer", "__typename": "Bot"},
+                     "commit": {"oid": A}, "submittedAt": ts(5), "state": "APPROVED"}]},
+                "commits": {"totalCount": 1, "nodes": [{"commit": {"oid": A, "committedDate": ts(15)}}]},
+            }}}},
         }, reviews={8: []})
         self.assertNotIn("error", out)
         self.assertEqual(set(out["reviews"]), {7, 8})       # open PR 8's reviews reused, not re-read
+        self.assertEqual(out["reviews"][7], [review(A, 5)])  # GraphQL's Bot login gets REST's [bot]
         self.assertEqual(list(out["commits"]), [7])          # no reviewer review on 8: no commit read
         self.assertFalse(any("/logs" in p for p in log), log)
-        self.assertFalse(any("pulls/8/" in p for p in log), log)
+        self.assertFalse(any("pulls/" in p for p in log), log)   # one GraphQL query, no REST per PR
+        self.assertEqual(log.count("graphql"), 1)
         self.assertEqual(model(out["runs"], out["jobs"], out["reviews"], out["commits"])["times"][0]["seconds"], 600)
+
+    def test_pr_with_over_100_reviews_falls_back_to_rest(self):
+        base = f"repos/{REPO}"
+        out, log = self.fetch({
+            f"{base}/actions/workflows/reviewer.yml/runs": [run(1)],
+            f"{base}/actions/runs/1/jobs": [job(f"review #7 {A}")],
+            "graphql": {"data": {"repository": {"p7": {
+                "reviews": {"totalCount": 101, "nodes": []},
+                "commits": {"totalCount": 0, "nodes": []}}}}},
+            f"{base}/pulls/7/reviews": [review(A, 5)],
+        })
+        self.assertEqual(out["reviews"][7], [review(A, 5)])
+        paths = [x.split("?")[0] for x in log]
+        self.assertIn(f"{base}/pulls/7/reviews", paths)
+        self.assertNotIn(f"{base}/pulls/7/commits", paths)
 
     def test_refuses_a_logs_path(self):
         with self.assertRaises(ValueError):

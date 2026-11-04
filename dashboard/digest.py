@@ -136,6 +136,9 @@ def main(argv: list[str]) -> int:
         print("digest.py: can't tell the repo; pass --repo owner/name", file=sys.stderr)
         return 2
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    if args.update and (low := g.low_allowance(g.DIGEST_NEEDS)):
+        print(f"digest.py: skipped, not edited: {low}")   # the issue keeps its last digest
+        return 0
     try:
         data = g.fetch(repo, now, args.days)
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:

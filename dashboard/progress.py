@@ -22,6 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import ghql
+
 ROOT = Path(__file__).resolve().parent.parent
 GATE_ISSUE = 331        # the planted-defect gate
 RED_ISSUE = 330         # the red check
@@ -120,6 +122,23 @@ def read(path: Path) -> str | None:
         return None
 
 
+REVIEWS_FIELD = ("p%d: pullRequest(number: %d) { reviews(first: 100) { totalCount nodes "
+                 "{ author { login __typename } submittedAt state body } } }")
+
+
+def red_reviews(repo: str, numbers: list[int]) -> dict[int, list[dict]]:
+    """The red check's reviews in REST's shape (the fields it reads), from one GraphQL query
+    per 20 PRs instead of one REST call per PR (#392). PRs with more than 100 reviews, or
+    that the query didn't return, are left out, so red_check reads them over REST."""
+    out = {}
+    for n, pr in ghql.batched(repo, numbers, REVIEWS_FIELD, 20).items():
+        nodes = ghql.complete((pr or {}).get("reviews"))
+        if nodes is not None:
+            out[n] = [{"user": {"login": ghql.login(x.get("author"))}, "submitted_at": x.get("submittedAt"),
+                       "state": x.get("state"), "body": x.get("body") or ""} for x in nodes]
+    return out
+
+
 def fetch(repo: str, gh_json, root: Path = ROOT) -> dict:
     """Everything the section needs. A part that fails to read is recorded as an error, so
     one bad call doesn't stop the page from publishing."""
@@ -133,7 +152,7 @@ def fetch(repo: str, gh_json, root: Path = ROOT) -> dict:
         out["errors"]["states"] = str(e)
         print(f"progress.py: issue states: {e}", file=sys.stderr)
     try:
-        out["red"] = _red_check().fetch(repo)
+        out["red"] = _red_check().fetch(repo, reviews=lambda ns: red_reviews(repo, ns))
     except ERRORS as e:
         out["errors"]["red"] = str(e)
         print(f"progress.py: red check: {e}", file=sys.stderr)

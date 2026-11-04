@@ -119,7 +119,9 @@ data = json.load(open(path_data))
 stdin = sys.stdin.read() if "--input" in a else None
 with open(os.environ["FAKE_GH_LOG"], "a") as f:
     f.write(json.dumps({"argv": a, "stdin": stdin}) + "\n")
-if a[:1] == ["api"] and "-X" not in a:
+if a[:2] == ["api", "graphql"]:
+    print(json.dumps({"data": {"repository": {}}}))   # no batched data: comments come over REST
+elif a[:1] == ["api"] and "-X" not in a and len(a) > 2:
     path = a[2]
     key = "open" if "state=open" in path else "closed" if "state=closed" in path else path.split("?")[0]
     for item in data.get(key, []):

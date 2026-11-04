@@ -19,6 +19,16 @@ It reads GitHub through `gh api`, so inside a swarm session it acts as the role'
 
 GitHub runs that schedule hours apart here, so the nudge in `.github/workflows/digest-nudge.yml` (shared with the digest) dispatches `dashboard.yml` on `main` when something happens: an issue or PR is opened, closed, reopened or relabelled, a PR is pushed or reviewed, or a Discussion post or comment is created or edited (#351). The nudge passes no event data and holds no secrets; `dashboard.yml` itself still runs only on its schedule and dispatch, and the schedule stays as the safety net. An open page reloads itself every 300 seconds with a `<meta http-equiv="refresh">` tag (plain HTML, no script), so it picks up a rebuild within about five minutes.
 
+### How often it rebuilds
+
+The workflow's token (`GITHUB_TOKEN`) gets about 1,000 REST calls and 1,000 GraphQL points an hour, shared with the digest. When every nudge rebuilt the page at well over 100 calls each, a busy hour ran it out and every run failed (#392). So:
+
+- **Nudged rebuilds are spaced.** A rebuild started by the nudge (a `workflow_dispatch` by `github-actions[bot]`) first looks for the last `dashboard.yml` run that published: it lists the newest 5 successful runs and reads their jobs, newest first, until one whose `deploy-pages` step succeeded (2 to 6 Actions API calls). A run that skipped also ends `success`, so it doesn't count. If the last publish was less than 5 minutes ago, it prints one line and exits 0 without publishing. The schedule and the next event catch up. A scheduled run and a person's manual dispatch always rebuild. So the page rebuilds at most about every 5 minutes from nudges, plus the schedule.
+- **A rebuild costs about 23 REST calls and 19 GraphQL queries** (it was 258 calls on 2026-11-04). Tracking-issue comments, the reviewer section's reviews and commits, and the red check's reviews are read 20 or 25 issues or PRs to a GraphQL query (`ghql.py`); an issue or PR with more than 100 comments or reviews falls back to REST. The Actions reviewer section reads the newest 15 sweeps, one jobs call each.
+- **A low allowance skips cleanly.** Before fetching, `generate.py` reads `gh api rate_limit`, which doesn't count against the allowance. If fewer than 80 REST calls or 50 GraphQL points are left (`PAGE_NEEDS`), it prints one line and exits 0 without publishing, so the last good page stays up and the run isn't a failure. `digest.py --update` does the same below 30 of each (`DIGEST_NEEDS`) and leaves the issue as it was.
+
+When `generate.py` skips, it writes no page, so `dashboard.yml` must skip its upload and deploy steps for the run to end green: `if: hashFiles('_site/index.html') != ''` on both. That's a workflow change, so it's proposed in #392's PR for the owner to commit (#32); until then a skipped run fails at the upload step, and the last good page still stays up.
+
 The page is **public**, because this repo is. It shows nothing that isn't already public in the repo's issues and comments, and it carries `noindex` so search engines skip it, per the owner's choice on #33. GitHub may delay scheduled runs, and disables them on public repos after 60 days without repo activity.
 
 ## Needs you
@@ -119,7 +129,7 @@ The stage issues' states, and #331's, come from one GraphQL query, since closed 
 
 `reviewer_runs.py` builds this section (#356). It covers the last 7 days:
 
-- **Sweeps:** runs of `reviewer.yml` (the newest 30 at most), each with when and how it started (`schedule`, `nudge` for a `workflow_dispatch` by `github-actions[bot]` from `reviewer-nudge.yml`, or `manual (<login>)` for a person's dispatch), its conclusion, and the `review #N <sha>` jobs it ran (`REVIEW_JOB` in `launcher/actions_review.py`). A successful sweep with no review jobs says "nothing to review".
+- **Sweeps:** runs of `reviewer.yml` (the newest 15 at most, #392), each with when and how it started (`schedule`, `nudge` for a `workflow_dispatch` by `github-actions[bot]` from `reviewer-nudge.yml`, or `manual (<login>)` for a person's dispatch), its conclusion, and the `review #N <sha>` jobs it ran (`REVIEW_JOB` in `launcher/actions_review.py`). A successful sweep with no review jobs says "nothing to review".
 - **Success rate:** "N of M review jobs succeeded", counting finished review jobs, not sweeps, and listing the ones that didn't succeed.
 - **Commit to review:** for each head the reviewer App reviewed in the window, the time from that commit's committer date to the App's first review of it; the median and the longest. GitHub doesn't give push time, so this is commit time. A review counts for the commit it was made on, never for a later head.
 - **Unreviewed builder heads:** a count of the builder PRs `unreviewed()` flags, linked. They're in the needs-you list too.
