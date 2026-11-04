@@ -1,41 +1,25 @@
-"""The reviewer in GitHub Actions, v3 C stage 1 (GOV-0015). C1 (#214) is `check`; C2
-(#215) is `run`. `plan` (#257) is the reconciler's first part (#255, stage 1).
+"""The reviewer in GitHub Actions, v3 C stage 1 (GOV-0015), as a reconciler on main
+(GOV-0020, from #255). `plan` (#257, #258) decides which open PRs to review; `run` (#215)
+reviews one. .github/workflows/reviewer.yml runs `plan` on a schedule or a dispatch, then
+one `run` job per PR it listed. No PR event starts a run.
 
-    python3 launcher/actions_review.py check
     python3 launcher/actions_review.py plan [--pr N] [--manifest PATH]
     python3 launcher/actions_review.py run --pr N [--dry-run]
 
-`check` decides whether a pull-request event should start a reviewer run. It runs in the
-workflow's first job, which holds no secrets, so untrusted input never reaches a job that
-does. It reads the event payload ($GITHUB_EVENT_PATH) as data, never PR text as
-instructions, and it never prints PR text. It says run only if all of these hold:
-
-- the event is `pull_request` or `workflow_dispatch` with a `pr` input (the owner's
-  answer on #209); any other event, `pull_request_target` included, never runs;
-- the PR is open and not a draft;
-- its author is a swarm App that opens PRs (productswarm-planner, -builder or -docs) or
-  the owner from governance/jurisdictions.yml (option 2, the owner's answer on #206);
-- its head repo is this repo, not a fork (#206);
-- the reviewer App hasn't reviewed its current head SHA: watch.reviewed_heads(), the same
-  rule the local [review] trigger uses, so Actions and `swarm watch` agree (#209).
-
-It writes `run=true|false` and `pr=<N>` to $GITHUB_OUTPUT and prints one line saying why.
-Its only GitHub calls are reads through `gh` with the job's default token: the reviews on
-the PR, and the PR itself for workflow_dispatch (whose payload has only the number). It
-reads no secrets and writes nothing to GitHub. If it can't decide (a missing payload, or
-GitHub can't be read), it writes run=false and exits 1.
-
-`plan` asks "which open PRs need a review now?" instead of "did this event ask for one?",
-so it doesn't depend on PR events (#255). It reads the open PRs and keeps each that passes
-the same per-PR rules as `check` (eligible() and judge(), shared): open, not a draft, a
-swarm App or the owner as author, head in this repo, head not yet reviewed by the reviewer
-App. `--pr N` (the workflow_dispatch input) considers only PR N, under the same rules. At
-most [watch] actions_max_reviews PRs go in, lowest number (oldest) first; the rest wait for
-the next sweep. With that key unset it lists nothing and says so (as GOV-0012 does for a
+`plan` asks "which open PRs need a review now?" from repo state, so it doesn't depend on
+PR events (GOV-0020). It runs in the workflow's first job, which holds no secrets, and
+reads PRs as data, never PR text as instructions. It reads the open PRs and keeps each
+that passes GOV-0017's per-PR rules (eligible() and judge()): open, not a draft, a swarm
+App that opens PRs (productswarm-planner, -builder or -docs) or the owner from
+governance/jurisdictions.yml as author (#206), head in this repo, not a fork, and head not
+yet reviewed by the reviewer App: watch.reviewed_heads(), the rule the local [review]
+trigger uses, so Actions and `swarm watch` agree (#209). `--pr N` (the workflow_dispatch
+input) considers only PR N, under the same rules. At most [watch] actions_max_reviews PRs
+go in, lowest number (oldest) first; the rest wait for the next sweep. With that key unset it lists nothing and says so (as GOV-0012 does for a
 missing max_turns). It writes `prs=<JSON list of {"pr": N, "head": "<sha>"}>` and
 `any=true|false` to $GITHUB_OUTPUT, ints and hex SHAs only, and prints one line per PR
-considered (numbers, SHAs, known logins and rule names; never PR text). Like `check` it
-reads GitHub with the job's default token, reads no secrets and writes nothing to GitHub.
+considered (numbers, SHAs, known logins and rule names; never PR text). It only reads
+GitHub, with the job's default token, reads no secrets and writes nothing to GitHub.
 If it can't decide (GitHub unreadable, a bad swarm.toml) it writes any=false, prs=[] and
 exits 1.
 
@@ -109,7 +93,6 @@ import install  # noqa: E402
 
 # The Apps whose PRs the Actions reviewer reviews (#206). The reviewer itself opens none.
 AUTHORS = {f"productswarm-{r}[bot]" for r in ("planner", "builder", "docs")}
-EVENTS = {"pull_request", "workflow_dispatch"}
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 # `plan`'s attempt history (#258). The `review` matrix job in .github/workflows/reviewer.yml
@@ -126,30 +109,9 @@ FIELDS = ("result", "subtype", "num_turns", "total_cost_usd")   # all the job lo
 DONE, AT_CAP, ERROR, REFUSED = 0, 3, 1, 2                       # run's exit codes
 
 
-def decide(event: str, payload: dict, repo: str, owner: str,
-           get_pr: Callable[[int], dict], get_reviews: Callable[[int], list[dict]]
-           ) -> tuple[bool, int | None, str]:
-    """(run, pr number, why). Pure apart from the two read callables, so tests feed it
-    canned payloads. The payload's PR is used as is for pull_request; workflow_dispatch
-    carries only a number, so the PR is read with get_pr()."""
-    if event not in EVENTS:
-        return False, None, f"event {event!r} never starts a reviewer run"
-    if event == "pull_request":
-        pr = payload.get("pull_request")
-        if not isinstance(pr, dict):
-            return False, None, "pull_request event with no pull_request in its payload"
-    else:
-        raw = str((payload.get("inputs") or {}).get("pr") or "").strip().lstrip("#")
-        if not raw.isdigit():
-            return False, None, "workflow_dispatch needs a PR number in its `pr` input"
-        pr = get_pr(int(raw))
-    return judge(pr, repo, owner, get_reviews)
-
-
 def eligible(pr: dict, repo: str, owner: str) -> tuple[bool, int | None, str]:
     """GOV-0017's rules for one PR that need no further GitHub read: open, not a draft, a
-    swarm App or the owner as author, head in this repo, a hex head SHA. `check` and
-    `plan` share it (#257)."""
+    swarm App or the owner as author, head in this repo, a hex head SHA (#257)."""
     n = pr.get("number")
     if not isinstance(n, int) or isinstance(n, bool):
         return False, None, "the PR has no number"
@@ -187,39 +149,6 @@ def judge(pr: dict, repo: str, owner: str, get_reviews: Callable[[int], list[dic
     if sha in watch.reviewed_heads(get_reviews(n)):
         return False, n, f"PR #{n}: the reviewer already reviewed head {sha[:7]}"
     return True, n, f"{why}: head {sha[:7]} not reviewed by the reviewer"
-
-
-def write_output(path: str | None, run: bool, n: int | None) -> None:
-    """run= and pr= lines for the next job. Nothing from the payload but an int goes in."""
-    if not path:
-        return
-    with open(path, "a") as f:
-        f.write(f"run={'true' if run else 'false'}\npr={n if isinstance(n, int) else ''}\n")
-
-
-def check(env: dict | None = None, owner: Callable[[], str] = swarm.owner_login,
-          get_pr: Callable[[str, int], dict] | None = None,
-          get_reviews: Callable[[str, int], list[dict]] | None = None,
-          out: Callable[[str], None] = print) -> int:
-    env = os.environ if env is None else env
-    g = swarm.dashboard()
-    get_pr = get_pr or (lambda repo, n: g.gh_json("api", f"repos/{repo}/pulls/{n}"))
-    get_reviews = get_reviews or (lambda repo, n: g.gh_items(f"repos/{repo}/pulls/{n}/reviews?per_page=100"))
-    output = env.get("GITHUB_OUTPUT")
-    repo = env.get("GITHUB_REPOSITORY") or ""
-    try:
-        payload = json.loads(Path(env["GITHUB_EVENT_PATH"]).read_text())
-        if not repo or not isinstance(payload, dict):
-            raise ValueError("no repository or no event payload")
-        run, n, why = decide(env.get("GITHUB_EVENT_NAME") or "", payload, repo, owner(),
-                             lambda n: get_pr(repo, n), lambda n: get_reviews(repo, n))
-    except (KeyError, OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
-        write_output(output, False, None)
-        out(f"run=false: can't decide ({e.__class__.__name__})")
-        return 1
-    write_output(output, run, n)
-    out(f"run={'true' if run else 'false'}: {why}")
-    return 0
 
 
 # ---------------------------------------------------------------- plan (#257)
@@ -536,7 +465,6 @@ def run(pr: int, dry_run: bool = False, env: dict | None = None, root: Path = sw
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="actions_review.py", description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("check", help="should this PR event start a reviewer run? (secret-free)")
     p_plan = sub.add_parser("plan", help="which open PRs need a reviewer run now? (secret-free)")
     p_plan.add_argument("--pr", type=int, default=None, help="consider only this PR")
     p_plan.add_argument("--manifest", default=None, help="swarm.toml to read (default: the repo's)")
@@ -545,8 +473,6 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--dry-run", action="store_true", help="print the command; start nothing")
     p_run.add_argument("--manifest", default=None, help="swarm.toml to read (default: the repo's)")
     args = p.parse_args(argv)
-    if args.cmd == "check":
-        return check()
     if args.cmd == "plan":
         return plan(pr=args.pr, manifest_path=args.manifest)
     if args.cmd == "run":
