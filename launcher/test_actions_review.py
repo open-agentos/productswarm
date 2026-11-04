@@ -6,6 +6,7 @@ Run: python3 -m unittest discover -s launcher
 import json
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -18,6 +19,7 @@ import watch  # noqa: E402
 REPO = "open-agentos/productswarm"
 OWNER = "mattmcalister"
 SHA1, SHA2 = "a" * 40, "b" * 40
+T0 = 1793793600.0          # 2026-11-04T12:00:00Z
 
 
 def pr(n=70, author="productswarm-builder[bot]", head_repo=REPO, sha=SHA1, draft=False,
@@ -230,6 +232,9 @@ class Plan(unittest.TestCase):
         self.open_prs = []           # canned GET /pulls?state=open
         self.prs = {}                # PR -> canned REST PR, for --pr
         self.reviews = {}            # PR -> canned REST reviews
+        self.runs = []               # canned workflow runs (#258)
+        self.jobs = {}               # run id -> canned jobs
+        self.pushed = {}             # head SHA -> its commit date, epoch seconds
         self.reads = []
         self.lines = []
 
@@ -253,7 +258,20 @@ class Plan(unittest.TestCase):
             self.reads.append(("reviews", repo, n))
             return self.reviews.get(n, [])
 
+        def list_runs(repo, wf, since):
+            self.reads.append(("runs", repo, wf, since))
+            return [r for r in self.runs if actions_review.iso_time(r["created_at"]) >= since]
+
+        def get_jobs(repo, run):
+            self.reads.append(("jobs", repo, run))
+            return self.jobs.get(run, [])
+
+        def head_time(repo, sha):
+            self.reads.append(("commit", repo, sha))
+            return self.pushed.get(sha, T0)
+
         args = dict(owner=lambda: OWNER, list_prs=list_prs, get_pr=get_pr, get_reviews=get_reviews,
+                    list_runs=list_runs, get_jobs=get_jobs, head_time=head_time,
                     manifest_path=self.toml, out=self.lines.append)
         args.update(kw)
         code = actions_review.plan(e, pr=pr_arg, **args)
@@ -408,6 +426,177 @@ class Plan(unittest.TestCase):
         _, prs, _ = self.run_plan(hold=held)
         self.assertEqual(prs, [{"pr": 72, "head": SHA2}, {"pr": 74, "head": SHA3}])
         self.assertEqual(self.lines[0], "out: PR #70: a run is in flight")
+
+    # ---- attempts from the Actions run history (#258)
+
+    def attempt(self, run_id, n, sha, status="completed", conclusion="failure", minutes=10,
+                run_status=None):
+        """A run minutes after T0 holding one REVIEW_JOB job for PR n at sha."""
+        created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(T0 + 60 * minutes))
+        self.runs.append({"id": run_id, "created_at": created,
+                          "status": run_status or ("completed" if status == "completed" else "in_progress")})
+        self.jobs.setdefault(run_id, []).extend([
+            {"name": "plan", "status": "completed", "conclusion": "success"},
+            {"name": actions_review.review_job(n, sha), "status": status, "conclusion":
+             conclusion if status == "completed" else None}])
+
+    def test_job_name_contract(self):
+        self.assertEqual(actions_review.review_job(70, SHA1), f"review #70 {SHA1}")
+        self.assertEqual(actions_review.parse_review_job(f"review #70 {SHA1}"), (70, SHA1))
+        for other in ("review", "plan", f"review #70 {SHA1[:7]}", f"review #x {SHA1}",
+                      f"review #70 {SHA1} ", None, 7):
+            self.assertIsNone(actions_review.parse_review_job(other), other)
+
+    def test_no_attempts_is_in(self):
+        self.open_prs = [pr(70)]
+        self.runs = [{"id": 1, "created_at": "2026-11-04T12:00:00Z", "status": "completed"}]
+        self.jobs = {1: [{"name": "plan", "status": "completed", "conclusion": "success"}]}
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_queued_attempt_is_out(self):
+        self.open_prs = [pr(70)]
+        self.attempt(901, 70, SHA1, status="queued")
+        _, prs, any_ = self.run_plan()
+        self.assertEqual((prs, any_), ([], "false"))
+        self.assertEqual(self.lines[0], f"out: PR #70: head {SHA1[:7]} is being reviewed in run 901 (queued)")
+
+    def test_in_progress_attempt_is_out(self):
+        self.open_prs = [pr(70)]
+        self.attempt(901, 70, SHA1, status="in_progress")
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [])
+        self.assertIn("is being reviewed in run 901 (in_progress)", self.lines[0])
+
+    def test_completed_success_is_out(self):     # e.g. it ran but posted no review
+        self.open_prs = [pr(70)]
+        self.attempt(901, 70, SHA1, conclusion="success")
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [])
+        self.assertEqual(self.lines[0],
+                         f"out: PR #70: head {SHA1[:7]} already attempted in run 901, conclusion success")
+
+    def test_completed_failure_is_out(self):     # e.g. ended at its budget: not every sweep
+        self.open_prs = [pr(70)]
+        self.attempt(901, 70, SHA1, conclusion="failure")
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [])
+        self.assertIn("already attempted in run 901, conclusion failure", self.lines[0])
+
+    def test_cancelled_attempt_may_be_retried(self):
+        self.open_prs = [pr(70)]
+        self.attempt(901, 70, SHA1, conclusion="cancelled")
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_newest_attempt_decides(self):       # failed, then the owner's restart was cancelled
+        self.open_prs = [pr(70)]
+        self.attempt(901, 70, SHA1, conclusion="failure", minutes=10)
+        self.attempt(905, 70, SHA1, conclusion="cancelled", minutes=30)
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_attempt_on_an_older_head_does_not_block_the_new_head(self):
+        self.open_prs = [pr(70, sha=SHA2)]
+        self.attempt(901, 70, SHA1, conclusion="failure")
+        self.attempt(902, 70, SHA1, status="in_progress")
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA2}])
+
+    def test_attempt_on_another_pr_does_not_block(self):
+        self.open_prs = [pr(70), pr(72)]          # same SHA, different PR
+        self.attempt(901, 72, SHA1, conclusion="failure")
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_held_heads_do_not_use_the_cap(self):
+        self.cap("actions_max_reviews = 1")
+        self.open_prs = [pr(70), pr(72, sha=SHA2)]
+        self.attempt(901, 70, SHA1, status="in_progress")
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 72, "head": SHA2}])
+
+    def test_pr_arg_retries_a_failed_attempt(self):
+        self.prs[70] = pr(70)
+        self.attempt(901, 70, SHA1, conclusion="failure")
+        _, prs, _ = self.run_plan(pr_arg=70)
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+        self.assertNotIn(("jobs", REPO, 901), self.reads)   # a finished run can't block --pr
+
+    def test_pr_arg_does_not_retry_a_running_attempt(self):
+        self.prs[70] = pr(70)
+        self.attempt(901, 70, SHA1, status="in_progress")
+        _, prs, _ = self.run_plan(pr_arg=70)
+        self.assertEqual(prs, [])
+        self.assertIn("is being reviewed in run 901", self.lines[0])
+
+    def test_pr_arg_still_skips_a_reviewed_head(self):
+        self.prs[70] = pr(70)
+        self.reviews[70] = [review(SHA1)]
+        self.attempt(901, 70, SHA1, conclusion="success")
+        _, prs, _ = self.run_plan(pr_arg=70)
+        self.assertEqual(prs, [])
+
+    def test_runs_are_read_only_since_the_head_was_pushed(self):
+        self.open_prs = [pr(70)]
+        self.pushed[SHA1] = T0 + 3600
+        self.attempt(901, 70, SHA1, conclusion="failure", minutes=10)   # before that, less skew
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+        since = [r[3] for r in self.reads if r[0] == "runs"]
+        self.assertEqual(since, [T0 + 3600 - actions_review.CLOCK_SKEW])
+        self.assertNotIn(("jobs", REPO, 901), self.reads)
+
+    def test_jobs_are_read_once_and_newest_first(self):
+        self.open_prs = [pr(70), pr(72, sha=SHA2)]
+        self.attempt(901, 70, SHA1, conclusion="failure", minutes=10)
+        self.attempt(902, 72, SHA2, status="in_progress", minutes=20)
+        self.run_plan()
+        jobs = [r[2] for r in self.reads if r[0] == "jobs"]
+        self.assertEqual(jobs, [902, 901])
+
+    def test_read_cap_holds_an_unresolved_head(self):
+        self.open_prs = [pr(70)]
+        self.attempt(901, 70, SHA1, conclusion="failure", minutes=1)
+        for i in range(actions_review.MAX_JOB_READS):
+            self.runs.append({"id": 1000 + i, "created_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(T0 + 600 + 60 * i)), "status": "completed"})
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [])
+        self.assertIn("can't be ruled out", self.lines[0])
+        self.assertEqual(len([r for r in self.reads if r[0] == "jobs"]), actions_review.MAX_JOB_READS)
+
+    def test_workflow_file_from_the_ref(self):
+        wf = actions_review.workflow_file
+        self.assertEqual(wf({"GITHUB_WORKFLOW_REF":
+                             f"{REPO}/.github/workflows/reconciler.yml@refs/heads/main"}), "reconciler.yml")
+        self.assertEqual(wf({}), "reviewer.yml")
+        self.assertEqual(wf({"GITHUB_WORKFLOW_REF": "x/y/../../evil?a=b@main"}), "reviewer.yml")
+        self.open_prs = [pr(70)]
+        self.run_plan(env={"GITHUB_WORKFLOW_REF": f"{REPO}/.github/workflows/reviewer.yml@refs/heads/main"})
+        self.assertEqual([r[2] for r in self.reads if r[0] == "runs"], ["reviewer.yml"])
+
+    def test_run_history_unreadable_fails_closed(self):
+        self.open_prs = [pr(70)]
+
+        def broken(repo, run):
+            raise RuntimeError("gh api failed: HTTP 403")
+        self.attempt(901, 70, SHA1)
+        code, prs, any_ = self.run_plan(get_jobs=broken)
+        self.assertEqual((code, prs, any_), (1, [], "false"))
+
+    def test_commit_time(self):
+        self.assertEqual(actions_review.commit_time(
+            {"commit": {"committer": {"date": "2026-11-04T12:00:00Z"}}}), T0)
+        for bad in (None, {}, {"commit": {"committer": {"date": "yesterday"}}}):
+            with self.assertRaises(ValueError):
+                actions_review.commit_time(bad)
+
+    def test_still_writes_nothing_to_github(self):
+        self.open_prs = [pr(70)]
+        self.attempt(901, 70, SHA1, conclusion="cancelled")
+        self.run_plan()
+        self.assertTrue(all(r[0] in {"list", "reviews", "runs", "jobs", "commit"} for r in self.reads))
 
     def test_main_parses_plan(self):
         with unittest.mock.patch.object(actions_review, "plan", return_value=0) as p:

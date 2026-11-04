@@ -37,7 +37,19 @@ missing max_turns). It writes `prs=<JSON list of {"pr": N, "head": "<sha>"}>` an
 considered (numbers, SHAs, known logins and rule names; never PR text). Like `check` it
 reads GitHub with the job's default token, reads no secrets and writes nothing to GitHub.
 If it can't decide (GitHub unreadable, a bad swarm.toml) it writes any=false, prs=[] and
-exits 1. hold= is the seam for in-flight and already-attempted heads (part 2).
+exits 1.
+
+`plan` also leaves out a head the reviewer workflow has already tried (#258), from the
+Actions run history rather than a local file, the rule `swarm watch` keeps in watch.json.
+An attempt is a `review` matrix job named REVIEW_JOB (`review #<pr> <head sha>`). A head
+whose newest attempt is queued or in progress is out, so GOV-0019's cancel-in-progress
+never cancels a live review of it; one whose newest attempt completed with any conclusion
+but `cancelled` is out too, so a run that ended at its budget isn't restarted every sweep.
+`--pr N` (the owner's dispatch) still leaves out an in-flight head but retries a completed
+attempt: that is the owner's restart. The read is bounded: only this workflow's runs
+created since the head's commit (less CLOCK_SKEW), newest first, stopping at the head's
+newest attempt, and at most MAX_JOB_READS runs' jobs per plan; past that, an unresolved
+head is held, never started twice. It needs `actions: read` and stays read-only.
 
 `run --pr N` runs one reviewer pass on PR N, in the workflow's second job, with the same
 limits as a run `swarm watch` starts:
@@ -72,6 +84,7 @@ anywhere and needs no credential.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -98,6 +111,14 @@ import install  # noqa: E402
 AUTHORS = {f"productswarm-{r}[bot]" for r in ("planner", "builder", "docs")}
 EVENTS = {"pull_request", "workflow_dispatch"}
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+# `plan`'s attempt history (#258). The `review` matrix job in .github/workflows/reviewer.yml
+# must be named exactly this (full SHA): it is how plan finds earlier attempts on a head.
+REVIEW_JOB = "review #{pr} {head}"
+REVIEW_JOB_RE = re.compile(r"review #(\d+) ([0-9a-f]{40})")
+WORKFLOW = "reviewer.yml"     # whose runs plan reads, when GITHUB_WORKFLOW_REF doesn't say
+MAX_JOB_READS = 50            # runs whose jobs one plan may read
+CLOCK_SKEW = 600              # seconds: a commit's date may be a little after its push
 
 # `run` (#215)
 CREDENTIALS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")   # either; neither preferred (#208)
@@ -212,9 +233,100 @@ def max_reviews(manifest_path: Path | str) -> int | None:
 
 
 def no_hold(n: int, sha: str) -> str | None:
-    """The seam for part 2 (in-flight and already-attempted heads): a reason to leave
-    PR n at head sha out of the plan, or None. Today nothing is held."""
+    """A hold that holds nothing (tests of the per-PR rules use it)."""
     return None
+
+
+def review_job(pr: int, head: str) -> str:
+    """The name reviewer.yml's `review` job must have for PR pr at head (REVIEW_JOB)."""
+    return REVIEW_JOB.format(pr=pr, head=head)
+
+
+def parse_review_job(name: object) -> tuple[int, str] | None:
+    """(pr, head) from a REVIEW_JOB job name, or None for any other job."""
+    m = REVIEW_JOB_RE.fullmatch(name) if isinstance(name, str) else None
+    return (int(m.group(1)), m.group(2)) if m else None
+
+
+def iso_time(value: object) -> float | None:
+    """Seconds since the epoch from a GitHub ISO 8601 time, or None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+class History:
+    """The reviewer workflow's earlier attempts, as hold(n, sha) for make_plan (#258).
+
+    list_runs(since) gives the workflow's runs created at or after since (epoch seconds),
+    get_jobs(run id) a run's jobs, head_time(sha) the head commit's date (epoch seconds).
+    Jobs are read lazily, newest run first, cached across PRs, and at most max_reads runs'
+    worth per plan. retry_completed is --pr: a completed attempt doesn't hold."""
+
+    def __init__(self, list_runs: Callable[[float], list[dict]], get_jobs: Callable[[int], list[dict]],
+                 head_time: Callable[[str], float], retry_completed: bool = False,
+                 max_reads: int = MAX_JOB_READS):
+        self.list_runs, self.get_jobs, self.head_time = list_runs, get_jobs, head_time
+        self.retry_completed, self.max_reads = retry_completed, max_reads
+        self.jobs: dict[int, list[dict]] = {}
+
+    def newest_attempt(self, n: int, sha: str) -> tuple[dict | None, dict | None, bool]:
+        """(run, job) of the newest attempt on PR n at head sha, and whether the search
+        was complete (False when it stopped at max_reads first)."""
+        def key(run):
+            return (iso_time(run.get("created_at")) or 0, run.get("id") or 0)
+        runs = [r for r in self.list_runs(self.head_time(sha) - CLOCK_SKEW)
+                if isinstance(r, dict) and isinstance(r.get("id"), int)]
+        for run in sorted(runs, key=key, reverse=True):
+            if self.retry_completed and run.get("status") == "completed":
+                continue      # nothing in a finished run is in flight, and --pr retries the rest
+            if run["id"] not in self.jobs:
+                if len(self.jobs) >= self.max_reads:
+                    return None, None, False
+                self.jobs[run["id"]] = [j for j in self.get_jobs(run["id"]) if isinstance(j, dict)]
+            for job in self.jobs[run["id"]]:
+                if parse_review_job(job.get("name")) == (n, sha):
+                    return run, job, True
+        return None, None, True
+
+    def __call__(self, n: int, sha: str) -> str | None:
+        run, job, complete = self.newest_attempt(n, sha)
+        if not complete:
+            return (f"head {sha[:7]}: no attempt found in the {self.max_reads} newest runs "
+                    "read, so one can't be ruled out")
+        if job is None:
+            return None
+        status, conclusion = job.get("status"), job.get("conclusion")
+        if status != "completed":
+            return f"head {sha[:7]} is being reviewed in run {run['id']} ({status})"
+        if conclusion == "cancelled" or self.retry_completed:
+            return None
+        return f"head {sha[:7]} already attempted in run {run['id']}, conclusion {conclusion}"
+
+
+def workflow_file(env: dict) -> str:
+    """This workflow's file name from GITHUB_WORKFLOW_REF
+    (owner/repo/.github/workflows/<file>@<ref>), else WORKFLOW."""
+    ref = (env.get("GITHUB_WORKFLOW_REF") or "").split("@", 1)[0]
+    name = ref.rsplit("/", 1)[-1]
+    return name if re.fullmatch(r"[\w.-]+\.ya?ml", name) else WORKFLOW
+
+
+def gh_list(path: str, key: str) -> list[dict]:
+    """Every item under key of a paginated endpoint that wraps its list in an object (the
+    Actions runs and jobs endpoints)."""
+    r = subprocess.run(["gh", "api", "--paginate", path, "--jq", f".{key}[]"],
+                       capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(f"gh api {path} failed: {r.stderr.strip()[:300]}")
+    return [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
+
+
+def utc(t: float) -> str:
+    return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def make_plan(prs: list[dict], repo: str, owner: str, cap: int,
@@ -243,6 +355,16 @@ def make_plan(prs: list[dict], repo: str, owner: str, cap: int,
     return chosen, lines
 
 
+def commit_time(commit: object) -> float:
+    """The committer date of a REST commit, in epoch seconds. Raises ValueError."""
+    date = (((commit or {}).get("commit") or {}).get("committer") or {}).get("date") \
+        if isinstance(commit, dict) else None
+    t = iso_time(date)
+    if t is None:
+        raise ValueError("a head commit has no date")
+    return t
+
+
 def write_plan(path: str | None, chosen: list[dict]) -> None:
     """prs= and any= lines for the next job: ints and hex SHAs only."""
     if not path:
@@ -257,13 +379,24 @@ def plan(env: dict | None = None, pr: int | None = None, owner: Callable[[], str
          get_pr: Callable[[str, int], dict] | None = None,
          get_reviews: Callable[[str, int], list[dict]] | None = None,
          manifest_path: Path | str | None = None,
-         hold: Callable[[int, str], str | None] = no_hold,
+         hold: Callable[[int, str], str | None] | None = None,
+         list_runs: Callable[[str, str, float], list[dict]] | None = None,
+         get_jobs: Callable[[str, int], list[dict]] | None = None,
+         head_time: Callable[[str, str], float] | None = None,
          out: Callable[[str], None] = print) -> int:
     """List the open PRs the reviewer should review now (or only PR pr, for --pr). Reads
     with the job's default token, writes nothing to GitHub, reads no secrets. Exit 0 when
-    it decided (even on an empty plan), 1 when it couldn't (then any=false, prs=[])."""
+    it decided (even on an empty plan), 1 when it couldn't (then any=false, prs=[]).
+    hold defaults to a History of this workflow's runs (#258)."""
     env = os.environ if env is None else env
     g = swarm.dashboard()
+    list_runs = list_runs or (lambda repo, wf, since: gh_list(
+        f"repos/{repo}/actions/workflows/{wf}/runs?created=%3E%3D{utc(since)}&per_page=100",
+        "workflow_runs"))
+    get_jobs = get_jobs or (lambda repo, run: gh_list(
+        f"repos/{repo}/actions/runs/{run}/jobs?per_page=100", "jobs"))
+    head_time = head_time or (lambda repo, sha: commit_time(
+        g.gh_json("api", f"repos/{repo}/commits/{sha}")))
     list_prs = list_prs or (lambda repo: g.gh_items(f"repos/{repo}/pulls?state=open&per_page=100"))
     get_pr = get_pr or (lambda repo, n: g.gh_json("api", f"repos/{repo}/pulls/{n}"))
     get_reviews = get_reviews or (lambda repo, n: g.gh_items(f"repos/{repo}/pulls/{n}/reviews?per_page=100"))
@@ -278,6 +411,11 @@ def plan(env: dict | None = None, pr: int | None = None, owner: Callable[[], str
             out("plan: nothing listed: swarm.toml sets no [watch] actions_max_reviews (#257)")
             return 0
         prs = [get_pr(repo, pr)] if pr is not None else list_prs(repo)
+        if hold is None:
+            wf = workflow_file(env)
+            hold = History(lambda since: list_runs(repo, wf, since),
+                           lambda run: get_jobs(repo, run),
+                           lambda sha: head_time(repo, sha), retry_completed=pr is not None)
         if not isinstance(prs, list):
             raise ValueError("the PR list is not a list")
         chosen, lines = make_plan(prs, repo, owner(), cap, lambda n: get_reviews(repo, n), hold)
