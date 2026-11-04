@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 
 import governance
+import progress
 import reviewer_runs
 import spend
 
@@ -78,8 +79,12 @@ def gh_json(*args: str) -> object:
     return json.loads(r.stdout or "null")
 
 
-def fetch(repo: str, now: dt.datetime, days: int) -> dict:
-    """Everything the page needs, as plain API data. build() does the rest."""
+def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
+          with_actions: bool = False) -> dict:
+    """Everything the page needs, as plain API data. build() does the rest. `with_progress`
+    also reads the v3 progress section's data (progress.py), and `with_actions` the Actions
+    reviewer section's (reviewer_runs.py); only the page shows them, so swarm's snapshot()
+    and the digest leave both off and make no Actions API calls."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
     for path in (f"repos/{repo}/issues?state=open&per_page=100",
@@ -99,7 +104,9 @@ def fetch(repo: str, now: dt.datetime, days: int) -> dict:
     except OSError:
         index = None   # the section says so; the rest of the page still builds
     return {"repo": repo, "issues": list(issues.values()), "comments": comments, "prs": prs or [],
-            "reviews": reviews, "index": index, "actions": reviewer_runs.fetch(repo, now, reviews)}
+            "reviews": reviews, "index": index,
+            "progress": progress.fetch(repo, gh_json) if with_progress else None,
+            "actions": reviewer_runs.fetch(repo, now, reviews) if with_actions else None}
 
 
 # ---------------------------------------------------------------- deriving state
@@ -317,6 +324,7 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
             "governance": governance.build(data.get("index"), gov, data["issues"], now,
                                            now - dt.timedelta(days=window), parse_ts,
                                            time_to_live, ttl_date),
+            "progress": progress.build(data["progress"]) if data.get("progress") else None,
             "reviewer_runs": reviewer_runs.build(
                 data.get("actions"), [p for p in prs if not p["draft"] and unreviewed(p)], now),
             "spend": {"per_day": per_day, "today": per_day[today],
@@ -595,6 +603,8 @@ def render(m: dict) -> str:
 
     out.append(governance.render(m["governance"], repo, now, m["days"], ago, stamp))
 
+    if m.get("progress"):
+        out.append(progress.render(m["progress"], repo))
     out.append(reviewer_runs.render(m["reviewer_runs"], repo, now, ago, stamp))
 
     sp = m["spend"]
@@ -641,7 +651,7 @@ def main(argv: list[str]) -> int:
         return 2
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     try:
-        data = fetch(repo, now, args.days)
+        data = fetch(repo, now, args.days, with_progress=True, with_actions=True)
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
         return 1

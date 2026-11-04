@@ -13,6 +13,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -850,6 +851,30 @@ class RealShellTest(unittest.TestCase):
                                               "--permission-mode", "auto", "--disallowedTools", *swarm.DENY,
                                               "--max-budget-usd", "15", "--max-turns", "200",
                                               "--output-format", "json"])
+
+
+class SnapshotTest(unittest.TestCase):
+    """swarm ls, inbox and every watch tick go through snapshot(); only the page reads the
+    Actions API (#356, the review on #378)."""
+
+    def actions_calls(self, call):
+        calls = []
+
+        def fake(cmd, **_):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        with mock.patch.object(subprocess, "run", fake):
+            call()
+        return [c for c in calls if any("/actions/" in str(a) for a in c)]
+
+    def test_snapshot_makes_no_actions_api_calls(self):
+        now = dt.datetime(2026, 11, 4, tzinfo=dt.timezone.utc)
+        self.assertEqual(self.actions_calls(lambda: swarm.snapshot("o/r", 15, now)), [])
+
+    def test_the_page_still_reads_them(self):
+        now = dt.datetime(2026, 11, 4, tzinfo=dt.timezone.utc)
+        g = swarm.dashboard()
+        self.assertTrue(self.actions_calls(lambda: g.fetch("o/r", now, days=1, with_actions=True)))
 
 
 if __name__ == "__main__":
