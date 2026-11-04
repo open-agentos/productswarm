@@ -142,6 +142,29 @@ class Summary(unittest.TestCase):
         self.assertTrue(lines[-1].startswith("red check (#311): 5 of 5 counted"))
 
 
+class Json(unittest.TestCase):
+    def test_fields(self):
+        rows, _ = run(pr(7, [red(11, body="Block 1: ..."), ok(12)], state="MERGED"))
+        out = rc.as_json({"start": START, "prs": []}, rows)
+        self.assertEqual(out["start"], START["number"])
+        self.assertEqual((out["counted"], out["at_bound"]), (1, 0))
+        self.assertEqual(out["prs"], [{"number": 7, "state": "merged", "reds": 1,
+                                       "blocks": [1], "outcome": rows[0]["outcome"]}])
+
+    def test_start_null_before_329_merges(self):
+        out = rc.as_json({"start": None, "prs": []}, [])
+        self.assertIsNone(out["start"])
+        self.assertEqual(out["counted"], 0)
+
+    def test_revisit_null_until_settled(self):
+        prs = [pr(n, [red(11, n), ok(14, n)], state="OPEN") for n in range(1, 6)]
+        rows, _ = run(*prs)
+        self.assertIsNone(rc.as_json({"start": START, "prs": []}, rows)["revisit"])
+        prs = [pr(n, [red(11, n), ok(14, n)], state="MERGED") for n in range(1, 6)]
+        rows, _ = run(*prs)
+        self.assertIs(rc.as_json({"start": START, "prs": []}, rows)["revisit"], False)
+
+
 class ReadOnly(unittest.TestCase):
     def test_fetch_makes_only_read_calls(self):
         """Every call goes through gather.gh(), whose guard refuses writes."""

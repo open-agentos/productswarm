@@ -22,6 +22,7 @@ Run: python3 evals/red_check.py [--repo OWNER/NAME]
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -140,12 +141,27 @@ def report(data: dict, rows: list[dict]) -> list[str]:
     return lines
 
 
+def as_json(data: dict, rows: list[dict]) -> dict:
+    """The same check as report(), as one JSON-ready object (for --json)."""
+    at_bound = sum(r["outcome"] == BOUND for r in rows)
+    settled = len(rows) == COUNT and all(r["settled"] for r in rows)
+    return {
+        "start": data["start"]["number"] if data["start"] else None,
+        "counted": len(rows),
+        "at_bound": at_bound,
+        "revisit": (at_bound > REVISIT_OVER) if settled else None,
+        "prs": [{k: r[k] for k in ("number", "state", "reds", "blocks", "outcome")}
+                for r in rows],
+    }
+
+
 # ---------------------------------------------------------------- CLI
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Count the first builder-App reds under #311's "
                                              "rule and how many reach the round bound.")
     ap.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    ap.add_argument("--json", action="store_true", help="print one JSON object instead of text")
     args = ap.parse_args(argv)
     repo = args.repo or generate.default_repo()
     if not repo:
@@ -156,7 +172,11 @@ def main(argv: list[str]) -> int:
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"red_check.py: {e}", file=sys.stderr)
         return 1
-    print("\n".join(report(data, count(data))))
+    rows = count(data)
+    if args.json:
+        print(json.dumps(as_json(data, rows), indent=1))
+    else:
+        print("\n".join(report(data, rows)))
     return 0
 
 
