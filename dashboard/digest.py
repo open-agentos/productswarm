@@ -3,7 +3,8 @@
 
 The owner reads it on GitHub mobile, so it only links: no tables (they scroll sideways on
 a phone), short lines, and `#N` / `PR #N` references that GitHub turns into taps. It has
-no write actions and runs no model; this module never writes to GitHub.
+no write actions and runs no model. Its only write is `--update` (v3 F3): one PATCH of the
+pinned digest issue's body, and only when the list changed.
 
 It reuses generate.fetch(), build() and needs_you(), so the digest can't disagree with the
 dashboard or `swarm inbox`. Like the dashboard, it reads only public GitHub data: local-only
@@ -11,17 +12,20 @@ state (`watch.json` runs, held triggers, run cost) isn't on GitHub, so the diges
 show it (GOV-0002, GOV-0004, GOV-0014).
 
     python3 dashboard/digest.py --print            # prints the issue body
+    python3 dashboard/digest.py --update --repo OWNER/REPO   # edits the pinned issue
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
+import re
 import subprocess
 import sys
 
 import generate as g
 
-MARKER = "<!-- productswarm-digest -->"   # F3 finds the pinned issue by this
+MARKER = "<!-- productswarm-digest -->"   # --update finds the pinned issue by this
 TITLE_MAX = 60
 
 
@@ -71,9 +75,57 @@ def render(items: list[dict], now: dt.datetime, repo: str) -> str:
     return "\n".join(out) + "\n"
 
 
+# Text that changes with the clock alone: "Updated …" and ages ("5m ago", "just now").
+UPDATED_RE = re.compile(r"^Updated .*$", re.M)
+AGE_RE = re.compile(r"\b\d+[dhm] ago\b|\bjust now\b")
+
+
+def comparable(body: str) -> str:
+    """The body without the parts that change with the clock alone, so a run where only
+    time passed leaves the issue alone. Ages are then as of the "Updated" line."""
+    body = body.replace("\r\n", "\n")
+    body = AGE_RE.sub("…", UPDATED_RE.sub("", body))
+    return "\n".join(ln.rstrip() for ln in body.strip().splitlines())
+
+
+def digest_issues(issues: list[dict]) -> list[dict]:
+    """Open issues (not PRs) whose body starts with the digest marker."""
+    return [i for i in issues if i.get("state") == "open" and "pull_request" not in i
+            and (i.get("body") or "").lstrip().startswith(MARKER)]
+
+
+def update(repo: str, issues: list[dict], body: str) -> int:
+    """Write `body` into the one open marked issue if the list changed. Never creates,
+    pins, labels, closes or comments on an issue: the owner makes and pins it once."""
+    found = digest_issues(issues)
+    if len(found) != 1:
+        nums = ", ".join(f"#{i['number']}" for i in found)
+        why = (f"found {len(found)} open issues starting with {MARKER} ({nums}); close all but one"
+               if found else f"no open issue starts with {MARKER}; create and pin one "
+                             "(see dashboard/README.md)")
+        print(f"digest.py: {why}", file=sys.stderr)
+        return 1
+    n = found[0]["number"]
+    if comparable(found[0].get("body") or "") == comparable(body):
+        print(f"digest.py: #{n} unchanged; not edited")
+        return 0
+    r = subprocess.run(["gh", "api", "-X", "PATCH", f"repos/{repo}/issues/{n}", "--input", "-"],
+                       input=json.dumps({"body": body}), capture_output=True, text=True,
+                       timeout=120)
+    if r.returncode != 0:
+        print(f"digest.py: editing #{n} failed: {r.stderr.strip()[:300]}", file=sys.stderr)
+        return 1
+    print(f"digest.py: updated #{n}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description="Print the needs-you digest as Markdown. Read-only.")
-    ap.add_argument("--print", action="store_true", required=True, help="print the issue body")
+    ap = argparse.ArgumentParser(description="The needs-you digest as Markdown.")
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--print", action="store_true", help="print the issue body (read-only)")
+    mode.add_argument("--update", action="store_true",
+                      help="write it into the open issue that starts with the digest marker, "
+                           "if the list changed")
     ap.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     ap.add_argument("--days", type=int, default=g.DAYS)
     ap.add_argument("--idle-minutes", type=int, default=g.IDLE_MINUTES)
@@ -90,7 +142,10 @@ def main(argv: list[str]) -> int:
         print(f"digest.py: {e}", file=sys.stderr)
         return 1
     model = g.build(data, now, dt.timedelta(minutes=args.idle_minutes), caps=g.load_caps())
-    sys.stdout.write(render(g.needs_you(model), now, repo))
+    body = render(g.needs_you(model), now, repo)
+    if args.update:
+        return update(repo, data["issues"], body)
+    sys.stdout.write(body)
     return 0
 
 
