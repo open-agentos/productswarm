@@ -1,0 +1,96 @@
+# Runs one reviewer pass in GitHub Actions per new PR head (v3 C stage 1, GOV-0015).
+# Events, concurrency and skip rule: GOV-0019. Trusted authors and the check gate: GOV-0017.
+# Reviewer App key and token scopes: GOV-0018. Job log: GOV-0016. Model credential: the
+# owner's direction on #208 (a subscription token for now; an API key is the goal).
+# Committed by the owner: the Apps have no `workflows` permission (#32).
+name: Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  check:
+    # No secrets, no environment. Decides whether a run may start (GOV-0017, GOV-0019).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+      pr: ${{ steps.check.outputs.pr }}
+    steps:
+      # Always main, never the PR head: the check's own code must not come from the PR.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 launcher/actions_review.py check
+
+  review:
+    needs: check
+    if: needs.check.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: reviewer
+    concurrency:
+      group: reviewer-pr-${{ needs.check.outputs.pr }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    steps:
+      # Main, never the PR head: run writes its hooks into this checkout and runs them with
+      # the secrets, so no code from the PR may run here (#240). The reviewer reads the PR
+      # through gh.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.317
+      - name: Review
+        env:
+          APP_ID: ${{ secrets.REVIEWER_APP_ID }}
+          APP_KEY: ${{ secrets.REVIEWER_APP_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          PR: ${{ needs.check.outputs.pr }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$CLAUDE_CODE_OAUTH_TOKEN"
+          # Mint the reviewer App token as ops/swarm-token does (GOV-0018's stdlib option:
+          # openssl, curl and jq on the runner, no third-party action), limited to this repo
+          # and to pull_requests: write, contents: read, issues: read.
+          key="$RUNNER_TEMP/reviewer.pem"
+          (umask 077; printf '%s\n' "$APP_KEY" > "$key")
+          unset APP_KEY
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          now=$(date +%s)
+          header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+          payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$APP_ID" | b64url)
+          sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$key" -binary | b64url)
+          rm -f "$key"
+          jwt="$header.$payload.$sig"
+          echo "::add-mask::$jwt"
+          api() { curl -fsS -H "Authorization: Bearer $jwt" -H "Accept: application/vnd.github+json" "$@"; }
+          inst=$(api "https://api.github.com/repos/$GITHUB_REPOSITORY/installation" | jq -r .id)
+          GH_TOKEN=$(api -X POST "https://api.github.com/app/installations/$inst/access_tokens" \
+            -d "{\"repositories\":[\"${GITHUB_REPOSITORY#*/}\"],\"permissions\":{\"pull_requests\":\"write\",\"contents\":\"read\",\"issues\":\"read\"}}" \
+            | jq -r .token)
+          echo "::add-mask::$GH_TOKEN"
+          unset jwt
+          export GH_TOKEN
+          # Prints only result, subtype, num_turns and total_cost_usd (GOV-0016).
+          # Exit 0 done, 3 at budget or turn ceiling, 1 error, 2 refused.
+          python3 launcher/actions_review.py run --pr "$PR"
