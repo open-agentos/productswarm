@@ -17,7 +17,7 @@ The repo is public (GOV-0004), so everything in `evals/` is public: the rubric, 
 
 ## What a PR is scored on
 
-Each PR in `evals/data/sample.json` is scored at its merge head (`head_sha`) on five things. Marks 4 and 5, and the verdict that Scope now sets, come from the owner's ruling on #311 (option 3 as 3c+E, item B). They let the eval score the reviewer's block list without moving the bar (see "Pre-registered bar" below). The block numbers are the ruling's:
+Each PR in `evals/data/sample.json` is scored at its merge head (`head_sha`) on five things. Marks 4 and 5, and the verdict that Scope now sets, come from GOV-0021, the owner's ruling on #311 (option 3 as 3c+E, item B). They let the eval score the reviewer's block list without moving the bar (see "Pre-registered bar" below). The block numbers are GOV-0021's:
 
 | Block | What it is |
 |---|---|
@@ -98,13 +98,13 @@ Note whether that review was at the merge head (`at_merge_head` in `sample.json`
 
 **Blocking.** The reviewer blocked a PR if its verdict is `CHANGES_REQUESTED`, or if it's `COMMENTED` and that review has an `Overstep:` finding (`overstep_comments`), because GOV-0011 sends an `Overstep:` finding to the owner. `APPROVED`, a `COMMENTED` review with no `Overstep:` finding, and `none` don't block.
 
-**Overstep outranks red** (#311). A `COMMENTED` review with an `Overstep:` finding and numbered block findings scores as **one** block. Each numbered finding is still checked separately for justification. A block finding listed under an `Overstep:` isn't a miss.
+**Overstep outranks red** (per GOV-0021). A `COMMENTED` review with an `Overstep:` finding and numbered block findings scores as **one** block. Each numbered finding is still checked separately for justification. A block finding listed under an `Overstep:` isn't a miss.
 
 **Justified blocks.** A red finding under Block 4 or Block 5 whose cited evidence holds at that head is **justified**, and isn't a false block, even when the eval says `would approve`. The evidence is a failing command, a repro, or a cited line with its source (a merged record, an issue's state, or another line of the same file). If the evidence doesn't hold at that head, the finding is unjustified.
 
 ## Agreement
 
-On a PR the reviewer reviewed, the eval and the reviewer **agree** when both block (`would request changes` or `would block (Overstep)`, and a blocking review) or neither does (`would approve` and a non-blocking review). A blocking review whose only grounds are justified Block 4 or 5 findings also agrees with `would approve`. Otherwise they **disagree**.
+On a PR the reviewer reviewed, the eval and the reviewer **agree** when both block (`would request changes` or `would block (Overstep)`, and a blocking review) or neither does (`would approve` and a non-blocking review). Otherwise they **disagree**.
 
 A PR with reviewer verdict `none` has no agreement, either way. It is scored and listed, but it doesn't count in N or in any line of the bar. An unreviewed PR the eval would block is reported as **unreviewed defect**.
 
@@ -131,7 +131,7 @@ The owner set these numbers on #172 before #174 ran. #175 reports against them. 
 2. **Misses: 0.** On every PR where the eval finds an `unmet` "Done when" item or a `broken` record, the reviewer must have blocked.
 3. **False blocks: at most 2.** A false block only costs a builder round, so it's tolerable. A miss is not.
 
-**One more condition:** if the eval finds no `unmet` item and no `broken` record in the whole sample, condition 2 hasn't been tested. In that case the bar is **inconclusive, not passed**, and C stage 2 waits until the reviewer has been shown to block a real defect. That is shown by the planted-defect gate below (#311).
+**One more condition:** if the eval finds no `unmet` item and no `broken` record in the whole sample, condition 2 hasn't been tested. In that case the bar is **inconclusive, not passed**, and C stage 2 waits until the reviewer has been shown to block a real defect. That is shown by the planted-defect gate below (per GOV-0021).
 
 For the committed `sample.json` (20 PRs, 15 of them with a reviewer review), N is 15, so line 1 needs at least 13 of 15 (85% of 15 is 12.75, rounded up).
 
@@ -139,7 +139,7 @@ Whether C stage 2 goes ahead is the owner's call. The bar only says whether it m
 
 ### Reported beside the bar
 
-The bar's numbers stay as the owner registered them on #172 (#311, E2). Line 2 counts misses on `unmet` items and `broken` records only. Each result reports these lines beside it, **outside pass/fail**:
+The bar's numbers stay as the owner registered them on #172 (per GOV-0021, E2). Line 2 counts misses on `unmet` items and `broken` records only. Each result reports these lines beside it, **outside pass/fail**:
 
 | Line | Count of |
 |---|---|
@@ -147,13 +147,13 @@ The bar's numbers stay as the owner registered them on #172 (#311, E2). Line 2 c
 | Misses on Block 6 | PRs with a Scope `no` that the reviewer didn't block |
 | Misses on Authority | PRs with Authority `fail` that the reviewer didn't block with an `Overstep:` |
 | Justified blocks on Blocks 4 and 5 | red findings under Block 4 or 5 whose evidence holds at that head. The eval can't count misses on these blocks |
-| Unreviewed merged PRs since GOV-0020 | merged PRs with no review from `productswarm-reviewer[bot]`, at any head, since GOV-0020 merged. When #311 was ruled: #200, #269 and #275 |
+| Unreviewed merged PRs since GOV-0020 | merged PRs with no review from `productswarm-reviewer[bot]`, at any head, since GOV-0020 merged. When GOV-0021 was ruled: #200, #269 and #275 |
 
 Any change to the bar's numbers is the owner's, made before the next sample is scored.
 
 ### The planted-defect gate
 
-This is how the reviewer is shown to block a real defect (#311, E3). It gates C stage 2.
+This is how the reviewer is shown to block a real defect (per GOV-0021, E3). It gates C stage 2.
 
 - **The PR.** An **unannounced** planted-defect PR, opened by **neither the reviewer nor the builder** (so `[respond]` doesn't fire; the 5-red check, #330, measures that side). It is non-draft, and closes exactly one throwaway issue whose "Done when" item it leaves `unmet`.
 - **Pass.** Only `CHANGES_REQUESTED` with a `Block 1` finding that names the unmet item. `COMMENTED` with an `Overstep:` is a **fail**: it sends a fixable defect to the owner. Any other state is a fail.
@@ -162,7 +162,7 @@ This is how the reviewer is shown to block a real defect (#311, E3). It gates C 
 
 ### Who scores
 
-Whoever scores the next sample is neither the reviewer nor the author of the PRs scored (#311).
+Whoever scores the next sample is neither the reviewer nor the author of the PRs scored (per GOV-0021).
 
 ## Worked cases
 
