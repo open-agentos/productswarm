@@ -15,12 +15,14 @@ convening, summary and ruling comments exist, when, and their links. No other te
 cost line in a convener's summary can never reach the page.
 
 fetch() never raises and build() never fails on bad data: problems become short notes and
-the rest of the page builds.
+the rest of the page builds. render() draws them as the page's "Committees" section (#354).
 """
 from __future__ import annotations
 
 import datetime as dt
+import html
 import re
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -220,8 +222,10 @@ def records(path: Path = DECISIONS) -> dict[int, dict]:
         q = re.search(r'^question:\s*["\']?#(\d+)["\']?\s*$', fm.group(1), re.M)
         rid = re.search(r"^id:\s*(\S+)", fm.group(1), re.M)
         status = re.search(r"^status:\s*(\S+)", fm.group(1), re.M)
+        date = re.search(r"^date:\s*[\"']?(\d{4}-\d{2}-\d{2})", fm.group(1), re.M)
         if q and rid:
-            out[int(q.group(1))] = {"id": rid.group(1), "status": status.group(1) if status else None}
+            out[int(q.group(1))] = {"id": rid.group(1), "status": status.group(1) if status else None,
+                                    "file": f.name, "date": date.group(1) if date else None}
     return out
 
 
@@ -332,7 +336,8 @@ def committee(d: dict, question: dict | None, recs: dict[int, dict], owner: str 
     models = {s["model"] for s in seats}
     evidence = {s["evidence"].lower() for s in seats}
     return {**base, "status": status, "question": n,
-            "question_url": q_issue.get("html_url"), "question_state": q_issue.get("state"),
+            "question_url": q_issue.get("html_url"), "question_title": q_issue.get("title"),
+            "question_state": q_issue.get("state"),
             "ruled": "gov:ruled" in labels, "owner_comments": heads, "record": record,
             "members": seats, "order": order,
             "diversity": {"models": len(models), "evidence": len(evidence),
@@ -359,3 +364,172 @@ def build(raw: dict | None, decisions: Path = DECISIONS, owner: str | None = Non
         notes += c["notes"]
         out.append(c)
     return {"committees": out, "notes": notes}
+
+
+# ---------------------------------------------------------------- the page (#354)
+
+def esc(x) -> str:
+    return html.escape("" if x is None else str(x))
+
+
+def link(text: str, url: str | None) -> str:
+    return f'<a href="{esc(url)}">{text}</a>' if url else text
+
+
+def day(t: dt.datetime | None) -> str:
+    return t.strftime("%Y-%m-%d") if t else ""
+
+
+def ended(c: dict) -> bool:
+    """Over: its record is merged, or its question is closed."""
+    return c["status"] != "unparsed" and (bool(c.get("record")) or c.get("question_state") == "closed")
+
+
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def waiting_round(c: dict) -> int | None:
+    """The round the next seat's post belongs to, or None if no one is due."""
+    seat = c.get("next_seat")
+    if not seat:
+        return None
+    n, order = c["rounds_used"], c["order"]
+    done = {(p["round"], p["seat"]) for p in c["posts"]}
+    last = max((order.index(p["seat"]) for p in c["posts"] if p["round"] == n), default=-1)
+    return n if n and (n, seat) not in done and order.index(seat) > last else n + 1
+
+
+def timeline(c: dict, repo: str) -> str:
+    """convened → round 1 … round N → summary → ratified → record, each dated and linked where
+    it can be; the current step bold, steps not reached yet muted."""
+    oc = c["owner_comments"]
+    steps = [("convened", oc["convening"], "convened")]
+    for r in range(1, max(c["rounds_used"], 1) + 1):
+        first = min((p for p in c["posts"] if p["round"] == r), key=lambda p: p["ts"] or dt.datetime.max
+                    .replace(tzinfo=dt.timezone.utc), default=None)
+        steps.append((f"round {r}", first and {"ts": first["ts"], "url": first["url"]}, f"round {r}"))
+    steps += [("summary", oc["summary"], "summary"), ("ratified", oc["ruling"], "ratified")]
+    rec = c.get("record")
+    if rec:
+        url = f"https://github.com/{repo}/blob/main/governance/decisions/{rec['file']}" if rec.get("file") else None
+        steps.append((f"record {rec['id']}", {"date": rec.get("date"), "url": url}, f"record {rec['id']}"))
+    else:
+        steps.append(("record", None, None))
+    out = []
+    for label, at, key in steps:
+        reached = at is not None or label == "convened"
+        if not reached:
+            out.append(f'<span class="muted">{esc(label)}</span>')
+            continue
+        at = at or {"url": c.get("url")}
+        when = at.get("date") or day(at.get("ts"))
+        text = link(esc(label), at.get("url")) + (f' <span class="muted">{esc(when)}</span>' if when else "")
+        out.append(f'<b class="now" title="current step">{text}</b>' if key == c["status"] else text)
+    return " → ".join(out)
+
+
+def convergence(c: dict) -> str:
+    """"all agree after round N", or the seats whose latest recommendation differs."""
+    n = c["rounds_used"]
+    if not n:
+        return '<span class="muted">no recommendations yet</span>'
+    latest = {}
+    for p in sorted(c["posts"], key=lambda p: p["round"]):
+        latest[p["seat"]] = p["recommendation"]
+    final = [p["recommendation"] for p in c["posts"] if p["round"] == n]
+    if len(final) == len(c["order"]) and same(final):
+        return f"all agree after round {n}"
+
+    def norm(x):
+        return re.sub(r"\s+", " ", x).strip().lower() if x else None
+    counts = Counter(norm(v) for v in latest.values() if v)
+    top, k = counts.most_common(1)[0] if counts else (None, 0)
+    if k * 2 <= len(c["order"]):
+        return f"no majority after round {n}"
+    dissent = [s for s in c["order"] if s in latest and norm(latest[s]) != top]
+    return f"dissent: {esc(', '.join(dissent))}" if dissent else f"after round {n}: no dissent so far"
+
+
+def grid(c: dict) -> str:
+    """A row per member, a column per round; each cell its post's link, time and phrase."""
+    posts = {(p["round"], p["seat"]): p for p in c["posts"]}
+    missed = {(m["round"], m["seat"]) for m in c["missed"]}
+    wait = waiting_round(c)
+    finished = bool(c["owner_comments"]["summary"] or c["owner_comments"]["ruling"] or c.get("record"))
+    cols = max(c["rounds_used"], wait or 0, 1)
+    if finished and c["stopped_early"]:
+        cols = c["max_rounds"]
+    head = "<tr><th>Member</th>" + "".join(f"<th>Round {r}</th>" for r in range(1, cols + 1)) + "</tr>"
+    rows = []
+    for seat in c["order"]:
+        cells = []
+        for r in range(1, cols + 1):
+            p = posts.get((r, seat))
+            if p:
+                t = p["ts"]
+                cell = link(esc(t.strftime("%m-%d %H:%M UTC") if t else "post"), p["url"])
+                if p["recommendation"]:
+                    cell += f"<br>{esc(p['recommendation'])}"
+                if p["model_differs"]:
+                    cell += f'<br><span class="muted">signed {esc(p["model"])}</span>'
+            elif (r, seat) == (wait, c.get("next_seat")):
+                cell = f"<b>waiting on {esc(seat)}</b>"
+            elif finished:
+                cell = '<span class="muted">stopped early</span>' if c["stopped_early"] and r > c["rounds_used"] else ""
+            elif (r, seat) in missed:
+                cell = '<span class="muted">missed</span>'
+            else:
+                cell = ""
+            cells.append(f"<td>{cell}</td>")
+        rows.append(f"<tr><th>{esc(seat)}</th>{''.join(cells)}</tr>")
+    return f'<div class="scroll"><table class="grid">{head}{"".join(rows)}</table></div>'
+
+
+def one(c: dict, repo: str) -> str:
+    q = f"#{c['question']}" + (f" {esc(c['question_title'])}" if c.get("question_title") else "")
+    out = [f"<h3>{link(q, c.get('question_url'))}</h3>",
+           f"<p>Discussion {link('#' + esc(c['discussion']), c.get('url'))} · {timeline(c, repo)}</p>"]
+    rows = "".join(f"<tr><td>{esc(m['seat'])}</td><td>{esc(m['role'])}</td><td><code>{esc(m['model'])}</code></td>"
+                   f"<td>{esc(m['evidence'])}</td></tr>" for m in c["members"])
+    out.append('<div class="scroll"><table><tr><th>Seat</th><th>Role</th><th>Model</th><th>Evidence</th></tr>'
+               f"{rows}</table></div>")
+    dv = c["diversity"]
+    out.append(f"<p>§7.2 diversity {'met' if dv['met'] else 'not met'}: {plural(dv['models'], 'model')}, "
+               f"{plural(dv['evidence'], 'evidence base')}</p>")
+    out.append(grid(c))
+    seat_of = {m["app"]: m["seat"] for m in c["members"]}
+    if c["over_limit"]:
+        over = ", ".join(f"{esc(seat_of.get(o['app'], o['app']))} {o['count']} on {o['day'].isoformat()}"
+                         for o in c["over_limit"])
+        posts = f'<span class="pill s-blocked">over {DAILY_POSTS} posts a day</span> {over}'
+    else:
+        posts = f"nobody over {DAILY_POSTS} posts a day"
+    out.append(f"<p>{convergence(c)} · rounds used: {c['rounds_used']} of {c['max_rounds']} · {posts}</p>")
+    return "\n".join(out)
+
+
+def render(m: dict | None, repo: str) -> str:
+    """The "Committees" section: open committees, then ended ones collapsed. Empty when there
+    are no committees and nothing to say about reading them."""
+    m = m or {"committees": [], "notes": []}
+    parsed = [c for c in m["committees"] if c["status"] != "unparsed"]
+    unparsed = [c for c in m["committees"] if c["status"] == "unparsed"]
+    notes = [n for n in m["notes"] if not n.endswith(": unparsed") and n != "no Committees Discussion category"]
+    if not m["committees"] and not notes:
+        return ""
+    live = [c for c in parsed if not ended(c)]
+    done = [c for c in parsed if ended(c)]
+    out = ["<h2>Committees</h2>"]
+    out += [one(c, repo) for c in live]
+    if not live:
+        out.append('<p class="muted">No open committees.</p>')
+    if unparsed:
+        out.append('<p class="muted">Unparsed: ' + ", ".join(
+            link(f"#{esc(c['discussion'])}" + (f" {esc(c['title'])}" if c.get("title") else ""), c.get("url"))
+            for c in unparsed) + "</p>")
+    if notes:
+        out.append(f'<p class="muted">{esc("; ".join(notes))}</p>')
+    if done:
+        out += [f"<details><summary>{len(done)} ended</summary>", *[one(c, repo) for c in done], "</details>"]
+    return "\n".join(out)

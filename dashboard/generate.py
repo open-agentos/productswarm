@@ -482,6 +482,8 @@ code { font-size:12px; }
 .num { text-align:right; white-space:nowrap; }
 table.narrow { width:auto; min-width:240px; }
 .method { max-width:720px; font-size:12px; }
+table.grid td { min-width:160px; }
+.now { font-weight:600; }
 details summary { cursor:pointer; margin:12px 0 4px; color:var(--muted); }
 """
 
@@ -587,6 +589,7 @@ def render(m: dict) -> str:
         tile(sum(s["status"] == "idle" for s in live), "idle"),
         f'<div><b>{esc(spend.usd(m["spend"]["today"]))}</b>spent today (est.)</div>',
         "</div>",
+        committees.render(m.get("committees"), repo),
         "<h2>Sessions</h2>",
         session_rows(m, live) if live else '<p class="muted">No live sessions.</p>',
     ]
