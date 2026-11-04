@@ -187,9 +187,9 @@ class ReviewInActionsTest(Base):
                 self.assertEqual(m.main(["manifest.py", str(path)]), 0)
             self.assertTrue(out.getvalue().splitlines()[-1].endswith(shown))
 
-    def test_repo_manifest_leaves_it_off(self):
-        # Off by default, so building it changes nothing until the owner turns it on (#216).
-        self.assertIs(m.load_watch().review_in_actions, False)
+    def test_repo_manifest_parses_it(self):
+        # The owner turns it on or off (#260), so check only that the repo's value parses (#285).
+        self.assertIsInstance(m.load_watch().review_in_actions, bool)
 
 
 class ActionsMaxReviewsTest(Base):

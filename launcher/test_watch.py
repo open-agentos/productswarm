@@ -161,7 +161,11 @@ class WatchTest(unittest.TestCase):
                                 clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append,
                                 root=self.home / "repo", git=FakeGit())
         self.scene = Scene()
-        self.w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read)
+        # A fixture manifest, not the repo's: the owner's review_in_actions switch (#260)
+        # mustn't change what these tests check (#285).
+        (self.home / "fixture").mkdir()
+        self.path = write_manifest(self.home / "fixture", ALL_CAPPED, max_live=2)
+        self.w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=self.path)
 
     def kinds(self, ts_):
         return [(t.kind, t.ref) for t in ts_]
@@ -603,8 +607,11 @@ class StartTest(unittest.TestCase):
 class ManifestWatchTest(unittest.TestCase):
     def test_repo_manifest_has_the_limits_from_88(self):
         import manifest
-        self.assertEqual(manifest.load_watch(),
-                         manifest.WatchLimits(interval_minutes=5, max_live=2, max_turns=200))
+        limits = manifest.load_watch()
+        self.assertEqual((limits.interval_minutes, limits.max_live, limits.max_turns), (5, 2, 200))
+        # The Actions keys are the owner's switches (#260, #257): check only that they parse (#285).
+        self.assertIsInstance(limits.review_in_actions, bool)
+        self.assertTrue(limits.actions_max_reviews is None or limits.actions_max_reviews >= 1)
 
     def test_bad_watch_table_lists_every_problem(self):
         import manifest
