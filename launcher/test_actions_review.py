@@ -624,10 +624,34 @@ class Run(unittest.TestCase):
         entry = swarm.Started("reviewer-pr-70", "reviewer", "claude-test-1", SID, 1000.0, pr=70,
                               by="actions", budget_usd=2.5, max_turns=7)
         quoted = swarm.Launcher.headless_args(entry)
+        loop = shlex.split(" ".join(quoted))     # what a run `swarm watch` starts gets
+        at = loop.index("--max-budget-usd")      # REVIEWER_DENY goes after swarm.DENY (#389)
         self.assertEqual(argv, ["--model", "claude-test-1", "--session-id", SID,
                                 "-p", swarm.opener("reviewer", None, 70),
-                                *shlex.split(" ".join(quoted))])
+                                *loop[:at], *actions_review.REVIEWER_DENY, *loop[at:]])
         self.assertIn("review PR #70 only", argv[argv.index("-p") + 1])
+
+    # ---- reviewer-only denies (#389)
+
+    ISSUE_CREATE = ("Bash(gh issue create *)", "Bash(gh api graphql *createIssue*)",
+                    "Bash(gh api *repos/*/issues)", "Bash(gh api *repos/*/issues *)")
+
+    def test_reviewer_run_denies_creating_issues(self):
+        self.run_it()
+        argv = self.fake_ran()["argv"]
+        denied = argv[argv.index("--disallowedTools") + 1:argv.index("--max-budget-usd")]
+        self.assertEqual(denied, [*swarm.DENY, *self.ISSUE_CREATE])
+        self.assertEqual(actions_review.REVIEWER_DENY, self.ISSUE_CREATE)
+
+    def test_other_roles_do_not_deny_creating_issues(self):
+        for role in ("planner", "builder", "docs", "reviewer"):    # runs `swarm watch` starts
+            entry = swarm.Started(f"{role}-1", role, "m", SID, 1000.0, issue=5,
+                                  budget_usd=2.5, max_turns=7)
+            for flags in (swarm.headless_flags(2.5, 7),
+                          shlex.split(" ".join(swarm.Launcher.headless_args(entry)))):
+                for pattern in self.ISSUE_CREATE:
+                    self.assertNotIn(pattern, flags, role)
+        self.assertFalse(set(self.ISSUE_CREATE) & set(swarm.DENY))
 
     def test_budget_and_turns_come_from_swarm_toml(self):
         self.run_it()
