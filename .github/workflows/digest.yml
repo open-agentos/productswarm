@@ -1,0 +1,30 @@
+# Keeps the pinned needs-you digest issue current (v3 F4, #213).
+# Separate from dashboard.yml so that one stays read-only (per the owner's choice on #32).
+name: Digest
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: digest
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Update digest issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 dashboard/digest.py --update --repo "$GITHUB_REPOSITORY"
