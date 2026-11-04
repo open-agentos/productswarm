@@ -133,6 +133,16 @@ def needs_owner(r: dict, author: str) -> str | None:
     return None
 
 
+def unreviewed(p: dict) -> str | None:
+    """"no reviewer review at <sha7>" for a builder-App PR with no reviewer-App review at
+    its current head, else None (#332). reviewDecision can't show this: an owner approval
+    sets it too. Three builder PRs were merged with no reviewer review (#200, #269, #275)."""
+    rv, head = p.get("reviewer") or {}, p.get("head")
+    if head and pr_role(p.get("author", "")) == "builder" and rv.get("at_head") is None:
+        return f"no reviewer review at {head[:7]}"
+    return None
+
+
 def parse_ts(s: str) -> dt.datetime | None:
     try:
         t = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
@@ -359,7 +369,7 @@ def needs_you(m: dict) -> list[dict]:
                           **({"past_ttl": past} if past else {})})
     for p in m["prs"]:
         if not p["draft"]:
-            state = (p.get("needs_owner")
+            state = (p.get("needs_owner") or unreviewed(p)
                      or p["review"].replace("_", " ").lower() or "awaiting review")
             closes = ", ".join(f"#{c['number']}" for c in p["closes"])
             items.append({"kind": "pr", "ref": f"PR #{p['number']}", "title": p["title"],
