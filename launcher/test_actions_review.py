@@ -648,7 +648,6 @@ class Run(unittest.TestCase):
     def test_hooks_and_stop_hook_entry(self):
         self.run_it()
         got = self.fake_ran()
-        self.assertEqual(got["env"]["SWARM_ROLE"], "reviewer")
         self.assertEqual(Path(got["cwd"]).resolve(), self.root.resolve())
         home = Path(got["env"]["PRODUCTSWARM_HOME"])
         self.assertEqual(home.parent, self.dir / "runner")                   # thrown away with the runner
@@ -657,9 +656,52 @@ class Run(unittest.TestCase):
                          (SID, "actions", 70, "reviewer"))
         settings = json.loads((self.root / ".claude" / "settings.local.json").read_text())
         commands = [h["command"] for g in settings["hooks"]["Stop"] for h in g["hooks"]]
-        self.assertTrue(any(str(self.root / "heartbeat" / "hook.py") in c for c in commands))
         self.assertTrue(any(str(self.root / "launcher" / "stophook.py") in c for c in commands))
-        self.assertIn("SessionStart", settings["hooks"])
+
+    # ---- no heartbeat in Actions (#307)
+
+    def heartbeat_commands(self):
+        settings = json.loads((self.root / ".claude" / "settings.local.json").read_text())
+        return [h["command"] for groups in settings.get("hooks", {}).values()
+                for g in groups for h in g["hooks"] if actions_review.install.MARK in h["command"]]
+
+    def test_no_heartbeat_hooks_are_installed(self):
+        self.run_it()
+        self.assertEqual(self.heartbeat_commands(), [])
+        settings = json.loads((self.root / ".claude" / "settings.local.json").read_text())
+        self.assertEqual(set(settings["hooks"]), {"Stop"})
+
+    def test_heartbeat_hooks_already_in_the_settings_are_removed(self):
+        path = self.root / ".claude" / "settings.local.json"
+        path.parent.mkdir()
+        stale = actions_review.install.with_hooks({"permissions": {"allow": ["Bash(ls)"]}},
+                                                  hook=str(self.root / "heartbeat" / "hook.py"))
+        path.write_text(json.dumps(stale))
+        self.run_it()
+        self.assertEqual(self.heartbeat_commands(), [])
+        self.assertEqual(json.loads(path.read_text())["permissions"], {"allow": ["Bash(ls)"]})
+
+    def test_swarm_role_is_not_passed_to_claude(self):
+        self.run_it(SWARM_ROLE="reviewer")          # even if the job sets it
+        self.assertIsNone(self.fake_ran()["env"]["SWARM_ROLE"])
+
+    def test_heartbeat_posts_nothing_with_the_run_env(self):
+        """hook.py, run as Claude Code would with claude's env, opens no tracking issue,
+        calls no gh and writes no spool."""
+        import subprocess as sp
+        self.run_it(SWARM_ROLE="reviewer")
+        env = {**self.fake_ran()["env"], "PATH": self.env["PATH"]}
+        env = {k: v for k, v in env.items() if v is not None}
+        gh_log = self.dir / "gh.log"
+        gh = Path(self.env["PATH"].split(os.pathsep)[0]) / "gh"
+        gh.write_text(f"#!/bin/sh\necho \"$@\" >> {gh_log}\necho https://github.com/o/r/issues/1\n")
+        gh.chmod(0o755)
+        hook = Path(actions_review.__file__).resolve().parent.parent / "heartbeat" / "hook.py"
+        payload = json.dumps({"session_id": SID, "cwd": str(self.root)})
+        sp.run([sys.executable, "-I", str(hook), "SessionStart"], input=payload, text=True,
+               env={**env, "HEARTBEAT_SYNC_FLUSH": "1"}, check=True)
+        self.assertFalse(gh_log.exists())
+        self.assertFalse((Path(env["PRODUCTSWARM_HOME"]) / "state").exists())
 
     # ---- what's printed (GOV-0016)
 
