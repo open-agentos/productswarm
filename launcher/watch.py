@@ -181,16 +181,19 @@ def needs_record(body: str | None) -> str | None:
 
 
 def raised_by(body: str | None, roles: set[str]) -> tuple[str | None, str]:
-    """(role, "") from the "Raised by" field, or (None, why not)."""
+    """(role, "") from the "Raised by" field, or (None, why not).
+
+    The asker is the field's first word, optionally in the `-- role` signature form, as
+    the planner, builder and docs write it ("planner, on #167 (...)"). A role named later
+    in the text isn't the asker (#271): "owner, after the first Actions reviewer test"
+    starts nothing."""
     text = template_field(body, "Raised by")
     if not text:
         return None, 'it has no "Raised by" field'
-    found = {w for w in re.findall(r"[a-z][a-z0-9-]*", text.lower()) if w in roles}
-    if len(found) == 1:
-        return found.pop(), ""
-    if not found:
-        return None, f'"Raised by" names no known role ({text!r})'
-    return None, f'"Raised by" names more than one role ({", ".join(sorted(found))})'
+    m = re.match(r"(?:--\s*)?([a-z][a-z0-9-]*)", text.lower())
+    if m and m.group(1) in roles:
+        return m.group(1), ""
+    return None, f'"Raised by" doesn\'t start with a known role ({text!r})'
 
 
 # ---------------------------------------------------------------- triggers (pure)
@@ -686,6 +689,10 @@ class Watch:
                 if t.key not in self.seen:
                     self.seen.add(t.key)
                     out(t.line())
+                continue
+            if t.kind == "answer" and t.skipped:
+                # Listed in `swarm inbox` until the owner closes the question or drops `ready` (#271).
+                hold(t, f"skipped: {t.skipped}")
                 continue
             if t.skipped:
                 out(t.line())
