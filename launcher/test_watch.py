@@ -278,7 +278,8 @@ class WatchTest(unittest.TestCase):
     def test_unknown_raised_by_is_skipped_with_a_reason(self):
         self.scene.issues[3]["body"] = question_body(raised="someone, on #3")
         (t,) = [t for t in self.w.tick(NOW) if t.kind == "answer"]
-        self.assertIn("-> skipped: \"Raised by\" names no known role ('someone, on #3')", t.line())
+        self.assertIn("-> skipped: \"Raised by\" doesn't start with a known role ('someone, on #3')",
+                      t.line())
         self.assertEqual(self.w.tick(NOW), [])            # printed once
 
     def test_dry_run_starts_nothing_and_writes_nothing(self):
@@ -311,8 +312,20 @@ class WatchTest(unittest.TestCase):
 
 class HelpersTest(unittest.TestCase):
     def test_raised_by(self):
-        self.assertEqual(watch.raised_by(question_body(raised="builder (on #75)"), ROLES), ("builder", ""))
-        self.assertIsNone(watch.raised_by(question_body(raised="builder and planner"), ROLES)[0])
+        rb = lambda raised: watch.raised_by(question_body(raised=raised), ROLES)
+        self.assertEqual(rb("builder (on #75)"), ("builder", ""))
+        self.assertEqual(rb("planner, on #167 (C stage 1 planning, per the owner's answer there)"),
+                         ("planner", ""))
+        self.assertEqual(rb("planner"), ("planner", ""))
+        self.assertEqual(rb("-- docs (claude-opus-5-5)"), ("docs", ""))
+        self.assertEqual(rb("Builder, on #5"), ("builder", ""))
+        # #271: only the asker counts, not a role named later in the text.
+        self.assertEqual(rb("owner, after the first Actions reviewer test on #251"),
+                         (None, "\"Raised by\" doesn't start with a known role "
+                                "('owner, after the first Actions reviewer test on #251')"))
+        self.assertIsNone(rb("Claude (owner's coordinating session), drafted through the owner's account.")[0])
+        self.assertIsNone(rb("someone, on #3")[0])
+        self.assertIsNone(rb("builders, on #5")[0])
         self.assertIn("no \"Raised by\"", watch.raised_by("### Domain\n\nspend\n", ROLES)[1])
 
     def test_needs_record(self):
@@ -538,14 +551,28 @@ class StartTest(unittest.TestCase):
         self.assertEqual(w.refusal(t, [hand], NOW), (None, False))
         self.assertEqual(w.refusal(t, [hand, mine], NOW), (None, True))
 
-    def test_unknown_raised_by_is_logged_once_and_done(self):
-        self.scene.issues[3]["body"] = question_body(raised="someone, on #3")
+    def test_unknown_raised_by_is_logged_once_and_listed_in_the_inbox(self):
+        # #271: #255's text names the reviewer, but the owner asked, so nothing starts.
+        raised = "owner, after the first Actions reviewer test on #251"
+        self.scene.issues[3]["body"] = question_body(raised=raised)
         w = self.watcher()
         w.tick(NOW)
         self.assertNotIn(88, [e.issue for e in self.l.load()])
-        self.assertEqual(sum("skipped: \"Raised by\" names no known role" in x for x in self.lines), 1)
+        why = f"skipped: \"Raised by\" doesn't start with a known role ({raised!r})"
+        self.assertEqual(sum(why in x for x in self.lines), 1)
+        self.assertIn(f"- [answer] #88 ready by the owner · {why}", self.inbox())
         w.tick(NOW)
-        self.assertEqual(sum("skipped: \"Raised by\" names no known role" in x for x in self.lines), 1)
+        self.assertEqual(sum(why in x for x in self.lines), 1)       # logged once
+        self.assertNotIn(88, [e.issue for e in self.l.load()])
+        self.scene.issues[3]["state"] = "closed"                    # the owner closes it
+        w.tick(NOW)
+        self.assertNotIn("#88", self.inbox())
+
+    def test_role_first_raised_by_still_starts_that_role(self):
+        self.scene.issues[3]["body"] = question_body(
+            raised="planner, on #167 (C stage 1 planning, per the owner's answer there)")
+        self.watcher().tick(NOW)
+        self.assertIn((88, "planner"), [(e.issue, e.role) for e in self.l.load()])
 
     def test_a_failed_start_is_held_and_retried(self):
         self.fake.fail_for = {"builder"}
