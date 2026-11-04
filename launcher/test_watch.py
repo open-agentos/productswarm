@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -688,6 +689,52 @@ class LockTest(unittest.TestCase):
         self.assertFalse(any("refused" in x for x in self.lines))
         self.assertEqual(self.fake.commands, [])
         self.assertFalse(watch.state_path(self.l).exists())
+
+
+def _save_states(home: str, tag: str, n: int) -> None:
+    """One process writing watch.json n times, as a second watcher would (#296)."""
+    l = swarm.Launcher(Path(home), root=Path(home) / "repo", proc=lambda pid: None,
+                       clock=time.time, out=lambda s: None, git=lambda a: (0, ""))
+    for i in range(n):
+        watch.save_state(l, {"checked": None, "acted": {f"{tag}-{i}": "started"}, "waiting": [],
+                             "runs": {}})
+
+
+class SaveStateTest(unittest.TestCase):
+    """#296: watch.json is written through a temp file of each writer's own."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.home = Path(d.name)
+        self.l = swarm.Launcher(self.home, root=self.home / "repo", proc=lambda pid: None,
+                                clock=time.time, out=lambda s: None, git=lambda a: (0, ""))
+
+    def test_round_trips_and_leaves_no_temp_file(self):
+        st = {"checked": "2026-11-04T00:00:00Z", "acted": {"k": "started"}, "waiting": [], "runs": {}}
+        watch.save_state(self.l, st)
+        self.assertEqual(watch.load_state(self.l), st)
+        self.assertEqual(list(self.l.dir.glob("*.tmp")) + list(self.l.dir.glob(".*.tmp")), [])
+
+    def test_a_failed_write_keeps_the_old_file_and_removes_its_temp_file(self):
+        watch.save_state(self.l, {"checked": None, "acted": {"old": "started"}, "waiting": [], "runs": {}})
+        with self.assertRaises(TypeError):
+            watch.save_state(self.l, {"checked": object()})
+        self.assertEqual(watch.load_state(self.l)["acted"], {"old": "started"})
+        self.assertEqual(list(self.l.dir.glob(".*.tmp")), [])
+
+    def test_concurrent_writers_never_crash(self):
+        import multiprocessing as mp
+        ctx = mp.get_context("spawn")
+        procs = [ctx.Process(target=_save_states, args=(str(self.home), f"w{k}", 50)) for k in range(4)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(60)
+        self.assertEqual([p.exitcode for p in procs], [0] * 4)        # no FileNotFoundError
+        (key,) = watch.load_state(self.l)["acted"]                     # one writer's whole file
+        self.assertRegex(key, r"^w[0-3]-49$")
+        self.assertEqual(list(self.l.dir.glob(".*.tmp")), [])
 
 
 class ManifestWatchTest(unittest.TestCase):

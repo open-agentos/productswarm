@@ -12,7 +12,7 @@ Per GOV-0011, you may be started on your own PR instead of an issue. Act only if
 
 1. **Read** that review and its findings, including the PR comments it lists.
 2. **Respond** to each finding:
-   - push a fix to the PR's branch when the fix stays inside the PR's issue;
+   - push a fix to the PR's branch when the fix stays inside the PR's issue (a fix made only in the PR body needs a commit to be re-reviewed);
    - reply on the PR where you disagree, saying why.
 3. **Don't widen scope.** Anything outside the PR's issue becomes a new unlabelled issue, not a change to this PR.
 4. **Leave `Overstep:` findings to the owner.** Never answer one with a code change. It needs the owner or a `gov:question` (GOV-0011).

@@ -115,6 +115,7 @@ import fcntl
 import json
 import os
 import re
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -465,11 +466,17 @@ def run_line(r: dict) -> str:
 
 
 def save_state(launcher: "swarm.Launcher", st: dict) -> None:
+    """Write watch.json atomically through a temp file of its own, so two writers never
+    rename each other's (#296), as Launcher.save() does for sessions.json (#272)."""
     launcher.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = state_path(launcher)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(st, indent=1) + "\n")
-    tmp.replace(path)
+    fd, tmp = tempfile.mkstemp(dir=launcher.dir, prefix=".watch.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(st, indent=1) + "\n")
+        os.replace(tmp, state_path(launcher))
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def take_lock(launcher: "swarm.Launcher") -> tuple[int | None, str]:
