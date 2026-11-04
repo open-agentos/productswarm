@@ -546,6 +546,9 @@ def needs_section(m: dict) -> str:
     return f'<h2>Needs you ({len(items)})</h2><ol class="inbox">{"".join(lis)}</ol>'
 
 
+REFRESH_SECONDS = 300  # an open page reloads itself; plain HTML, no script (#26, #351)
+
+
 def render(m: dict) -> str:
     repo, now, titles = m["repo"], m["now"], m["issue_titles"]
     live = [s for s in m["sessions"] if s["status"] != "stopped"]
@@ -560,6 +563,7 @@ def render(m: dict) -> str:
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         '<meta name="robots" content="noindex, nofollow">',  # published publicly; see #33
+        f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">',
         f"<title>Swarm dashboard · {esc(repo)}</title><style>{CSS}</style></head><body><main>",
         f"<h1>Swarm dashboard</h1><div class=\"muted\">{esc(repo)} · generated {esc(stamp(now))}"
         f" · idle after {m['idle_minutes']} min without an event</div>",

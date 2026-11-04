@@ -160,6 +160,12 @@ class PageTest(unittest.TestCase):
         self.assertNotIn("<script", page)
         self.assertIn('<meta name="robots" content="noindex, nofollow">', page)
 
+    def test_render_reloads_itself_without_script(self):
+        page = g.render(self.model())
+        head = page.split("</head>")[0]
+        self.assertIn('<meta http-equiv="refresh" content="300">', head)
+        self.assertNotIn("<script", page.lower())
+
 
 FAKE_GH = r"""#!/usr/bin/env python3
 import json, os, sys
