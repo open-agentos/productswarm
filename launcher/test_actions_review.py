@@ -368,6 +368,77 @@ class Plan(unittest.TestCase):
         _, prs, _ = self.run_plan()
         self.assertEqual(prs, [{"pr": 72, "head": SHA2}])
 
+    # ---- a run between its plan and its review jobs (#278)
+
+    def starting_run(self, run_id, minutes=20, plan_status="completed", plan_conclusion="success"):
+        created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(T0 + 60 * minutes))
+        self.runs.append({"id": run_id, "created_at": created, "status": "in_progress"})
+        self.jobs[run_id] = [{"name": "plan", "status": plan_status, "conclusion":
+                              plan_conclusion if plan_status == "completed" else None}]
+
+    def test_starting_run_holds_every_head_it_could_have_listed(self):
+        self.open_prs = [pr(70), pr(72, sha=SHA2)]
+        self.starting_run(903)
+        _, prs, any_ = self.run_plan()
+        self.assertEqual((prs, any_), ([], "false"))
+        self.assertEqual(self.lines[0], f"out: PR #70: run 903 is starting: its plan has finished "
+                                        f"but it lists no review job yet, so it may be about to "
+                                        f"review head {SHA1[:7]}")
+        self.assertIn("run 903 is starting", self.lines[1])
+
+    def test_starting_run_holds_a_dispatch_too(self):
+        self.prs[70] = pr(70)
+        self.starting_run(903)
+        _, prs, _ = self.run_plan(pr_arg=70)
+        self.assertEqual(prs, [])
+        self.assertIn("run 903 is starting", self.lines[0])
+
+    def test_starting_run_older_than_the_head_does_not_hold_it(self):
+        self.open_prs = [pr(70)]
+        self.pushed[SHA1] = T0 + 3600
+        self.starting_run(903, minutes=10)       # created before the head, less skew
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_this_runs_own_plan_is_not_starting(self):   # its plan job is still in progress
+        self.open_prs = [pr(70)]
+        self.starting_run(903, plan_status="in_progress")
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_a_failed_plan_is_not_starting(self):
+        self.open_prs = [pr(70)]
+        self.starting_run(903, plan_conclusion="failure")
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_a_run_whose_review_jobs_exist_is_not_starting(self):
+        self.open_prs = [pr(70)]
+        self.attempt(903, 72, SHA2, status="in_progress", minutes=20)   # listed another PR
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_an_empty_plan_run_is_not_starting(self):    # review skipped: any=false
+        self.open_prs = [pr(70)]
+        self.starting_run(903)
+        self.jobs[903].append({"name": "review", "status": "completed", "conclusion": "skipped"})
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_a_completed_run_is_never_starting(self):
+        self.open_prs = [pr(70)]
+        self.starting_run(903)
+        self.runs[-1]["status"] = "completed"
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
+    def test_an_attempt_newer_than_a_starting_run_decides(self):
+        self.open_prs = [pr(70)]
+        self.starting_run(903, minutes=20)
+        self.attempt(905, 70, SHA1, conclusion="cancelled", minutes=30)
+        _, prs, _ = self.run_plan()
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}])
+
     def test_pr_arg_retries_a_failed_attempt(self):
         self.prs[70] = pr(70)
         self.attempt(901, 70, SHA1, conclusion="failure")

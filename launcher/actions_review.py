@@ -33,7 +33,10 @@ but `cancelled` is out too, so a run that ended at its budget isn't restarted ev
 attempt: that is the owner's restart. The read is bounded: only this workflow's runs
 created since the head's commit (less CLOCK_SKEW), newest first, stopping at the head's
 newest attempt, and at most MAX_JOB_READS runs' jobs per plan; past that, an unresolved
-head is held, never started twice. It needs `actions: read` and stays read-only.
+head is held, never started twice. A run still in progress whose `plan` job has
+succeeded but which lists no other job yet is starting (#278): its review jobs are about to
+be created, so every head it could have listed (committed before the run was created,
+plus CLOCK_SKEW) is held, with that reason in the log. It needs `actions: read` and stays read-only.
 
 `run --pr N` runs one reviewer pass on PR N, in the workflow's second job, with the same
 limits as a run `swarm watch` starts:
@@ -99,6 +102,7 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 # must be named exactly this (full SHA): it is how plan finds earlier attempts on a head.
 REVIEW_JOB = "review #{pr} {head}"
 REVIEW_JOB_RE = re.compile(r"review #(\d+) ([0-9a-f]{40})")
+PLAN_JOB = "plan"             # reviewer.yml's first job; a run with only this, done, is starting (#278)
 WORKFLOW = "reviewer.yml"     # whose runs plan reads, when GITHUB_WORKFLOW_REF doesn't say
 MAX_JOB_READS = 50            # runs whose jobs one plan may read
 CLOCK_SKEW = 600              # seconds: a commit's date may be a little after its push
@@ -202,9 +206,20 @@ class History:
         self.retry_completed, self.max_reads = retry_completed, max_reads
         self.jobs: dict[int, list[dict]] = {}
 
+    @staticmethod
+    def starting(run: dict, jobs: list[dict]) -> bool:
+        """Whether run is between its plan and its review jobs (#278): not completed, and
+        its only job is a successful PLAN_JOB. reviewer-plan is released when plan ends,
+        and GitHub creates the review matrix just after, so another plan in that gap would
+        see no attempt on a head this run has listed."""
+        return (run.get("status") != "completed" and len(jobs) == 1
+                and jobs[0].get("name") == PLAN_JOB and jobs[0].get("status") == "completed"
+                and jobs[0].get("conclusion") == "success")
+
     def newest_attempt(self, n: int, sha: str) -> tuple[dict | None, dict | None, bool]:
         """(run, job) of the newest attempt on PR n at head sha, and whether the search
-        was complete (False when it stopped at max_reads first)."""
+        was complete (False when it stopped at max_reads first). A starting run (#278)
+        newer than any attempt gives (run, None): it may be about to review this head."""
         def key(run):
             return (iso_time(run.get("created_at")) or 0, run.get("id") or 0)
         runs = [r for r in self.list_runs(self.head_time(sha) - CLOCK_SKEW)
@@ -216,6 +231,8 @@ class History:
                 if len(self.jobs) >= self.max_reads:
                     return None, None, False
                 self.jobs[run["id"]] = [j for j in self.get_jobs(run["id"]) if isinstance(j, dict)]
+            if self.starting(run, self.jobs[run["id"]]):
+                return run, None, True
             for job in self.jobs[run["id"]]:
                 if parse_review_job(job.get("name")) == (n, sha):
                     return run, job, True
@@ -227,7 +244,9 @@ class History:
             return (f"head {sha[:7]}: no attempt found in the {self.max_reads} newest runs "
                     "read, so one can't be ruled out")
         if job is None:
-            return None
+            return None if run is None else (
+                f"run {run['id']} is starting: its plan has finished but it lists no review "
+                f"job yet, so it may be about to review head {sha[:7]}")
         status, conclusion = job.get("status"), job.get("conclusion")
         if status != "completed":
             return f"head {sha[:7]} is being reviewed in run {run['id']} ({status})"
