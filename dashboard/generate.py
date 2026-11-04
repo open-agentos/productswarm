@@ -27,6 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import reviewer_runs
 import spend
 
 HERE = Path(__file__).resolve().parent
@@ -91,7 +92,7 @@ def fetch(repo: str, now: dt.datetime, days: int) -> dict:
     reviews = {p["number"]: gh_items(f"repos/{repo}/pulls/{p['number']}/reviews?per_page=100")
                for p in prs or [] if not p.get("isDraft")}
     return {"repo": repo, "issues": list(issues.values()), "comments": comments, "prs": prs or [],
-            "reviews": reviews}
+            "reviews": reviews, "actions": reviewer_runs.fetch(repo, now, reviews)}
 
 
 # ---------------------------------------------------------------- deriving state
@@ -305,6 +306,8 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
     return {"repo": repo, "now": now, "idle_minutes": int(idle_after.total_seconds() // 60),
             "issue_titles": {n: i["title"] for n, i in issues.items()},
             "sessions": sessions, "prs": prs, "gov": gov,
+            "reviewer_runs": reviewer_runs.build(
+                data.get("actions"), [p for p in prs if not p["draft"] and unreviewed(p)], now),
             "spend": {"per_day": per_day, "today": per_day[today],
                       "unpriced": [s for s in sessions if s["cost"] is None]}}
 
@@ -592,6 +595,8 @@ def render(m: dict) -> str:
                    f'<th>Sessions waiting</th><th>Opened</th></tr>{"".join(rows)}</table></div>')
     else:
         out.append('<p class="muted">None.</p>')
+
+    out.append(reviewer_runs.render(m["reviewer_runs"], repo, now, ago, stamp))
 
     sp = m["spend"]
     out.append("<h2>Spend per day (est.)</h2>")

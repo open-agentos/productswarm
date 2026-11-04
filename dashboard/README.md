@@ -69,6 +69,18 @@ The digest issue isn't a `[heartbeat]` tracking issue or a `gov:question`, so it
 - **Sessions:** `[heartbeat]` tracking issues (GOV-0003). An issue counts only if its body starts with the heartbeat marker and it was opened by a `productswarm-<role>[bot]` App. Events are read from the first `jsonl` fence of comments **by that same App**; events whose `session_id`, `role` or `repo` don't match the issue, or that carry fields outside the remote schema (such as `prompt`), are dropped. The local spool is never read, so prompt text never reaches the page (GOV-0002).
 - **Open PRs** and the issues they close.
 - **Open `gov:question` issues**, with the sessions blocked on each.
+- **Reviewer workflow runs and jobs** from the Actions API, and the reviews and commits of the PRs they reviewed (see [Actions reviewer](#actions-reviewer)). Never job logs.
+
+## Actions reviewer
+
+`reviewer_runs.py` builds this section (#356). It covers the last 7 days:
+
+- **Sweeps:** runs of `reviewer.yml` (the newest 30 at most), each with when and how it started (`schedule`, `nudge` for a `workflow_dispatch` by `github-actions[bot]` from `reviewer-nudge.yml`, or `manual (<login>)` for a person's dispatch), its conclusion, and the `review #N <sha>` jobs it ran (`REVIEW_JOB` in `launcher/actions_review.py`). A successful sweep with no review jobs says "nothing to review".
+- **Success rate:** "N of M review jobs succeeded", counting finished review jobs, not sweeps, and listing the ones that didn't succeed.
+- **Commit to review:** for each head the reviewer App reviewed in the window, the time from that commit's committer date to the App's first review of it; the median and the longest. GitHub doesn't give push time, so this is commit time. A review counts for the commit it was made on, never for a later head.
+- **Unreviewed builder heads:** a count of the builder PRs `unreviewed()` flags, linked. They're in the needs-you list too.
+
+It reads run, job, review and commit metadata only. It **shows no cost** and never fetches job logs, where GOV-0016 puts `total_cost_usd` (#348). It needs `actions: read` on the workflow's token; without it the section shows one muted line ("can't read Actions runs: the token needs `actions: read`") and the rest of the page still builds.
 
 ## Status
 
