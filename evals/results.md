@@ -107,6 +107,7 @@ N = 15, so line 1 needs at least 13 of 15 (85% of 15 is 12.75, rounded up, per `
 The README asks #175 to say how this could be shown. These are options for the owner. None has been started.
 
 1. **A planted defect.** Open a non-draft PR that closes a throwaway issue and leaves one "Done when" item `unmet`. Let one loop-started reviewer pass run on it, record the review state, then close the PR unmerged. A pass means `CHANGES_REQUESTED`, or `COMMENTED` with an `Overstep:` finding. Planting a `broken` record as well, in a second PR, would test the records side separately.
+   #311 has since replaced this pass condition: `evals/README.md` ("The planted-defect gate") now sets it.
 2. **Replay real defects under the current prompt.** Two earlier heads in this sample had defects that the reviewer itself found while it could only comment (see cases 1 and 2 below): #72 at `b14116a`, where a "Done when" item was unmet, and #104 at `48ab1fd`, where `[build]` started a second builder on finished work. Running the current `roles/reviewer.md` against those heads would show whether the stoplight prompt now blocks them. These PRs are merged, so this needs a way to review a past head outside the normal loop.
 3. **Wait for a real defect.** Re-run #173–#175 on a later sample that includes a PR where the eval blocks. This costs nothing, but has no end date.
 
