@@ -241,12 +241,14 @@ class CallCountTest(unittest.TestCase):
                    "FAKE_GH_DATA": str(tmp / "data.json"), "FAKE_GH_LOG": str(tmp / "log")}
             buf = io.StringIO()
             with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf), \
-                    contextlib.redirect_stderr(io.StringIO()):
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    mock.patch.object(g.precedent, "published", return_value=None) as pub:
                 for k in ("GITHUB_EVENT_NAME", "GITHUB_TRIGGERING_ACTOR", "GITHUB_ACTOR"):
                     os.environ.pop(k, None)
                 rc = g.main(["--repo", REPO, "--out", str(tmp / "index.html")])
                 page = (tmp / "index.html").read_text() if (tmp / "index.html").exists() else ""
             calls = [json.loads(ln) for ln in (tmp / "log").read_text().splitlines()]
+        self.assertEqual(pub.call_count, 1)   # the Pages copy, not an API call
         return rc, page, calls
 
     def test_rebuild_call_count(self):
@@ -260,7 +262,11 @@ class CallCountTest(unittest.TestCase):
         # 60 tracking issues: 3 GraphQL queries of 25, never one REST call per issue.
         self.assertEqual(sum(bool(re.search(r"\bi\d+: issue\(\w+: \d+\) { comments", q))
                              for q in queries), 3)
-        self.assertFalse([c for c in rest if "/comments" in " ".join(c)], rest)
+        self.assertFalse([c for c in rest if "/comments" in " ".join(c)
+                          and "/comments?since=" not in " ".join(c)], rest)
+        # Precedent (#408): one paginated read each of issue and review comments, and one
+        # GraphQL query of PR reviews per 25 PRs in the window (none here).
+        self.assertEqual(len([c for c in rest if "/comments?since=" in " ".join(c)]), 2)
         # 15 reviewed PRs: one GraphQL query, no REST reviews or commits per PR. Open PRs'
         # reviews stay one REST call each (generate.fetch() needs their bodies).
         self.assertEqual(sum("pullRequest(" in q for q in queries), 1)
@@ -273,8 +279,8 @@ class CallCountTest(unittest.TestCase):
         self.assertEqual(len([c for c in rest if "labels=gov:question" in " ".join(c)]), 1)
         self.assertEqual(len([c for c in rest if "search/issues" in " ".join(c)]), 1)
         self.assertEqual(sum("timelineItems(" in q for q in queries), 2)
-        # The whole rebuild: 34 calls (30 before #406). On main before #392 the same data took 100.
-        self.assertLessEqual(len(calls), 34, "\n".join(map(str, calls)))
+        # The whole rebuild: 36 calls (30 before #406 added 4 and #408 added 2). On main before #392 the same data took 100.
+        self.assertLessEqual(len(calls), 36, "\n".join(map(str, calls)))
         self.assertLess(len(rest), g.PAGE_NEEDS["core"])
         self.assertLess(len(graphql), g.PAGE_NEEDS["graphql"])
 

@@ -92,6 +92,11 @@ table.grid td { min-width:160px; }
 .now { font-weight:600; }
 .id { white-space:nowrap; }
 details summary { cursor:pointer; margin:12px 0 4px; color:var(--muted); }
+ul.findings { margin:0 0 10px; padding-left:20px; max-width:760px; }
+ul.findings li { padding:2px 0; }
+table.precedent { width:auto; }
+table.precedent th, table.precedent td { padding:4px 6px; }
+table.precedent td.num { min-width:34px; }
 .pointer { margin:28px 0 0; padding:10px 12px; border-left:3px solid var(--agent); background:var(--card); }
 .desk { margin:16px 0 0; }
 .desk .band { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 14px; padding:10px 14px;

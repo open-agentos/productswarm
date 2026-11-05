@@ -123,6 +123,7 @@ class SkippedBuildTest(unittest.TestCase):
             out = Path(tmp) / "index.html"
             with mock.patch.dict(os.environ, env, clear=False), \
                     mock.patch.object(g, "gh_json", side_effect=answers), \
+                    mock.patch.object(g.precedent, "published", return_value=None), \
                     contextlib.redirect_stdout(io.StringIO()):
                 for k in ("GITHUB_EVENT_NAME", "GITHUB_TRIGGERING_ACTOR", "GITHUB_ACTOR"):
                     if k not in env:

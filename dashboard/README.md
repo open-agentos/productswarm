@@ -19,7 +19,7 @@ One build writes three pages, and the fonts, into the `--out` page's directory (
 
 | Page | What it shows |
 |---|---|
-| `index.html`, the **desk** | [On the floor](#on-the-floor), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
+| `index.html`, the **desk** | [On the floor](#on-the-floor), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), [precedent in use](#precedent-in-use), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" |
 
@@ -42,8 +42,8 @@ GitHub runs that schedule hours apart here, so the nudge in `.github/workflows/d
 The workflow's token (`GITHUB_TOKEN`) gets about 1,000 REST calls and 1,000 GraphQL points an hour, shared with the digest. When every nudge rebuilt the page at well over 100 calls each, a busy hour ran it out and every run failed (#392). So:
 
 - **Nudged rebuilds are spaced.** A rebuild started by the nudge (a `workflow_dispatch` by `github-actions[bot]`) first looks for the last `dashboard.yml` run that published: it lists the newest 5 successful runs and reads their jobs, newest first, until one whose `deploy-pages` step succeeded (2 to 6 Actions API calls). A run that skipped also ends `success`, so it doesn't count. If the last publish was less than 5 minutes ago, it prints one line and exits 0 without publishing. The schedule and the next event catch up. A scheduled run and a person's manual dispatch always rebuild. So the page rebuilds at most about every 5 minutes from nudges, plus the schedule.
-- **A rebuild costs about 23 REST calls and 19 GraphQL queries** (it was 258 calls on 2026-11-04). Tracking-issue comments, the reviewer section's reviews and commits, and the red check's reviews are read 20 or 25 issues or PRs to a GraphQL query (`ghql.py`); an issue or PR with more than 100 comments or reviews falls back to REST. The Actions reviewer section reads the newest 15 sweeps, one jobs call each.
-- **A low allowance skips cleanly.** Before fetching, `generate.py` reads `gh api rate_limit`, which doesn't count against the allowance. If fewer than 80 REST calls or 50 GraphQL points are left (`PAGE_NEEDS`), it prints one line and exits 0 without publishing, so the last good page stays up and the run isn't a failure. `digest.py --update` does the same below 30 of each (`DIGEST_NEEDS`) and leaves the issue as it was.
+- **A rebuild costs about 23 REST calls and 19 GraphQL queries** (it was 258 calls on 2026-11-04), plus [precedent in use](#precedent-in-use)'s 2 to about 20 REST calls and 1 to 5 GraphQL queries. Tracking-issue comments, the reviewer section's reviews and commits, and the red check's reviews are read 20 or 25 issues or PRs to a GraphQL query (`ghql.py`); an issue or PR with more than 100 comments or reviews falls back to REST. The Actions reviewer section reads the newest 15 sweeps, one jobs call each.
+- **A low allowance skips cleanly.** Before fetching, `generate.py` reads `gh api rate_limit`, which doesn't count against the allowance. If fewer than 100 REST calls or 55 GraphQL points are left (`PAGE_NEEDS`), it prints one line and exits 0 without publishing, so the last good page stays up and the run isn't a failure. `digest.py --update` does the same below 30 of each (`DIGEST_NEEDS`) and leaves the issue as it was.
 
 When `generate.py` skips, it writes no page, so `dashboard.yml` must skip its upload and deploy steps for the run to end green: `if: hashFiles('_site/index.html') != ''` on both. That's a workflow change, so it's proposed in #392's PR for the owner to commit (#32); until then a skipped run fails at the upload step, and the last good page still stays up.
 
@@ -66,6 +66,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `committees`, `progress`, `reviewer_runs` | those sections' data; `reviewer_runs.unreviewed` is PR numbers |
 | `committee_desk` | each open committee as the desk shows it: `discussion`, `url`, `question`, `question_title`, `question_url`, `round`, `max_rounds`, `waiting_on`, `seats` (each `seat`, `role`, `model`, `recommendation`, `swing` (`moved`, `held` or null), `moved_from`, `summary`, `round`, `posted`, `url`) and `consensus` (`agree`, `seats`, `converging`, `consensus`, `text`); `[]` when none is open |
 | `trends` | [What the numbers say](#what-the-numbers-say): `days`, `first_day`, `min_count`, and each trend's `name`, `sentence`, `too_few` and `series` (one `{date, value}` per day; `value` is `null` on a day with no data) |
+| `precedent` | [precedent in use](#precedent-in-use): `version`, `from` (the window's first day), `counts` (record → day → `n`, `agents`, `owner`, `reviewer`), `totals`, `findings`, `records` (`id`, `date`, `status`) and `read` (where this build started reading, what it carried from, and its calls). The next build carries `counts` forward |
 
 It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
 
@@ -174,6 +175,17 @@ The desk's trends (#406): each one is a sentence and a sparkline, never a bare c
 - **Lapsed questions:** questions labelled `gov:lapsed`, open, or closed within `--days`, each with its time to live. A muted line notes that a lapsed default is not precedent (GOVERNANCE.md §8).
 
 The needs-you list and its past-TTL flag don't change. This section is for reading, not for acting on. It needs no new token permission: the index comes from the checkout, and the questions come from the issues the page already fetches.
+
+## Precedent in use
+
+On the desk, `precedent.py` (#408, part 9 of #397) counts how often each GOV record is cited, as a grid of records (newest first) by UTC day over the page's window (from the first record's date, if that's later), then each record's total, by agents, by the owner and **by reviewer**. The grid scrolls in its own box at phone width.
+
+- **A citation** is a `GOV-NNNN` mention in an issue or PR body, an issue or PR comment, a PR review, or a PR review comment, created in the window. A text cites a record once, however often it names it. It counts only on or after the record's front-matter `date:`, and only for a record in `governance/decisions/`; the cell for a day before the record was made is blank.
+- **Left out:** signature lines (`-- builder (claude-opus-5-5)`), tracking issues, the pinned digest issue, and review comments on files under `governance/`.
+- **Who:** agents are `productswarm-*[bot]`; the owner is `humans.owner` in `governance/jurisdictions.yml`; the reviewer column is `productswarm-reviewer[bot]`, which also counts as an agent. Anyone else counts only in the total.
+- **Findings** are templates filled from the counts: the newest in-force record's citations on its first day ("GOV-0021, the newest record, was cited 27 times on its first day (2026-11-04) and 30 in all."), the share by agents and by the owner, and the in-force records not cited in the window.
+
+**Cost.** Bodies come with the issue list the page already reads. Comments are `issues/comments?since=` and `pulls/comments?since=`, 100 a page, and reviews are one GraphQL query per 25 PRs updated in the window. Reading the whole 14-day window took 9 REST calls and 5 GraphQL queries on 2026-11-05 (8 pages of issue comments), and grows with traffic. So each build fetches the last published `state.json` from the Pages URL (not the API), keeps its counts for the days before its build day, and reads only from the start of that day: 2 REST calls and 1 GraphQL query. It reads the whole window when there's no published copy, its `precedent.version` differs, or it doesn't reach back to the window's first day. A comment created before that day but edited later isn't counted again.
 
 ## Committees
 
