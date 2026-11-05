@@ -1,6 +1,6 @@
 # Swarm dashboard
 
-Read-only pages showing what every agent session is doing and how the swarm is governed. Built by `generate.py`: Python stdlib only, static HTML files, no JavaScript (option 1 in gov question #26, which the owner chose).
+Read-only pages showing what every agent session is doing and how the swarm is governed. Built by `generate.py`: Python stdlib only, static HTML files. The desk carries one small inline script that [refreshes it](#live-refresh) from `state.json` (option 2 of gov question #396, which reversed #26's "no JavaScript"); the other pages carry none, and every page is complete with JavaScript off.
 
 ## Generate it
 
@@ -24,7 +24,7 @@ One build writes four pages, and the fonts, into the `--out` page's directory (#
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" with their round grids |
 | `authority.html` | The [authority map](#authority-map): who may decide what, one row per domain in `governance/jurisdictions.yml` |
 
-Every page opens with the [header](#header) and carries `noindex`, reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the four pages. `generate.render(model)` returns the pages by file name.
+Every page opens with the [header](#header) and carries `noindex` and a [Content-Security-Policy](#live-refresh), reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the four pages. `generate.render(model)` returns the pages by file name.
 
 ### Look
 
@@ -52,7 +52,7 @@ What the events API does here (checked 2026-11-05):
 
 `.github/workflows/dashboard.yml` regenerates the pages every 15 minutes (plus a manual run) and publishes it to GitHub Pages at <https://open-agentos.github.io/productswarm/>. It runs on a schedule only, never on issue, comment or PR events, and its token can read the repo but not write to it (`pages` and `id-token` are only for the deploy), per the owner's choice on #32.
 
-GitHub runs that schedule hours apart here, so the nudge in `.github/workflows/digest-nudge.yml` (shared with the digest) dispatches `dashboard.yml` on `main` when something happens: an issue or PR is opened, closed, reopened or relabelled, a PR is pushed or reviewed, or a Discussion post or comment is created or edited (#351). The nudge passes no event data and holds no secrets; `dashboard.yml` itself still runs only on its schedule and dispatch, and the schedule stays as the safety net. An open page reloads itself every 300 seconds with a `<meta http-equiv="refresh">` tag (plain HTML, no script), so it picks up a rebuild within about five minutes.
+GitHub runs that schedule hours apart here, so the nudge in `.github/workflows/digest-nudge.yml` (shared with the digest) dispatches `dashboard.yml` on `main` when something happens: an issue or PR is opened, closed, reopened or relabelled, a PR is pushed or reviewed, or a Discussion post or comment is created or edited (#351). The nudge passes no event data and holds no secrets; `dashboard.yml` itself still runs only on its schedule and dispatch, and the schedule stays as the safety net. An open page reloads itself every 300 seconds with a `<meta http-equiv="refresh">` tag (plain HTML, no script), so it picks up a rebuild within about five minutes; with JavaScript on, an open desk [picks it up](#live-refresh) within 15 seconds of Pages serving the new `state.json`.
 
 ### How often it rebuilds
 
@@ -68,7 +68,7 @@ The page is **public**, because this repo is. It shows nothing that isn't alread
 
 ## state.json
 
-Each build also writes `state.json` beside `index.html` (so `_site/state.json` on Pages): the data the page shows, as JSON, with no HTML (`state.py`, #400). It's written only when the page is, so a skipped build leaves both as they were. Timestamps are RFC 3339 in UTC (`2026-11-05T07:20:08Z`); dates are `YYYY-MM-DD`.
+Each build also writes `state.json` beside `index.html` (so `_site/state.json` on Pages): the data the page shows, as JSON, with no HTML strings (`state.py`, #400). It's written only when the page is, so a skipped build leaves both as they were. Timestamps are RFC 3339 in UTC (`2026-11-05T07:20:08Z`); dates are `YYYY-MM-DD`.
 
 | Key | What |
 |---|---|
@@ -88,8 +88,23 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `precedent` | [precedent in use](#precedent-in-use): `version`, `from` (the window's first day), `counts` (record → day → `n`, `agents`, `owner`, `reviewer`), `totals`, `findings`, `records` (`id`, `date`, `status`) and `read` (where this build started reading, what it carried from, and its calls). The next build carries `counts` forward |
 | `wire` | [the wire](#the-wire): `day`, `events` (whether the repo's events could be read) and `items`, newest first, each with `kind` (`opened`, `ruled`, `lapsed`, `record`, `red` or `convened`), `time`, `number`, `text` and `link`, plus `record` on a `record` item; `[]` items on a quiet day |
 | `past_committees` | each ended committee's card: `discussion`, `url`, `question`, `question_title`, `question_url`, `record` (`id`, `url`, or null), `summary` (the INDEX.md ruling, or null), `consensus` (`text`, `consensus`, `dissent`), `rounds_used`, `max_rounds`, `stopped_early`, `models`, `diversity_met`, `minutes`, `swing` and `seats`; `[]` when none has ended |
+| `desk` | what the [live refresh](#live-refresh) draws: the desk's `mast` (masthead) and each panel (`floor`, `committee_desk`, `trends`, `precedent`, `past_committees`) as a node tree, or `null` for a panel that can't be one |
 
 It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
+
+## Live refresh
+
+With JavaScript on, an open desk redraws itself from `state.json` every 15 seconds, without a reload (`live.py` and `poll.js`, #411, option 2 of #396). It's how the desk feels live between the 300-second reloads.
+
+- **One renderer.** The panels are still drawn in Python. Each build turns each desk panel's HTML into a node tree in `state.json["desk"]`: a node is a string (text) or `[tag, {attr: value}, child, …]`. The script turns the tree back into DOM nodes with `createElement`, `setAttribute` and text nodes. It never uses `innerHTML` or `eval`, and never parses HTML, so text from the repo stays text.
+- **Allow lists.** Only the tags and attributes in `live.py` may appear, and links only to `https://` URLs, a page beside the desk or a fragment. The build checks them, and the script checks them again. A panel with anything else is `null` in `state.json`, so the desk keeps it as drawn until its next reload; the build doesn't fail. A test draws every panel fixture the panels' own tests use, so new markup that isn't allowed shows up as a failing test, not as a panel that quietly stops refreshing.
+- **Boxes.** The desk draws each panel inside `<div data-panel="NAME">` (an empty panel still gets its box), and the masthead is `data-panel="mast"`. The script redraws each box whose name `state.json` carries. A new panel joins by adding itself to `generate.desk_panels()`.
+- **Only forward.** The script fetches `state.json?t=…` with `cache: "no-store"`, same origin, every 15 seconds while the tab is visible, and applies it only if its `built_at` is newer than the data on screen (the `data-built-at` on `<body>`), since Pages' cache can serve an older copy than the page.
+- **Stale mark.** When the data on screen is more than 15 minutes old, the script adds `stale` to the masthead's LIVE mark (#402), which greys it out. Builds often run further apart than that (see [How often it rebuilds](#how-often-it-rebuilds)), so a grey mark is common and honest.
+- **CSP.** Every page carries a `<meta http-equiv="Content-Security-Policy">`: `default-src 'none'`, `script-src` the live script's `sha256` hash on the desk and `'none'` elsewhere, `style-src 'unsafe-inline'` (the page's `<style>` and the precedent table's cell shading), `font-src`, `connect-src 'self'`, `base-uri 'none'` and `form-action 'none'`. `live.script()` fills `poll.js`'s settings and allow lists in at build time, and the hash is of that exact text.
+- **JavaScript off.** Nothing changes: the page is complete as built, and the meta refresh stays.
+
+It adds **no API calls** per build: browser fetches hit Pages, not the API, and need no token.
 
 ## On the floor
 
