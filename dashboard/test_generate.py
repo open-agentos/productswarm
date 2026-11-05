@@ -10,6 +10,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -253,7 +254,8 @@ class EndToEndTest(unittest.TestCase):
             old = {k: os.environ.get(k) for k in env}
             os.environ.update(env)
             try:
-                rc = g.main(["--repo", REPO, "--out", str(d / "out" / "index.html")])
+                with mock.patch.object(g.precedent, "published", return_value=None):   # no Pages fetch in tests
+                    rc = g.main(["--repo", REPO, "--out", str(d / "out" / "index.html")])
             finally:
                 for k, v in old.items():
                     if v is None:

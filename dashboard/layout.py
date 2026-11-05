@@ -92,6 +92,11 @@ table.grid td { min-width:160px; }
 .now { font-weight:600; }
 .id { white-space:nowrap; }
 details summary { cursor:pointer; margin:12px 0 4px; color:var(--muted); }
+ul.findings { margin:0 0 10px; padding-left:20px; max-width:760px; }
+ul.findings li { padding:2px 0; }
+table.precedent { width:auto; }
+table.precedent th, table.precedent td { padding:4px 6px; }
+table.precedent td.num { min-width:34px; }
 .pointer { margin:28px 0 0; padding:10px 12px; border-left:3px solid var(--agent); background:var(--card); }
 .desk { margin:16px 0 0; }
 .desk .band { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 14px; padding:10px 14px;
@@ -118,6 +123,22 @@ details summary { cursor:pointer; margin:12px 0 4px; color:var(--muted); }
 .desk .marks { display:flex; gap:3px; }
 .desk .marks span { width:28px; height:10px; background:var(--line); }
 .desk .marks span.on { background:var(--agent); }
+.floor { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:10px; }
+.floor .card { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--agent);
+  padding:10px 12px; }
+.floor .card.s-blocked { border-left-color:var(--red); }
+.floor .role { font:600 15px/1.2 var(--cond); color:var(--agent); text-transform:uppercase;
+  letter-spacing:.05em; }
+.floor .what { font-weight:600; margin:4px 0 2px; }
+.floor .spark { display:block; margin:6px 0 2px; }
+.floor .spark .bar { fill:var(--agent); } .floor .spark .zero { fill:var(--line); }
+.floor .used, .idle { font-size:13px; }
+ul.trends { list-style:none; margin:0; padding:0; }
+ul.trends li { display:flex; align-items:center; gap:12px; padding:8px 0;
+  border-bottom:1px solid var(--line); font-size:16px; }
+ul.trends li.few { color:var(--muted); }
+ul.trends svg.spark { flex:none; fill:none; stroke:var(--agent); stroke-width:1.5; }
+ul.trends svg.spark circle { fill:var(--agent); stroke:none; }
 .pasts { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px; }
 .past { background:var(--card); border:1px solid var(--line); padding:12px 14px; min-width:0; }
 .past .rec { font:600 20px/1.2 var(--cond); }
