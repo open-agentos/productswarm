@@ -10,6 +10,7 @@ Stdlib only, no JavaScript (#26).
 """
 from __future__ import annotations
 
+import datetime as dt
 import html
 import shutil
 from pathlib import Path
@@ -58,6 +59,10 @@ header.mast { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 16px;
   border-bottom:2px solid var(--ink); padding-bottom:6px; margin-bottom:8px; }
 header.mast > span { min-width:0; overflow-wrap:anywhere; }
 header.mast .name { font:600 13px/1 var(--cond); letter-spacing:.08em; text-transform:uppercase; }
+header.mast .live { background:var(--red); color:#fff; padding:0 8px; font:600 12px/1.6 var(--cond);
+  letter-spacing:.1em; }
+header.mast .owner { color:var(--owner); }
+header.mast .owner a { color:var(--owner); text-decoration-color:var(--owner); }
 h1 { font:600 26px/1.15 var(--cond); margin:12px 0 4px; letter-spacing:.01em; }
 h2 { font:600 18px/1.2 var(--cond); margin:32px 0 8px; padding-top:6px;
   border-top:1px solid var(--line); text-transform:uppercase; letter-spacing:.05em; }
@@ -170,9 +175,19 @@ def nav(current: str) -> str:
     return "".join(links)
 
 
-def page(current: str, title: str, repo: str, built: str, body: str) -> str:
-    """One whole page in the shared shell: head (noindex, refresh, CSS), masthead, the body,
-    and the footer linking every page."""
+def built_mark(built: dt.datetime) -> str:
+    """The red LIVE mark and the build time (#402). A static page can't know how old it is
+    when viewed; the `datetime` attribute is there for the state.json poll (#411)."""
+    t = built.astimezone(dt.timezone.utc)
+    return (f'<span class="live">LIVE</span><span class="muted">built <time class="stamp" '
+            f'datetime="{t.strftime("%Y-%m-%dT%H:%M:%SZ")}" title="{t.strftime("%Y-%m-%d %H:%M UTC")}">'
+            f'{t.strftime("%H:%M")} UTC</time></span>')
+
+
+def page(current: str, title: str, repo: str, built: dt.datetime, body: str, owner: str = "") -> str:
+    """One whole page in the shared shell: head (noindex, refresh, CSS), masthead (LIVE mark,
+    build time and `owner`, the owner's last act as HTML, #402), the body, and the footer
+    linking every page."""
     name = dict(PAGES)[current]
     return "\n".join([
         '<!doctype html><html lang="en"><head><meta charset="utf-8">',
@@ -181,7 +196,7 @@ def page(current: str, title: str, repo: str, built: str, body: str) -> str:
         f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">',
         f"<title>{esc(name)} · {esc(title)} · {esc(repo)}</title><style>{CSS}</style></head><body>",
         f'<header class="mast"><span class="name">productswarm · {esc(name)}</span>'
-        f'<span class="muted">{esc(repo)} · built <span class="stamp">{esc(built)}</span></span></header>',
+        f'<span class="muted">{esc(repo)}</span>{built_mark(built)}{owner}</header>',
         f"<main>{body}</main>",
         f'<footer class="foot">{nav(current)}</footer>',
         "</body></html>\n",
