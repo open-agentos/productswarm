@@ -23,13 +23,29 @@ One build writes three pages, and the fonts, into the `--out` page's directory (
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" with their round grids |
 
-Every page carries `noindex`, reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the three pages. The authority map (#410) joins the footer when it lands. `generate.render(model)` returns the pages by file name.
+Every page opens with the [header](#header) and carries `noindex`, reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the three pages. The authority map (#410) joins the footer when it lands. `generate.render(model)` returns the pages by file name.
 
 ### Look
 
 `layout.py` holds the look and the page shell every page uses, so colours and fonts are set in one place: paper `#F4F3EE`, ink, agents blue `#1F4FB8` (active sessions), owner amber `#A35A00` (what waits on the owner), and red `#C2361B` only for live marks and blocks (#397). Text is IBM Plex Sans, numbers, times and code Plex Mono, headings Plex Sans Condensed.
 
 The fonts are **self-hosted**, so the public page loads nothing from a third party. `static/fonts/` holds the Latin-1 subset, as woff2, of only the four faces the CSS uses (Sans 400 and 600, Mono 400, Sans Condensed 600), from IBM's `@ibm/plex-sans` 1.1.0, `@ibm/plex-mono` 2.5.0 and `@ibm/plex-sans-condensed` 2.0.0 packages, with their SIL Open Font License. Together they add 82,776 bytes (87,232 with the licence) to the published site. `generate.py` copies them to `fonts/` beside the pages on every build, before writing the pages. A character outside Latin-1 (an arrow, say) falls back to the system font.
+
+## Header
+
+Every page's masthead shows a red **LIVE** mark, `built HH:MM UTC` (the full time on hover, and a `<time datetime>` the `state.json` poll, #411, can use to grey the mark out once the data is stale; a static page can't know its own age when viewed), and when the owner last acted, in owner amber (`activity.py`, #402, part 3 of #397): "Owner last acted 8m ago: labelled #411 `ready`", linking the issue, PR, comment, commit or branch.
+
+The owner is `identities.humans.owner` in `governance/jurisdictions.yml` (`committees.owner_login()`). Their last act is their newest event, by `created_at`, in the repo's public events (`repos/{repo}/events`), read 100 a page, newest first, up to the 3 pages (300 events) the API keeps, stopping at the first page with an owner event. If none of those is the owner's, it says "Owner: no activity in the last N days", N being how far back the events read go (leaving out the oldest tenth, so a few late arrivals don't stretch it). If the owner or the events can't be read, it says "Owner: unknown" and the page still builds. The wire (#405) reuses the same events (`model["activity"]`), so they're read once a build.
+
+What the events API does here (checked 2026-11-05):
+
+- New events show up about **30 seconds** after they happen.
+- The list is in event-id order, not quite time order: a few events arrive late with their original time (pushes and branch creations from two days earlier, listed among today's events). That's why the newest `created_at` wins, not the first event listed.
+- **Labels** show up: `IssuesEvent` `labeled` carries the label's name. `unlabeled` carries none.
+- **Merges** show up as `PullRequestEvent` with action `merged` (not `closed` with `merged`), and their actor is the PR's **author**, not who merged it. So the owner merging an agent's PR doesn't count as the owner's act; the `IssuesEvent` `closed` that the PR's `Closes #N` makes in the owner's name a few seconds later does.
+- 300 events covered about 15 hours of this repo on 2026-11-05.
+
+**API calls added per build:** 1 to 3 REST calls (one per page of events). Only the page reads them (`fetch(..., with_activity=True)` in `main()`); `swarm inbox`, `swarm watch` and the digest don't.
 
 ## Where it's published
 
@@ -42,7 +58,7 @@ GitHub runs that schedule hours apart here, so the nudge in `.github/workflows/d
 The workflow's token (`GITHUB_TOKEN`) gets about 1,000 REST calls and 1,000 GraphQL points an hour, shared with the digest. When every nudge rebuilt the page at well over 100 calls each, a busy hour ran it out and every run failed (#392). So:
 
 - **Nudged rebuilds are spaced.** A rebuild started by the nudge (a `workflow_dispatch` by `github-actions[bot]`) first looks for the last `dashboard.yml` run that published: it lists the newest 5 successful runs and reads their jobs, newest first, until one whose `deploy-pages` step succeeded (2 to 6 Actions API calls). A run that skipped also ends `success`, so it doesn't count. If the last publish was less than 5 minutes ago, it prints one line and exits 0 without publishing. The schedule and the next event catch up. A scheduled run and a person's manual dispatch always rebuild. So the page rebuilds at most about every 5 minutes from nudges, plus the schedule.
-- **A rebuild costs about 23 REST calls and 19 GraphQL queries** (it was 258 calls on 2026-11-04), plus [precedent in use](#precedent-in-use)'s 2 to about 20 REST calls and 1 to 5 GraphQL queries. Tracking-issue comments, the reviewer section's reviews and commits, and the red check's reviews are read 20 or 25 issues or PRs to a GraphQL query (`ghql.py`); an issue or PR with more than 100 comments or reviews falls back to REST. The Actions reviewer section reads the newest 15 sweeps, one jobs call each.
+- **A rebuild costs about 23 REST calls and 19 GraphQL queries** (it was 258 calls on 2026-11-04), plus [precedent in use](#precedent-in-use)'s 2 to about 20 REST calls and 1 to 5 GraphQL queries, and the [header](#header)'s 1 to 3. Tracking-issue comments, the reviewer section's reviews and commits, and the red check's reviews are read 20 or 25 issues or PRs to a GraphQL query (`ghql.py`); an issue or PR with more than 100 comments or reviews falls back to REST. The Actions reviewer section reads the newest 15 sweeps, one jobs call each.
 - **A low allowance skips cleanly.** Before fetching, `generate.py` reads `gh api rate_limit`, which doesn't count against the allowance. If fewer than 100 REST calls or 55 GraphQL points are left (`PAGE_NEEDS`), it prints one line and exits 0 without publishing, so the last good page stays up and the run isn't a failure. `digest.py --update` does the same below 30 of each (`DIGEST_NEEDS`) and leaves the issue as it was.
 
 When `generate.py` skips, it writes no page, so `dashboard.yml` must skip its upload and deploy steps for the run to end green: `if: hashFiles('_site/index.html') != ''` on both. That's a workflow change, so it's proposed in #392's PR for the owner to commit (#32); until then a skipped run fails at the upload step, and the last good page still stays up.
@@ -57,6 +73,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 |---|---|
 | `schema` | `1` |
 | `built_at`, `repo`, `idle_minutes` | when and for which repo it was built, and the idle threshold |
+| `owner_last_acted` | the [header](#header)'s owner line: `status` (`acted`, `none` or `unknown`); with `acted`, `kind` (the event's action, e.g. `labeled`, `closed`, `pushed`), `text` (`labelled #411 ready`), `time` and `link`; with `none`, `days` |
 | `needs_you` | the needs-you list below, without over-cap items |
 | `floor` | [on the floor](#on-the-floor): `cards`, each with `session_id`, `role`, `model`, `status`, `started_ts`, `run_minutes`, `issue`, `pr`, `gov_question`, `activity` (the plain words), `events_per_slot` (six counts, oldest first) and `slots_used` (`editing`, `reading`, `commands`); and `idle`, each with `session_id`, `role` and `idle_minutes` |
 | `sessions` | each session's `session_id`, `role`, `model`, `status`, `issue`, `pr`, `gov_question`, `last_event`, `last_ts`, `started_ts` and `tracking_issue` |
@@ -177,6 +194,7 @@ A label only counts if the owner added it, as for the trends. The bar repeats th
 - **The `gov:question` history** for [What the numbers say](#what-the-numbers-say): every question created in the window, its label and close events, PRs merged in the window, and each record's front-matter `date:` from the checkout.
 - **`governance/INDEX.md`**, from the checkout the page is built in (`dashboard.yml` checks out `main`).
 - **v3 progress:** see [v3 progress](#v3-progress).
+- **The repo's public events**, 1 to 3 pages, for the [header](#header)'s owner line.
 - **Reviewer workflow runs and jobs** from the Actions API, and the reviews and commits of the PRs they reviewed (see [Actions reviewer](#actions-reviewer)). Never job logs.
 - **Committee Discussions** (`committees.py`, #353): every Discussion in the "Committees" category, through `gh api graphql`, plus the `gov:question` each one serves (from a `<!-- productswarm-committee question=N -->` marker, else the `Committee for #N:` title) and that question's record in `governance/decisions/` (front matter `question: "#N"`). Members come from the `## Members` or `### Members` table, the post order from rule 1 under `Rules`, and round posts are top-level comments headed `Round N: <seat>` by that seat's App. From each post it keeps only the round, seat, author, time, link, signature model, the first bold phrase of its Recommendation and the first sentence of its Position (#404). From the owner's comments on the question it keeps only whether the convening, summary and ruling comments exist, when, and their links, so no cost line or other text reaches the page. It derives status (convened, round N, summary, ratified, record), §7.2 diversity, the next seat, rounds used of 3 and posts per member per UTC day against §8's 6. A Discussion that doesn't match #314's layout shows as "unparsed". A token that can't read Discussions gives a note and the rest of the page still builds. Only the page reads these (`fetch(..., with_committees=True)` in `main()`); `swarm inbox`, `swarm watch` and the digest skip the GraphQL calls. The page shows them in the Committees section below.
 
