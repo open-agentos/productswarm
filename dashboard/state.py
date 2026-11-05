@@ -84,6 +84,8 @@ def state(m: dict) -> dict:
         "governance": {**gov, "days": m["days"]},
         "committees": m.get("committees"),
         "committee_desk": committees.desk_states(m.get("committees")),
+        "past_committees": committees.past_states(
+            m.get("committees"), {r["id"]: r["ruling"] for r in gov.get("all_records") or []}, m["repo"]),
         "progress": m.get("progress"),
         "reviewer_runs": reviewer_runs(m["reviewer_runs"]),
     })

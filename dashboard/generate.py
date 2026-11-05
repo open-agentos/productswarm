@@ -11,8 +11,8 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
     governance/INDEX.md from the checkout (the governance section, #355).
 
 Builds three pages in one look (layout.py), and copies the self-hosted fonts beside them:
-  - index.html, the desk: the committee desk while one is open (#404), and a pointer to the
-    other two (#397 fills it);
+  - index.html, the desk: the committee desk while one is open (#404), a card per past
+    committee (#409), and a pointer to the other two (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
     progress and spend;
   - decisions.html: the governance section with the full decision log, open committees with
@@ -547,12 +547,18 @@ def needs_section(m: dict) -> str:
 TITLE = "Swarm dashboard"
 
 
+def rulings(m: dict) -> dict[str, str]:
+    """Each record's one-line ruling from governance/INDEX.md, by ID (past committees, #409)."""
+    return {r["id"]: r["ruling"] for r in (m.get("governance") or {}).get("all_records") or []}
+
+
 def render_desk(m: dict) -> str:
-    """The desk (index.html): the committee desk while a committee is open (#404), and a
-    pointer to the other pages."""
+    """The desk (index.html): the committee desk while a committee is open (#404), a card
+    per past committee (#409), and a pointer to the other pages."""
     repo = m["repo"]
     out = ["<h1>The desk</h1>",
            committees.desk(m.get("committees"), repo),
+           committees.past(m.get("committees"), rulings(m), repo),
            '<p class="pointer">The needs-you list, sessions, open PRs, reviewer sweeps, v3 '
            'progress and spend are on <a href="operations.html">Operations</a>; the full '
            'decision log, open and lapsed gov questions, and every committee\'s round grid are on '
