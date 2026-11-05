@@ -9,13 +9,15 @@ question marker and `###` headings of the Discussion form (#352, option 3; #371)
 else is "unparsed": no convention is invented beyond those.
 
 What it keeps is deliberately thin, because the page is public (#348, GOV-0014): from each
-round post only its round, seat, author, time, link, signature model and the first bold
-phrase of its Recommendation; from the owner's comments on the question only which of the
-convening, summary and ruling comments exist, when, and their links. No other text, so a
-cost line in a convener's summary can never reach the page.
+round post only its round, seat, author, time, link, signature model, the first bold phrase
+of its Recommendation and the first sentence of its Position (#404); from the owner's
+comments on the question only which of the convening, summary and ruling comments exist,
+when, and their links. No other text, so a cost line in a convener's summary can never
+reach the page.
 
 fetch() never raises and build() never fails on bad data: problems become short notes and
-the rest of the page builds. render() draws them as the page's "Committees" section (#354).
+the rest of the page builds. render() draws them as the page's "Committees" section (#354),
+and desk() draws an open committee as the desk's live panel (#404).
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ CATEGORY = "committees"   # the Discussion category's slug
 MAX_ROUNDS = 3            # GOVERNANCE.md §7.4
 DAILY_POSTS = 6           # GOVERNANCE.md §8: at most 6 comments per question per day
 PHRASE_LEN = 80
+SUMMARY_LEN = 140         # a seat card's one-line summary (#404)
 NO_ACCESS = "can't read Discussions: the token needs `discussions: read`"
 
 # The owner's comments on the question, by how they start. Only these prefixes are kept.
@@ -47,6 +50,8 @@ APP_RE = re.compile(r"productswarm-([a-z0-9]+(?:-[a-z0-9]+)*)")
 ORDER_RE = re.compile(r"in order:\s*([^.\n]+)", re.I)
 ROUND_RE = re.compile(r"\A\s*#{1,3}\s*Round\s+(\d+)\s*:\s*([^\n(]+?)\s*(?:\([^\n]*\))?\s*$", re.M)
 RECO_RE = re.compile(r"^#{2,4}\s*Recommendation\b[^\n]*\n(.*?)(?=^#{1,4}\s|\Z)", re.M | re.S)
+POSITION_RE = re.compile(r"^#{2,4}\s*Position\b[^\n]*\n(.*?)(?=^#{1,4}\s|\Z)", re.M | re.S)
+SENTENCE_RE = re.compile(r".+?[.!?](?=\s|$)")
 BOLD_RE = re.compile(r"\*\*([^*\n]+?)\*\*")
 SIGN_RE = re.compile(r"^--\s*([\w-]+)\s*\(([^)\n]+)\)\s*$", re.M)
 
@@ -201,7 +206,30 @@ def phrase(body: str) -> str | None:
     if not b:
         return None
     text = re.sub(r"\s+", " ", b.group(1)).strip().rstrip(".:;,").strip()
-    return text if len(text) <= PHRASE_LEN else text[:PHRASE_LEN - 1].rstrip() + "…"
+    return cut(text, PHRASE_LEN)
+
+
+def cut(text: str, n: int) -> str:
+    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
+
+
+def summary(body: str) -> str | None:
+    """The first sentence of the Position section, as written: only emphasis and code marks
+    and line breaks are dropped. Cut to about SUMMARY_LEN. None without a Position section."""
+    m = POSITION_RE.search(body)
+    if not m:
+        return None
+    para = next((p for p in re.split(r"\n\s*\n", m.group(1)) if p.strip()), "")
+    para = re.sub(r"^\s*(?:>\s*|[-*+]\s+|\d+\.\s+)", "", para, flags=re.M)
+    text = re.sub(r"\s+", " ", re.sub(r"\*\*|__|`|(?<!\w)\*(?=\S)|(?<=\S)\*(?!\w)", "", para)).strip()
+    if not text:
+        return None
+    s = SENTENCE_RE.match(text)
+    text = s.group(0) if s else text
+    if len(text) <= SUMMARY_LEN:
+        return text
+    head = text[:SUMMARY_LEN - 1]
+    return (head.rsplit(" ", 1)[0] if " " in head else head).rstrip(" ,;:") + "…"   # at a word break
 
 
 def parse_ts(s: str | None) -> dt.datetime | None:
@@ -238,9 +266,12 @@ def owner_login(path: Path = JURISDICTIONS) -> str | None:
     return m.group(1) if m else None
 
 
+def norm(p: str | None) -> str | None:
+    return re.sub(r"\s+", " ", p).strip().lower() if p else None
+
+
 def same(phrases: list[str | None]) -> bool:
-    norm = {re.sub(r"\s+", " ", p).strip().lower() for p in phrases if p}
-    return len(norm) == 1 and None not in phrases
+    return len({norm(p) for p in phrases if p}) == 1 and None not in phrases
 
 
 def committee(d: dict, question: dict | None, recs: dict[int, dict], owner: str | None) -> dict:
@@ -275,6 +306,7 @@ def committee(d: dict, question: dict | None, recs: dict[int, dict], owner: str 
         model = sig[-1][1].strip() if sig else None
         posts.append({"round": rnd, "seat": seat, "author": member["app"], "ts": parse_ts(c.get("createdAt")),
                       "url": c.get("url"), "recommendation": phrase(c.get("body") or ""),
+                      "summary": summary(c.get("body") or ""),
                       "model": model, "model_differs": model is not None and model != member["model"]})
 
     # The owner's comments on the question: which exist, when, and their links. No text.
@@ -440,9 +472,6 @@ def convergence(c: dict) -> str:
     final = [p["recommendation"] for p in c["posts"] if p["round"] == n]
     if len(final) == len(c["order"]) and same(final):
         return f"all agree after round {n}"
-
-    def norm(x):
-        return re.sub(r"\s+", " ", x).strip().lower() if x else None
     counts = Counter(norm(v) for v in latest.values() if v)
     top, k = counts.most_common(1)[0] if counts else (None, 0)
     if k * 2 <= len(c["order"]):
@@ -513,7 +542,8 @@ def render(m: dict | None, repo: str, part: str = "all") -> str:
     """The "Committees" section: open committees, then ended ones collapsed. Empty when there
     are no committees and nothing to say about reading them.
 
-    part="open" is the open committees with the unparsed and read-problem lines (the desk);
+    part="open" is the open committees with the unparsed and read-problem lines (on the
+    decisions page since #404; the desk shows desk() instead);
     part="ended" is only the ended ones, as "Past committees" (the decisions page, #401), and
     empty when none have ended."""
     m = m or {"committees": [], "notes": []}
@@ -541,4 +571,109 @@ def render(m: dict | None, repo: str, part: str = "all") -> str:
         out.append(f'<p class="muted">{esc("; ".join(notes))}</p>')
     if done and part == "all":
         out += [f"<details><summary>{len(done)} ended</summary>", *[one(c, repo) for c in done], "</details>"]
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------- the committee desk (#404)
+
+def latest(c: dict, upto: int) -> dict[str, dict]:
+    """Each seat's latest post in rounds 1..upto."""
+    out = {}
+    for p in sorted(c["posts"], key=lambda p: p["round"]):
+        if p["round"] <= upto:
+            out[p["seat"]] = p
+    return out
+
+
+def agreeing(c: dict, upto: int) -> int:
+    """How many seats share the most common latest recommendation after round `upto`
+    (the same text comparison as same())."""
+    counts = Counter(norm(p["recommendation"]) for p in latest(c, upto).values() if p["recommendation"])
+    return counts.most_common(1)[0][1] if counts else 0
+
+
+def consensus(c: dict) -> dict:
+    """The bar: "k of N", "k of N · converging" when k rose since the last round, or
+    "consensus" when every seat's latest recommendation matches."""
+    n, seats = c["rounds_used"], len(c["order"])
+    now = agreeing(c, n)
+    last = [p["recommendation"] for p in latest(c, n).values()]
+    reached = len(last) == seats and same(last)
+    converging = not reached and n > 1 and now > agreeing(c, n - 1)
+    text = "consensus" if reached else f"{now} of {seats}" + (" · converging" if converging else "")
+    return {"agree": now, "seats": seats, "converging": converging, "consensus": reached, "text": text}
+
+
+def desk_state(c: dict) -> dict:
+    """One open committee as the desk shows it: the band, a card per seat and the bar."""
+    n = c["rounds_used"]
+    now = latest(c, n)
+    by_seat = {m["seat"]: m for m in c["members"]}
+    cards = []
+    for seat in c["order"]:
+        p = now.get(seat)
+        prev = latest(c, p["round"] - 1).get(seat) if p else None
+        if not p or not prev:
+            swing = None
+        elif same([p["recommendation"], prev["recommendation"]]):
+            swing = "held"
+        else:
+            swing = "moved"
+        cards.append({"seat": seat, "role": by_seat[seat]["role"], "model": by_seat[seat]["model"],
+                      "recommendation": p and p["recommendation"], "swing": swing,
+                      "moved_from": prev["recommendation"] if swing == "moved" else None,
+                      "summary": p and p.get("summary"), "round": p and p["round"],
+                      "posted": p and p["ts"], "url": p and p["url"]})
+    return {"discussion": c["discussion"], "url": c.get("url"), "question": c["question"],
+            "question_title": c.get("question_title"), "question_url": c.get("question_url"),
+            "round": waiting_round(c) or max(n, 1), "max_rounds": c["max_rounds"],
+            "waiting_on": c.get("next_seat"), "seats": cards, "consensus": consensus(c)}
+
+
+def desk_states(m: dict | None) -> list[dict]:
+    """Every open committee's desk, newest Discussion first; [] when none is open."""
+    return [desk_state(c) for c in (m or {}).get("committees") or []
+            if c["status"] != "unparsed" and not ended(c)]
+
+
+def seat_card(s: dict, waiting: bool) -> str:
+    who = (f'<div class="who">{esc(s["seat"])} <span class="muted">{esc(s["role"])} · '
+           f'<code>{esc(s["model"])}</code></span></div>')
+    reco = (f'<div class="reco">{esc(s["recommendation"])}</div>' if s["recommendation"]
+            else '<div class="reco none">no recommendation yet</div>')
+    if s["swing"] == "moved":
+        swing = f'<div class="swing">moved from {esc(s["moved_from"] or "no recommendation")}</div>'
+    elif s["swing"] == "held":
+        swing = '<div class="swing">held</div>'
+    else:
+        swing = ""
+    if s["url"] or s["posted"]:
+        said = (f'<blockquote>“{esc(s["summary"])}”</blockquote>' if s["summary"]
+                else '<p class="muted">no Position section</p>')
+        t = s["posted"]
+        when = link(esc(f"round {s['round']} · " + (t.strftime("%m-%d %H:%M UTC") if t else "posted")), s["url"])
+        said += f'<div class="when">{when}</div>'
+    else:
+        said = '<div class="when muted">' + ("up next" if waiting else "not posted yet") + "</div>"
+    return f'<div class="seat{" up" if waiting else ""}">{who}{reco}{swing}{said}</div>'
+
+
+def desk(m: dict | None, repo: str) -> str:
+    """The committee desk: for each open committee, a dark band (LIVE · COMMITTEE, the
+    question, the round, whose turn), a card per seat and the consensus bar. Empty when no
+    committee is open."""
+    out = []
+    for d in desk_states(m):
+        q = f"#{d['question']}" + (f" {esc(d['question_title'])}" if d.get("question_title") else "")
+        turn = f"waiting on {esc(d['waiting_on'])}" if d["waiting_on"] else "rounds over"
+        band = (f'<div class="band"><span class="live">LIVE</span><span class="tag">Committee</span>'
+                f'<span class="q">{link(q, d.get("question_url"))}</span>'
+                f'<span>Round {d["round"]} of {d["max_rounds"]}</span><span>{turn}</span>'
+                f'<span class="disc">{link("Discussion #" + esc(d["discussion"]), d.get("url"))}</span></div>')
+        cards = "".join(seat_card(s, s["seat"] == d["waiting_on"]) for s in d["seats"])
+        k = d["consensus"]
+        marks = "".join(f'<span class="{"on" if i < k["agree"] else ""}"></span>' for i in range(k["seats"]))
+        bar = (f'<div class="bar{" done" if k["consensus"] else ""}"><span class="marks">{marks}</span>'
+               f'<b>{esc(k["text"])}</b></div>')
+        out.append(f'<section class="desk">{band}<div class="seats">{cards}</div>{bar}</section>')
     return "\n".join(out)
