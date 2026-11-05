@@ -144,6 +144,16 @@ ul.trends li { display:flex; align-items:center; gap:12px; padding:8px 0;
 ul.trends li.few { color:var(--muted); }
 ul.trends svg.spark { flex:none; fill:none; stroke:var(--agent); stroke-width:1.5; }
 ul.trends svg.spark circle { fill:var(--agent); stroke:none; }
+ul.went { list-style:none; margin:0; padding:0; }
+ul.went li { display:flex; align-items:center; gap:12px; padding:8px 0;
+  border-bottom:1px solid var(--line); font-size:16px; }
+.went-bar { flex:none; display:flex; width:120px; height:10px; gap:2px; background:var(--line); }
+.went-bar span { min-width:3px; }
+.went-bar .agents, .went-bar .record { background:var(--agent); }
+.went-bar .owner, .went-bar .direction { background:var(--owner); }
+.went-bar .committee { background:var(--ink); }
+.went-bar .other, .went-bar .lapsed { background:var(--quiet); }
+.went-bar .open, .went-bar .nothing { background:var(--line); outline:1px solid var(--quiet); outline-offset:-1px; }
 .pasts { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px; }
 .past { background:var(--card); border:1px solid var(--line); padding:12px 14px; min-width:0; }
 .past .rec { font:600 20px/1.2 var(--cond); }

@@ -9,15 +9,16 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
     PR (GOV-0011's round count and Authority line);
   - open `gov:question` issues, `gov:lapsed` ones closed in the window, and
     governance/INDEX.md from the checkout (the governance section, #355).
-  - for the desk's trends (#406, questions.py): `gov:question`s created in the window with
-    their label and close events, PRs merged in the window, and record dates from the checkout.
+  - for the desk's trends (#406) and how the questions went (#407), questions.py:
+    `gov:question`s created in the window with their label and close events, PRs merged in
+    the window, and record dates from the checkout.
   - for every page's header (#402, activity.py): the repo's public events, 1 to 3 pages, to
     say when the owner last acted.
 
 Builds three pages in one look (layout.py), each headed by a red LIVE mark, the build time
 and the owner's last act (#402), and copies the self-hosted fonts beside them:
   - index.html, the desk: on the floor (floor.py), the committee desk while one is open (#404),
-    what the numbers say (trends.py), precedent in use (precedent.py), a card per past
+    what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
     committee (#409), and a pointer to the other two (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
     progress and spend;
@@ -387,6 +388,11 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
                                                   p.get("headRefOid"))
         prs[-1]["needs_owner"] = needs_owner(rv, prs[-1]["author"])
 
+    comms = committees.build(data.get("committees"))
+    owner = committees.owner_login()
+    history = (questions.build(data["questions"], now, window, owner)
+               if data.get("questions") is not None else None)
+
     today = now.date()
     days = [today - dt.timedelta(days=i) for i in range(SPEND_DAYS)]
     per_day = {d: sum(s["daily"].get(d, 0.0) for s in sessions) for d in days}
@@ -401,10 +407,10 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
             "progress": progress.build(data["progress"]) if data.get("progress") else None,
             "reviewer_runs": reviewer_runs.build(
                 data.get("actions"), [p for p in prs if not p["draft"] and unreviewed(p)], now),
-            "committees": committees.build(data.get("committees")),
-            "trends": trends.build(questions.build(data["questions"], now, window,
-                                                   committees.owner_login())
-                                   if data.get("questions") is not None else None),
+            "committees": comms,
+            "trends": trends.build(history),
+            "questions_went": questions.went(history, committees.records(),
+                                             {c.get("question") for c in comms["committees"]}, owner),
             "precedent": precedent.build(data.get("precedent"), data.get("records") or {}, now, window),
             "activity": data.get("activity"),   # the repo's events; the wire (#405) reuses them
             "owner_last_acted": activity.owner_last_acted(data.get("activity"),
@@ -613,13 +619,14 @@ def owner_line(m: dict) -> str:
 
 def render_desk(m: dict) -> str:
     """The desk (index.html): on the floor (#403), the committee desk while a committee is open
-    (#404), what the numbers say (#406), precedent in use (#408), a card per past committee
-    (#409), and a pointer to the other pages. #397's later panels join it."""
+    (#404), what the numbers say (#406), how the questions went (#407), precedent in use
+    (#408), a card per past committee (#409), and a pointer to the other pages. #397's later panels join it."""
     repo = m["repo"]
     out = ["<h1>The desk</h1>",
            floor.render(m.get("floor"), repo),
            committees.desk(m.get("committees"), repo),
            trends.render(m.get("trends")),
+           questions.render_went(m.get("questions_went")),
            precedent.render(m.get("precedent"), repo),
            committees.past(m.get("committees"), rulings(m), repo),
            '<p class="pointer">The needs-you list, sessions, open PRs, reviewer sweeps, v3 '
