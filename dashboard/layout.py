@@ -93,6 +93,16 @@ table.grid td { min-width:160px; }
 .id { white-space:nowrap; }
 details summary { cursor:pointer; margin:12px 0 4px; color:var(--muted); }
 .pointer { margin:28px 0 0; padding:10px 12px; border-left:3px solid var(--agent); background:var(--card); }
+.floor { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:10px; }
+.floor .card { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--agent);
+  padding:10px 12px; }
+.floor .card.s-blocked { border-left-color:var(--red); }
+.floor .role { font:600 15px/1.2 var(--cond); color:var(--agent); text-transform:uppercase;
+  letter-spacing:.05em; }
+.floor .what { font-weight:600; margin:4px 0 2px; }
+.floor .spark { display:block; margin:6px 0 2px; }
+.floor .spark .bar { fill:var(--agent); } .floor .spark .zero { fill:var(--line); }
+.floor .used, .idle { font-size:13px; }
 footer.foot { margin-top:40px; padding-top:8px; border-top:2px solid var(--ink);
   display:flex; flex-wrap:wrap; gap:4px 18px; font:600 13px/1.6 var(--cond);
   text-transform:uppercase; letter-spacing:.06em; }

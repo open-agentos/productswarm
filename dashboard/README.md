@@ -19,7 +19,7 @@ One build writes three pages, and the fonts, into the `--out` page's directory (
 
 | Page | What it shows |
 |---|---|
-| `index.html`, the **desk** | Open committees (the open part of [Committees](#committees)), and a one-line pointer to the other pages. #397's later issues add the desk's panels here. |
+| `index.html`, the **desk** | [On the floor](#on-the-floor), open committees (the open part of [Committees](#committees)), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, and ended committees as "Past committees" |
 
@@ -58,6 +58,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `schema` | `1` |
 | `built_at`, `repo`, `idle_minutes` | when and for which repo it was built, and the idle threshold |
 | `needs_you` | the needs-you list below, without over-cap items |
+| `floor` | [on the floor](#on-the-floor): `cards`, each with `session_id`, `role`, `model`, `status`, `started_ts`, `run_minutes`, `issue`, `pr`, `gov_question`, `activity` (the plain words), `events_per_slot` (six counts, oldest first) and `slots_used` (`editing`, `reading`, `commands`); and `idle`, each with `session_id`, `role` and `idle_minutes` |
 | `sessions` | each session's `session_id`, `role`, `model`, `status`, `issue`, `pr`, `gov_question`, `last_event`, `last_ts`, `started_ts` and `tracking_issue` |
 | `prs` | open PRs: `number`, `title`, `url`, `author`, `draft`, `review`, `created_ts`, `closes`, `needs_owner` |
 | `gov_questions` | open `gov:question`s with their fields, time to live and the `session_id`s waiting on them |
@@ -65,6 +66,28 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `committees`, `progress`, `reviewer_runs` | those sections' data; `reviewer_runs.unreviewed` is PR numbers |
 
 It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
+
+## On the floor
+
+The desk opens with a card for each active or blocked session (`floor.py`, #403, part 4 of #397). It's built from the heartbeat events `generate.py` already reads, so it adds **no API calls** per build.
+
+A card shows the role (in agents blue; a blocked card has a red edge), the model, how long the session has run (its first event to now), what it's doing in plain words, and an activity line: events per 5-minute slot over the last 30 minutes, as inline SVG. Under the line it says in how many of those six slots the session was editing, reading or running commands. Idle sessions share one quiet line, e.g. "idle: docs 40 min, reviewer 2 h". Stopped sessions aren't on the floor. Nothing on the floor shows tokens or cost.
+
+The plain words come from the session's latest event and its tool names, through one table, `floor.TEMPLATES`; the first row that matches wins:
+
+| Situation | Tools in the latest event | Words |
+|---|---|---|
+| blocked on a question | any | Waiting on #396 |
+| `pr_opened` | any | Opened PR #394 |
+| any | Edit, Write or NotebookEdit | Editing files on #392 |
+| any | Bash | Running commands on #392 |
+| any | only Read, Grep or Glob | Reading code on #392 |
+| `session_started` | none of these | Starting up |
+| any | none of these, or no tool names | Working on #392 |
+
+"on #392" is the session's issue, or "on PR #391" if it has only a PR, or nothing.
+
+What today's events can't give: words like "Running tests" or "Checking the diff of PR #391", and counts of files read, edited or tests run. An event lists only the distinct tool names used since the previous one (heartbeat/SCHEMA.md), never commands, paths or counts (GOV-0002). Showing those needs a new captured field, which is a `security` question for the owner; once one is ruled, it adds rows to `TEMPLATES`, not new logic.
 
 ## Needs you
 
