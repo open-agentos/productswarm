@@ -11,6 +11,7 @@ the live refresh (live.py, #411, option 2 of #396), and the policy allows it by 
 """
 from __future__ import annotations
 
+import datetime as dt
 import html
 import shutil
 from pathlib import Path
@@ -34,8 +35,9 @@ LATIN1 = ("U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6
           "U+02DC, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, "
           "U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02")
 
-# The pages, in footer order: (file, name). The authority map (#410) joins when it lands.
-PAGES = (("index.html", "Desk"), ("operations.html", "Operations"), ("decisions.html", "Decisions"))
+# The pages, in footer order: (file, name).
+PAGES = (("index.html", "Desk"), ("operations.html", "Operations"), ("decisions.html", "Decisions"),
+         ("authority.html", "Authority"))
 
 # #397's palette: paper, ink, agents blue, owner amber, and red for live marks and blocks only.
 PALETTE = {"paper": "#F4F3EE", "ink": "#1B1B18", "muted": "#66655E", "line": "#D8D6CC",
@@ -61,6 +63,10 @@ header.mast { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 16px;
   border-bottom:2px solid var(--ink); padding-bottom:6px; margin-bottom:8px; }
 header.mast > span { min-width:0; overflow-wrap:anywhere; }
 header.mast .name { font:600 13px/1 var(--cond); letter-spacing:.08em; text-transform:uppercase; }
+header.mast .live { background:var(--red); color:#fff; padding:0 8px; font:600 12px/1.6 var(--cond);
+  letter-spacing:.1em; }
+header.mast .owner { color:var(--owner); }
+header.mast .owner a { color:var(--owner); text-decoration-color:var(--owner); }
 h1 { font:600 26px/1.15 var(--cond); margin:12px 0 4px; letter-spacing:.01em; }
 h2 { font:600 18px/1.2 var(--cond); margin:32px 0 8px; padding-top:6px;
   border-top:1px solid var(--line); text-transform:uppercase; letter-spacing:.05em; }
@@ -142,6 +148,16 @@ ul.trends li { display:flex; align-items:center; gap:12px; padding:8px 0;
 ul.trends li.few { color:var(--muted); }
 ul.trends svg.spark { flex:none; fill:none; stroke:var(--agent); stroke-width:1.5; }
 ul.trends svg.spark circle { fill:var(--agent); stroke:none; }
+ul.went { list-style:none; margin:0; padding:0; }
+ul.went li { display:flex; align-items:center; gap:12px; padding:8px 0;
+  border-bottom:1px solid var(--line); font-size:16px; }
+.went-bar { flex:none; display:flex; width:120px; height:10px; gap:2px; background:var(--line); }
+.went-bar span { min-width:3px; }
+.went-bar .agents, .went-bar .record { background:var(--agent); }
+.went-bar .owner, .went-bar .direction { background:var(--owner); }
+.went-bar .committee { background:var(--ink); }
+.went-bar .other, .went-bar .lapsed { background:var(--quiet); }
+.went-bar .open, .went-bar .nothing { background:var(--line); outline:1px solid var(--quiet); outline-offset:-1px; }
 .pasts { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px; }
 .past { background:var(--card); border:1px solid var(--line); padding:12px 14px; min-width:0; }
 .past .rec { font:600 20px/1.2 var(--cond); }
@@ -152,6 +168,9 @@ ul.trends svg.spark circle { fill:var(--agent); stroke:none; }
 .past .call.split { color:var(--ink); }
 .past ul { margin:6px 0 0; padding:0; list-style:none; font-size:13px; color:var(--muted); }
 header.mast .live.stale { background:var(--quiet); }
+.w-agent { color:var(--agent); font-weight:600; } .w-owner { color:var(--owner); font-weight:600; }
+.w-other { color:var(--quiet); }
+table.authority td:first-child { min-width:200px; }
 footer.foot { margin-top:40px; padding-top:8px; border-top:2px solid var(--ink);
   display:flex; flex-wrap:wrap; gap:4px 18px; font:600 13px/1.6 var(--cond);
   text-transform:uppercase; letter-spacing:.06em; }
@@ -174,17 +193,30 @@ def nav(current: str) -> str:
     return "".join(links)
 
 
-def masthead(current: str, repo: str, built: str) -> str:
-    """What's inside the page's <header>. The desk's live refresh redraws it too (#411)."""
+def built_mark(built: dt.datetime) -> str:
+    """The red LIVE mark and the build time (#402). A static page can't know how old it is
+    when viewed; the `datetime` attribute is there for the state.json poll (#411)."""
+    t = built.astimezone(dt.timezone.utc)
+    return (f'<span class="live">LIVE</span><span class="muted">built <time class="stamp" '
+            f'datetime="{t.strftime("%Y-%m-%dT%H:%M:%SZ")}" title="{t.strftime("%Y-%m-%d %H:%M UTC")}">'
+            f'{t.strftime("%H:%M")} UTC</time></span>')
+
+
+
+def masthead(current: str, repo: str, built: dt.datetime, owner: str = "") -> str:
+    """What's inside the page's <header>: the page name, the repo, the LIVE mark and build time,
+    and `owner`, the owner's last act as HTML (#402). The desk's live refresh redraws it too
+    (#411)."""
     return (f'<span class="name">productswarm · {esc(dict(PAGES)[current])}</span>'
-            f'<span class="muted">{esc(repo)} · built <span class="stamp">{esc(built)}</span></span>')
+            f'<span class="muted">{esc(repo)}</span>{built_mark(built)}{owner}')
 
 
-def page(current: str, title: str, repo: str, built: str, body: str,
-         built_at: str | None = None) -> str:
-    """One whole page in the shared shell: head (noindex, CSP, refresh, CSS), masthead, the
-    body, and the footer linking every page. Given `built_at` (RFC 3339), the page also
-    carries the live refresh script, which polls state.json (#411); only the desk does."""
+def page(current: str, title: str, repo: str, built: dt.datetime, body: str, owner: str = "",
+         live_refresh: bool = False) -> str:
+    """One whole page in the shared shell: head (noindex, CSP, refresh, CSS), masthead (#402),
+    the body, and the footer linking every page. With `live_refresh`, the page also carries the
+    live refresh script, which polls state.json (#411); only the desk does."""
+    built_at = built.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if live_refresh else None
     name = dict(PAGES)[current]
     js = live.script() if built_at else None
     box = ' data-panel="mast"' if js else ""
@@ -196,7 +228,7 @@ def page(current: str, title: str, repo: str, built: str, body: str,
         f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">',
         f"<title>{esc(name)} · {esc(title)} · {esc(repo)}</title><style>{CSS}</style></head>"
         + (f'<body data-built-at="{esc(built_at)}">' if built_at else "<body>"),
-        f'<header class="mast"{box}>{masthead(current, repo, built)}</header>',
+        f'<header class="mast"{box}>{masthead(current, repo, built, owner)}</header>',
         f"<main>{body}</main>",
         f'<footer class="foot">{nav(current)}</footer>',
         f"<script>{js}</script>" if js else None,

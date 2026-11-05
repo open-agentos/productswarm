@@ -11,6 +11,7 @@ Each later #397 panel adds its slice here.
 import datetime as dt
 from pathlib import Path
 
+import activity
 import committees
 import generate
 import layout
@@ -85,7 +86,7 @@ def floor(f: dict | None) -> dict | None:
 
 def desk(m: dict) -> dict:
     """The desk's masthead and panels as node trees, which the live refresh draws (#411)."""
-    mast = layout.masthead("index.html", m["repo"], generate.stamp(m["now"]))
+    mast = layout.masthead("index.html", m["repo"], m["now"], generate.owner_line(m))
     return live.trees({"mast": mast, **generate.desk_panels(m)})
 
 
@@ -109,6 +110,8 @@ def state(m: dict) -> dict:
         "progress": m.get("progress"),
         "reviewer_runs": reviewer_runs(m["reviewer_runs"]),
         "trends": m.get("trends"),   # #406: each trend's sentence and its series by day
+        "questions_went": m.get("questions_went"),   # #407: counts, and each question's categories
         "precedent": precedent.state(m.get("precedent")),   # #408; the next build carries it forward
+        "owner_last_acted": activity.state(m.get("owner_last_acted")),   # #402: the header's line
         "desk": desk(m),   # #411: what the desk's live refresh draws
     })

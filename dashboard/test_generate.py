@@ -162,7 +162,8 @@ class PageTest(unittest.TestCase):
 
     def test_every_page_keeps_the_shell(self):
         pages = g.render(self.model())
-        self.assertEqual(list(pages), ["index.html", "operations.html", "decisions.html"])
+        self.assertEqual(list(pages), ["index.html", "operations.html", "decisions.html",
+                                       "authority.html"])
         for name, page in pages.items():
             head = page.split("</head>")[0]
             self.assertIn('<meta name="robots" content="noindex, nofollow">', head, name)
@@ -270,6 +271,7 @@ class EndToEndTest(unittest.TestCase):
             out = d / "out"
             self.assertIn("<h1>The desk</h1>", (out / "index.html").read_text())
             self.assertIn("<h2>Governance</h2>", (out / "decisions.html").read_text())
+            self.assertIn("<h1>Authority map</h1>", (out / "authority.html").read_text())
             for f in g.layout.FONT_FILES:   # self-hosted beside the pages
                 self.assertEqual((out / "fonts" / f).read_bytes(),
                                  (g.layout.FONTS_SRC / f).read_bytes())

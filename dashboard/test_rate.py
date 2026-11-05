@@ -279,8 +279,12 @@ class CallCountTest(unittest.TestCase):
         self.assertEqual(len([c for c in rest if "labels=gov:question" in " ".join(c)]), 1)
         self.assertEqual(len([c for c in rest if "search/issues" in " ".join(c)]), 1)
         self.assertEqual(sum("timelineItems(" in q for q in queries), 2)
-        # The whole rebuild: 36 calls (30 before #406 added 4 and #408 added 2). On main before #392 the same data took 100.
-        self.assertLessEqual(len(calls), 36, "\n".join(map(str, calls)))
+        # #402's header: the repo's events, one page here (fewer than 100, so the last).
+        self.assertEqual([c for c in rest if "/events?" in " ".join(c)],
+                         [["api", f"repos/{REPO}/events?per_page=100&page=1"]])
+        # The whole rebuild: 37 calls (30 before #406 added 4, #408 added 2 and #402 added 1).
+        # On main before #392 the same data took 100.
+        self.assertLessEqual(len(calls), 37, "\n".join(map(str, calls)))
         self.assertLess(len(rest), g.PAGE_NEEDS["core"])
         self.assertLess(len(graphql), g.PAGE_NEEDS["graphql"])
 
