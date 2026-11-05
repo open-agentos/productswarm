@@ -19,9 +19,9 @@ One build writes three pages, and the fonts, into the `--out` page's directory (
 
 | Page | What it shows |
 |---|---|
-| `index.html`, the **desk** | [On the floor](#on-the-floor), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), [precedent in use](#precedent-in-use), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
+| `index.html`, the **desk** | [On the floor](#on-the-floor), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), [precedent in use](#precedent-in-use), a card per [past committee](#past-committees), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
-| `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" |
+| `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" with their round grids |
 
 Every page carries `noindex`, reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the three pages. The authority map (#410) joins the footer when it lands. `generate.render(model)` returns the pages by file name.
 
@@ -67,6 +67,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `committee_desk` | each open committee as the desk shows it: `discussion`, `url`, `question`, `question_title`, `question_url`, `round`, `max_rounds`, `waiting_on`, `seats` (each `seat`, `role`, `model`, `recommendation`, `swing` (`moved`, `held` or null), `moved_from`, `summary`, `round`, `posted`, `url`) and `consensus` (`agree`, `seats`, `converging`, `consensus`, `text`); `[]` when none is open |
 | `trends` | [What the numbers say](#what-the-numbers-say): `days`, `first_day`, `min_count`, and each trend's `name`, `sentence`, `too_few` and `series` (one `{date, value}` per day; `value` is `null` on a day with no data) |
 | `precedent` | [precedent in use](#precedent-in-use): `version`, `from` (the window's first day), `counts` (record → day → `n`, `agents`, `owner`, `reviewer`), `totals`, `findings`, `records` (`id`, `date`, `status`) and `read` (where this build started reading, what it carried from, and its calls). The next build carries `counts` forward |
+| `past_committees` | each ended committee's card: `discussion`, `url`, `question`, `question_title`, `question_url`, `record` (`id`, `url`, or null), `summary` (the INDEX.md ruling, or null), `consensus` (`text`, `consensus`, `dissent`), `rounds_used`, `max_rounds`, `stopped_early`, `models`, `diversity_met`, `minutes`, `swing` and `seats`; `[]` when none has ended |
 
 It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
 
@@ -211,6 +212,17 @@ Discussions that don't match #314's layout are listed as muted "Unparsed" links.
 - **Consensus bar:** how many seats share the most common latest recommendation, as "k of N"; "k of N · converging" when that number rose since the end of the previous round; "consensus" when every seat's latest phrase matches. Phrases compare as text, ignoring case and spacing, like `same()`. So #314 reads "1 of 3" after round 1 and "2 of 3 · converging" after round 2.
 
 Red is used only for the LIVE mark. The same data is `committee_desk` in `state.json`.
+
+## Past committees
+
+`committees.past()` puts a card per ended committee (record merged, or its question closed) on the desk under "Past committees", newest Discussion first (#409). With none ended there's no heading. The full round grids stay on the decisions page. It reads only what `committees.build()` derives and the INDEX.md rows the governance section already parses, so it adds no API calls.
+
+- **Record:** its ID, linked to the file, or "no record yet".
+- **Summary:** the record's one-line ruling from `governance/INDEX.md`, quoted as it stands there. Nothing is written for the card. Without a record it says "no ruling recorded"; with a record that has no INDEX row yet, "not in governance/INDEX.md yet".
+- **Consensus:** "consensus after round N" when every seat's last-round phrase matches, else "dissent: <seats>" (or "no majority after round N"), from the same comparison as the Committees section's last line (`outcome()`).
+- **Numbers:** rounds used of 3 (and "stopped early" if rule 6 stopped it), the members' models and whether §7.2 was met, whole minutes from the first round post to the last, and the swing: how many seats changed their recommendation between any two of their posts.
+
+So #314's card reads GOV-0021, "dissent: proposer", 2 of 3 rounds, two models (§7.2 met), and a swing of 3 of 3 seats. The same data is `past_committees` in `state.json`.
 
 ## v3 progress
 

@@ -461,23 +461,36 @@ def timeline(c: dict, repo: str) -> str:
     return " → ".join(out)
 
 
-def convergence(c: dict) -> str:
-    """"all agree after round N", or the seats whose latest recommendation differs."""
+def outcome(c: dict) -> dict:
+    """Where the recommendations ended up: kind is "none" (no posts), "agree" (every seat's
+    last-round phrase matches), "no majority", "dissent" (with the seats whose latest phrase
+    differs from the majority's) or "no dissent" (a majority, nobody against it yet)."""
     n = c["rounds_used"]
     if not n:
-        return '<span class="muted">no recommendations yet</span>'
+        return {"kind": "none", "round": 0, "dissent": []}
     latest = {}
     for p in sorted(c["posts"], key=lambda p: p["round"]):
         latest[p["seat"]] = p["recommendation"]
     final = [p["recommendation"] for p in c["posts"] if p["round"] == n]
     if len(final) == len(c["order"]) and same(final):
-        return f"all agree after round {n}"
+        return {"kind": "agree", "round": n, "dissent": []}
     counts = Counter(norm(v) for v in latest.values() if v)
     top, k = counts.most_common(1)[0] if counts else (None, 0)
     if k * 2 <= len(c["order"]):
-        return f"no majority after round {n}"
+        return {"kind": "no majority", "round": n, "dissent": []}
     dissent = [s for s in c["order"] if s in latest and norm(latest[s]) != top]
-    return f"dissent: {esc(', '.join(dissent))}" if dissent else f"after round {n}: no dissent so far"
+    return {"kind": "dissent" if dissent else "no dissent", "round": n, "dissent": dissent}
+
+
+def convergence(c: dict) -> str:
+    """"all agree after round N", or the seats whose latest recommendation differs."""
+    o = outcome(c)
+    n = o["round"]
+    return {"none": '<span class="muted">no recommendations yet</span>',
+            "agree": f"all agree after round {n}",
+            "no majority": f"no majority after round {n}",
+            "dissent": f"dissent: {esc(', '.join(o['dissent']))}",
+            "no dissent": f"after round {n}: no dissent so far"}[o["kind"]]
 
 
 def grid(c: dict) -> str:
@@ -677,3 +690,78 @@ def desk(m: dict | None, repo: str) -> str:
                f'<b>{esc(k["text"])}</b></div>')
         out.append(f'<section class="desk">{band}<div class="seats">{cards}</div>{bar}</section>')
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------- past committees (#409)
+
+def swing(c: dict) -> int:
+    """How many seats changed their recommendation from one of their posts to the next."""
+    by_seat: dict[str, list] = {}
+    for p in sorted(c["posts"], key=lambda p: p["round"]):
+        by_seat.setdefault(p["seat"], []).append(p["recommendation"])
+    return sum(any(not same([a, b]) for a, b in zip(recos, recos[1:])) for recos in by_seat.values())
+
+
+def minutes(c: dict) -> int | None:
+    """Whole minutes from the first round post to the last; None with fewer than two."""
+    ts = sorted(p["ts"] for p in c["posts"] if p["ts"])
+    return int((ts[-1] - ts[0]).total_seconds() // 60) if len(ts) > 1 else None
+
+
+def past_state(c: dict, rulings: dict[str, str], repo: str) -> dict:
+    """One ended committee as its desk card shows it. `rulings` maps a record ID to its one
+    line in governance/INDEX.md, the card's summary, quoted and never written here."""
+    rec = c.get("record")
+    o = outcome(c)
+    text = {"none": "no recommendations", "agree": f"consensus after round {o['round']}",
+            "no majority": f"no majority after round {o['round']}",
+            "dissent": "dissent: " + ", ".join(o["dissent"]),
+            "no dissent": f"no dissent after round {o['round']}"}[o["kind"]]
+    return {"discussion": c["discussion"], "url": c.get("url"), "question": c["question"],
+            "question_title": c.get("question_title"), "question_url": c.get("question_url"),
+            "record": rec and {"id": rec["id"], "url": f"https://github.com/{repo}/blob/main/governance/"
+                                                       f"decisions/{rec['file']}" if rec.get("file") else None},
+            "summary": rulings.get(rec["id"]) if rec else None,
+            "consensus": {"text": text, "consensus": o["kind"] == "agree", "dissent": o["dissent"]},
+            "rounds_used": c["rounds_used"], "max_rounds": c["max_rounds"], "stopped_early": c["stopped_early"],
+            "models": sorted({m["model"] for m in c["members"]}), "diversity_met": c["diversity"]["met"],
+            "minutes": minutes(c), "swing": swing(c), "seats": len(c["order"])}
+
+
+def past_states(m: dict | None, rulings: dict[str, str], repo: str) -> list[dict]:
+    """Every ended committee's card, newest Discussion first; [] when none has ended."""
+    return [past_state(c, rulings, repo) for c in (m or {}).get("committees") or []
+            if c["status"] != "unparsed" and ended(c)]
+
+
+def code_spans(text: str) -> str:
+    parts = esc(text).split("`")
+    return "".join(f"<code>{p}</code>" if i % 2 else p for i, p in enumerate(parts))
+
+
+def past(m: dict | None, rulings: dict[str, str], repo: str) -> str:
+    """"Past committees" on the desk: a card per ended committee with its record, the
+    record's one-line ruling, consensus or dissent, rounds used, models, minutes and swing.
+    Empty when none has ended. The round grids stay on the decisions page."""
+    cards = []
+    for p in past_states(m, rulings, repo):
+        rec = p["record"]
+        q = f"#{p['question']}" + (f" {esc(p['question_title'])}" if p.get("question_title") else "")
+        head = (link(esc(rec["id"]), rec["url"]) if rec else '<span class="muted">no record yet</span>')
+        said = (f'<blockquote>“{code_spans(p["summary"])}”</blockquote>' if p["summary"]
+                else f'<p class="muted">{"not in governance/INDEX.md yet" if rec else "no ruling recorded"}</p>')
+        k = p["consensus"]
+        rounds = f"{p['rounds_used']} of {p['max_rounds']} rounds" + (" · stopped early" if p["stopped_early"] else "")
+        models = (", ".join(f"<code>{esc(x)}</code>" for x in p["models"])
+                  + f" · §7.2 {'met' if p['diversity_met'] else 'not met'}")
+        span = f"{plural(p['minutes'], 'minute')} first to last post" if p["minutes"] is not None else "one post or none"
+        cards.append(
+            f'<div class="past"><div class="rec">{head}</div>'
+            f'<div class="q">{link(q, p.get("question_url"))} · '
+            f'{link("Discussion #" + esc(p["discussion"]), p.get("url"))}</div>{said}'
+            f'<div class="call{" split" if k["dissent"] else ""}">{esc(k["text"])}</div>'
+            f'<ul><li>{rounds}</li><li>{models}</li><li>{span}</li>'
+            f'<li>swing: {p["swing"]} of {plural(p["seats"], "seat")} changed</li></ul></div>')
+    if not cards:
+        return ""
+    return '<h2>Past committees</h2>\n<div class="pasts">' + "".join(cards) + "</div>"

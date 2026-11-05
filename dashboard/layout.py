@@ -139,6 +139,15 @@ ul.trends li { display:flex; align-items:center; gap:12px; padding:8px 0;
 ul.trends li.few { color:var(--muted); }
 ul.trends svg.spark { flex:none; fill:none; stroke:var(--agent); stroke-width:1.5; }
 ul.trends svg.spark circle { fill:var(--agent); stroke:none; }
+.pasts { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px; }
+.past { background:var(--card); border:1px solid var(--line); padding:12px 14px; min-width:0; }
+.past .rec { font:600 20px/1.2 var(--cond); }
+.past .q { font-size:13px; color:var(--muted); }
+.past blockquote { margin:8px 0; font-size:14px; }
+.past .call { font:600 14px/1.3 var(--cond); text-transform:uppercase; letter-spacing:.05em;
+  color:var(--agent); }
+.past .call.split { color:var(--ink); }
+.past ul { margin:6px 0 0; padding:0; list-style:none; font-size:13px; color:var(--muted); }
 footer.foot { margin-top:40px; padding-top:8px; border-top:2px solid var(--ink);
   display:flex; flex-wrap:wrap; gap:4px 18px; font:600 13px/1.6 var(--cond);
   text-transform:uppercase; letter-spacing:.06em; }

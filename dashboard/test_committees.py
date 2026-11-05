@@ -10,6 +10,7 @@ import stat
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from unittest import mock
 from pathlib import Path
 
@@ -607,6 +608,94 @@ class DeskTest(Fixture):
         self.assertEqual(d["consensus"]["text"], "2 of 3 · converging")
         data["committees"]["discussions"] = []
         self.assertEqual(st.state(g.build(data, now, dt.timedelta(minutes=15)))["committee_desk"], [])
+
+
+class PastTest(Fixture):
+    """Past committees as desk cards (#409), over #314 with #311 closed."""
+    INDEX = (HERE.parent / "governance" / "INDEX.md").read_text()
+
+    def model(self, discussions, questions=None):
+        data = {"repo": REPO, "issues": [], "comments": {}, "prs": [], "reviews": {}, "index": self.INDEX,
+                "committees": {"discussions": discussions,
+                               "questions": questions if questions is not None else {311: question()},
+                               "notes": []}}
+        now = dt.datetime(2026, 11, 5, 9, 0, tzinfo=dt.timezone.utc)
+        orig = c.build      # read records from the fixture's decisions, not the checkout's
+        with unittest.mock.patch.object(c, "build", lambda raw: orig(raw, decisions=self.decisions, owner=OWNER)):
+            return g.build(data, now, dt.timedelta(minutes=15))
+
+    def test_314_card(self):
+        m = self.model([discussion()])
+        (p,) = c.past_states(m["committees"], g.rulings(m), REPO)
+        self.assertEqual(p["record"], {"id": "GOV-0021", "url": f"https://github.com/{REPO}/blob/main/"
+                                                                  "governance/decisions/GOV-0021-when.md"})
+        self.assertTrue(p["summary"].startswith("Reviewer requests changes only for a numbered block-list"))
+        self.assertEqual(p["consensus"], {"text": "dissent: proposer", "consensus": False,
+                                          "dissent": ["proposer"]})
+        self.assertEqual((p["rounds_used"], p["max_rounds"], p["stopped_early"]), (2, 3, False))
+        self.assertEqual(p["models"], ["claude-opus-5-5", "claude-sonnet-5-5"])
+        self.assertTrue(p["diversity_met"])
+        self.assertEqual(p["minutes"], 7)          # 14:18 to 14:25
+        self.assertEqual((p["swing"], p["seats"]), (3, 3))   # every seat moved from round 1
+
+        desk = g.render(m)["index.html"]
+        self.assertIn("<h2>Past committees</h2>", desk)
+        self.assertIn(f'<div class="past"><div class="rec"><a href="https://github.com/{REPO}/blob/main/'
+                      'governance/decisions/GOV-0021-when.md">GOV-0021</a></div>', desk)
+        self.assertIn("<blockquote>“Reviewer requests changes only for a numbered block-list finding", desk)
+        self.assertIn('<div class="call split">dissent: proposer</div>', desk)
+        self.assertIn("<li>2 of 3 rounds</li>", desk)
+        self.assertIn("<li><code>claude-opus-5-5</code>, <code>claude-sonnet-5-5</code> · §7.2 met</li>", desk)
+        self.assertIn("<li>7 minutes first to last post</li>", desk)
+        self.assertIn("<li>swing: 3 of 3 seats changed</li>", desk)
+        self.assertNotIn('<table class="grid">', desk)                 # the grids stay on decisions
+        self.assertIn('<table class="grid">', g.render(m)["decisions.html"])
+
+    def test_no_record_yet(self):
+        (self.decisions / "GOV-0021-when.md").unlink()
+        m = self.model([discussion()])                     # #311 closed, but no record merged
+        (p,) = c.past_states(m["committees"], g.rulings(m), REPO)
+        self.assertIsNone(p["record"])
+        self.assertIsNone(p["summary"])
+        self.assertEqual(p["consensus"]["text"], "dissent: proposer")
+        desk = g.render(m)["index.html"]
+        self.assertIn('<div class="rec"><span class="muted">no record yet</span></div>', desk)
+        self.assertIn('<p class="muted">no ruling recorded</p>', desk)
+
+    def test_record_not_in_the_index(self):
+        m = self.model([discussion()])
+        (p,) = c.past_states(m["committees"], {}, REPO)
+        self.assertIsNone(p["summary"])
+        self.assertIn("not in governance/INDEX.md yet", c.past(m["committees"], {}, REPO))
+
+    def test_stopped_early(self):
+        agree = [post(1, "proposer", 18, "**Option 3.**"), post(1, "challenger", 21, "**Option 3**"),
+                 post(1, "domain reviewer", 30, "**option 3.**")]
+        m = self.model([discussion(comments=agree)])
+        (p,) = c.past_states(m["committees"], g.rulings(m), REPO)
+        self.assertEqual(p["consensus"], {"text": "consensus after round 1", "consensus": True, "dissent": []})
+        self.assertEqual((p["rounds_used"], p["stopped_early"], p["minutes"], p["swing"]), (1, True, 12, 0))
+        desk = g.render(m)["index.html"]
+        self.assertIn('<div class="call">consensus after round 1</div>', desk)
+        self.assertIn("<li>1 of 3 rounds · stopped early</li>", desk)
+        self.assertIn("<li>swing: 0 of 3 seats changed</li>", desk)
+
+    def test_open_committee_has_no_card(self):
+        (self.decisions / "GOV-0021-when.md").unlink()
+        m = self.model([discussion()], {311: question(False, False)})
+        self.assertEqual(c.past_states(m["committees"], g.rulings(m), REPO), [])
+        self.assertNotIn("Past committees", g.render(m)["index.html"])
+        self.assertEqual(c.past(None, {}, REPO), "")
+
+    def test_state_json_carries_the_cards(self):
+        import state as st
+        out = json.loads(json.dumps(st.state(self.model([discussion()]))))
+        (p,) = out["past_committees"]
+        self.assertEqual(sorted(p), ["consensus", "discussion", "diversity_met", "max_rounds", "minutes",
+                                     "models", "question", "question_title", "question_url", "record",
+                                     "rounds_used", "seats", "stopped_early", "summary", "swing", "url"])
+        self.assertEqual(p["record"]["id"], "GOV-0021")
+        self.assertNotIn("2.89", json.dumps(out))
 
 
 def fake_gh_json(pages: dict, fail: str | None = None):
