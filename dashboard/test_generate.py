@@ -273,6 +273,9 @@ class EndToEndTest(unittest.TestCase):
             self.assertIn("<h2>v3 progress</h2>", page)
             self.assertIn("(<a href=\"https://github.com/open-agentos/productswarm/issues/331\">#331</a>): not run", page)
             self.assertIn("not started: no reds count until", page)
+            st = json.loads((d / "out" / "state.json").read_text())   # beside the page (#400)
+            self.assertEqual((st["schema"], st["repo"]), (1, REPO))
+            self.assertEqual([s["issue"] for s in st["sessions"]], [4])
 
 
 if __name__ == "__main__":

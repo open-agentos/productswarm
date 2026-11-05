@@ -718,6 +718,9 @@ def too_soon(repo: str, now: dt.datetime) -> str | None:
     return None
 
 
+STATE_FILE = "state.json"   # the page's data, written beside it (state.py, #400)
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Render the swarm dashboard's static HTML pages.")
     ap.add_argument("--repo", help="owner/name (default: this checkout's origin)")
@@ -746,15 +749,18 @@ def main(argv: list[str]) -> int:
         return 1
     model = build(data, now, dt.timedelta(minutes=args.idle_minutes), caps=load_caps(),
                   window=args.days)
+    import state   # here, not at the top: state imports this module
+    data_json = json.dumps(state.state(model), indent=1) + "\n"
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     pages = render(model)
     layout.copy_fonts(out.parent)   # before the pages, so a published page never lacks them
     for name, page in pages.items():
         (out if name == "index.html" else out.parent / name).write_text(page, encoding="utf-8")
+    (out.parent / STATE_FILE).write_text(data_json, encoding="utf-8")   # #400
     live = sum(s["status"] != "stopped" for s in model["sessions"])
     others = ", ".join(n for n in pages if n != "index.html")
-    print(f"wrote {out}, {others} and {layout.FONTS_DIR}/ beside it: "
+    print(f"wrote {out}, {others}, {STATE_FILE} and {layout.FONTS_DIR}/ beside it: "
           f"{live} live / {len(model['sessions'])} sessions, "
           f"{len(model['prs'])} open PRs, {len(model['gov'])} open gov questions")
     return 0
