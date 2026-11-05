@@ -19,7 +19,7 @@ One build writes three pages, and the fonts, into the `--out` page's directory (
 
 | Page | What it shows |
 |---|---|
-| `index.html`, the **desk** | [On the floor](#on-the-floor), the [committee desk](#committee-desk) while a committee is open, and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
+| `index.html`, the **desk** | [On the floor](#on-the-floor), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" |
 
@@ -65,6 +65,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `governance` | recent and flagged records, counts by shape and domain, lapsed questions |
 | `committees`, `progress`, `reviewer_runs` | those sections' data; `reviewer_runs.unreviewed` is PR numbers |
 | `committee_desk` | each open committee as the desk shows it: `discussion`, `url`, `question`, `question_title`, `question_url`, `round`, `max_rounds`, `waiting_on`, `seats` (each `seat`, `role`, `model`, `recommendation`, `swing` (`moved`, `held` or null), `moved_from`, `summary`, `round`, `posted`, `url`) and `consensus` (`agree`, `seats`, `converging`, `consensus`, `text`); `[]` when none is open |
+| `trends` | [What the numbers say](#what-the-numbers-say): `days`, `first_day`, `min_count`, and each trend's `name`, `sentence`, `too_few` and `series` (one `{date, value}` per day; `value` is `null` on a day with no data) |
 
 It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
 
@@ -135,11 +136,30 @@ Set the issue up once, by hand:
 
 The digest issue isn't a `[heartbeat]` tracking issue or a `gov:question`, so it never appears in the needs-you list itself.
 
+## What the numbers say
+
+The desk's trends (#406): each one is a sentence and a sparkline, never a bare count. `questions.py` gathers the `gov:question` history once per build (#407 reuses it); `trends.py` turns it into sentences and inline SVG.
+
+| Trend | Sentence | Sparkline, one point per UTC day |
+|---|---|---|
+| Questions per merged PR | "0.8 questions per merged PR this week, down from 1.4 the week before." | questions asked that day ÷ PRs merged that day; a gap on a day nothing merged |
+| Median hours to decide | "Median 6.2 hours to decide (14 questions; 2 not decided yet)." | the median hours of the questions decided that day; a gap on a day none was |
+| Records a day | "1.3 records a day; none since 3 Nov." (or "the latest today") | records dated that day |
+
+- **The window** is `--days` whole UTC days, today the last (14 by default). "This week" is the last 7 of them and "the week before" the 7 before. A question counts if it was **created** in the window, open or closed.
+- **Decided** means the first time the owner (`humans.owner` in `jurisdictions.yml`) added `gov:ruled` or `ready`; failing that, the first time it was closed. Hours to decide run from creation to then. A label someone else added doesn't count (GOV-0006).
+- **Sentences are templates filled from numbers** (#397). A direction word ("up from", "down from", "the same as") appears only when both weeks had at least 3 merged PRs, and is chosen from the two rounded figures.
+- **"Too few to tell"** under 3 merged PRs this week, decided questions or records in the window. With one or two values a ratio or median moves by half or more when one more arrives, so it can't show a trend; 3 is the smallest count with a middle value. The trend's `too_few` is then true and its line is grey.
+- **Sparklines** are inline SVG with no axes or labels, scaled to the series' own maximum. Each has `role="img"` and a `<title>` and `aria-label` listing every day's value as its text alternative.
+
+**API calls added per build (#392):** 1 REST call per 100 questions updated in the window (the `issues?labels=gov:question&state=all&since=` list), 1 search call per 100 PRs merged in the window (`search/issues`, which has its own rate limit), and 1 GraphQL query per 25 questions for their label and close events (`timelineItems`). Record dates come from the checkout. Against this repo on 2026-11-05: 35 questions and 103 merged PRs in 14 days took 1 REST page, 2 search pages and 2 GraphQL queries, from 3 `gh` invocations (the whole rebuild: 47). Only the page reads these (`fetch(..., with_questions=True)`); `swarm inbox`, `swarm watch` and the digest don't.
+
 ## What it reads
 
 - **Sessions:** `[heartbeat]` tracking issues (GOV-0003). An issue counts only if its body starts with the heartbeat marker and it was opened by a `productswarm-<role>[bot]` App. Events are read from the first `jsonl` fence of comments **by that same App**; events whose `session_id`, `role` or `repo` don't match the issue, or that carry fields outside the remote schema (such as `prompt`), are dropped. The local spool is never read, so prompt text never reaches the page (GOV-0002).
 - **Open PRs** and the issues they close.
 - **`gov:question` issues**: the open ones, with the sessions blocked on each, and `gov:lapsed` ones closed within `--days`.
+- **The `gov:question` history** for [What the numbers say](#what-the-numbers-say): every question created in the window, its label and close events, PRs merged in the window, and each record's front-matter `date:` from the checkout.
 - **`governance/INDEX.md`**, from the checkout the page is built in (`dashboard.yml` checks out `main`).
 - **v3 progress:** see [v3 progress](#v3-progress).
 - **Reviewer workflow runs and jobs** from the Actions API, and the reviews and commits of the PRs they reviewed (see [Actions reviewer](#actions-reviewer)). Never job logs.
