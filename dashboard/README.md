@@ -19,7 +19,7 @@ One build writes four pages, and the fonts, into the `--out` page's directory (#
 
 | Page | What it shows |
 |---|---|
-| `index.html`, the **desk** | [On the floor](#on-the-floor), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), [How the questions went](#how-the-questions-went), [precedent in use](#precedent-in-use), a card per [past committee](#past-committees), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
+| `index.html`, the **desk** | [On the floor](#on-the-floor), [the wire](#the-wire), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), [How the questions went](#how-the-questions-went), [precedent in use](#precedent-in-use), a card per [past committee](#past-committees), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" with their round grids |
 | `authority.html` | The [authority map](#authority-map): who may decide what, one row per domain in `governance/jurisdictions.yml` |
@@ -36,7 +36,7 @@ The fonts are **self-hosted**, so the public page loads nothing from a third par
 
 Every page's masthead shows a red **LIVE** mark, `built HH:MM UTC` (the full time on hover, and a `<time datetime>` the `state.json` poll, #411, can use to grey the mark out once the data is stale; a static page can't know its own age when viewed), and when the owner last acted, in owner amber (`activity.py`, #402, part 3 of #397): "Owner last acted 8m ago: labelled #411 `ready`", linking the issue, PR, comment, commit or branch.
 
-The owner is `identities.humans.owner` in `governance/jurisdictions.yml` (`committees.owner_login()`). Their last act is their newest event, by `created_at`, in the repo's public events (`repos/{repo}/events`), read 100 a page, newest first, up to the 3 pages (300 events) the API keeps, stopping at the first page with an owner event. If none of those is the owner's, it says "Owner: no activity in the last N days", N being how far back the events read go (leaving out the oldest tenth, so a few late arrivals don't stretch it). If the owner or the events can't be read, it says "Owner: unknown" and the page still builds. The wire (#405) reuses the same events (`model["activity"]`), so they're read once a build.
+The owner is `identities.humans.owner` in `governance/jurisdictions.yml` (`committees.owner_login()`). Their last act is their newest event, by `created_at`, in the repo's public events (`repos/{repo}/events`), read 100 a page, newest first, up to the 3 pages (300 events) the API keeps, stopping at the first page with an owner event once it has also read back to UTC midnight (for the wire). If none of those is the owner's, it says "Owner: no activity in the last N days", N being how far back the events read go (leaving out the oldest tenth, so a few late arrivals don't stretch it). If the owner or the events can't be read, it says "Owner: unknown" and the page still builds. [The wire](#the-wire) (#405) reuses the same events (`model["activity"]`), so they're read once a build.
 
 What the events API does here (checked 2026-11-05):
 
@@ -86,6 +86,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `trends` | [What the numbers say](#what-the-numbers-say): `days`, `first_day`, `min_count`, and each trend's `name`, `sentence`, `too_few` and `series` (one `{date, value}` per day; `value` is `null` on a day with no data) |
 | `questions_went` | [How the questions went](#how-the-questions-went): `days`, `first_day`, `total`, the counts `asked_by` (`agents`, `owner`, `other`), `decided_by` (`owner`, `committee`, `lapsed`, `open`) and `became` (`record`, `direction`, `nothing`), and `questions`, each question's `number` and its three categories |
 | `precedent` | [precedent in use](#precedent-in-use): `version`, `from` (the window's first day), `counts` (record → day → `n`, `agents`, `owner`, `reviewer`), `totals`, `findings`, `records` (`id`, `date`, `status`) and `read` (where this build started reading, what it carried from, and its calls). The next build carries `counts` forward |
+| `wire` | [the wire](#the-wire): `day`, `events` (whether the repo's events could be read) and `items`, newest first, each with `kind` (`opened`, `ruled`, `lapsed`, `record`, `red` or `convened`), `time`, `number`, `text` and `link`, plus `record` on a `record` item; `[]` items on a quiet day |
 | `past_committees` | each ended committee's card: `discussion`, `url`, `question`, `question_title`, `question_url`, `record` (`id`, `url`, or null), `summary` (the INDEX.md ruling, or null), `consensus` (`text`, `consensus`, `dissent`), `rounds_used`, `max_rounds`, `stopped_early`, `models`, `diversity_met`, `minutes`, `swing` and `seats`; `[]` when none has ended |
 | `desk` | what the [live refresh](#live-refresh) draws: the desk's `mast` (masthead) and each panel (`floor`, `committee_desk`, `trends`, `precedent`, `past_committees`) as a node tree, or `null` for a panel that can't be one |
 
@@ -171,6 +172,25 @@ Set the issue up once, by hand:
 3. Run `python3 dashboard/digest.py --update --repo OWNER/REPO` once to fill it.
 
 The digest issue isn't a `[heartbeat]` tracking issue or a `gov:question`, so it never appears in the needs-you list itself.
+
+## The wire
+
+Today's governance events, UTC, newest first, under the floor on the desk (`wire.py`, #405, part 6 of #397), e.g. "09:14 Owner ruled on #396", each linked. With none it says "Quiet so far today." Every item is a template filled from fields (a time, a number, a record ID), never a summary of anyone's text. An item shows once per kind and number, at its earliest time today.
+
+| Item | Text | Events (`activity.py`) | Fallback, already read |
+|---|---|---|---|
+| question opened | Question #439 opened | `IssuesEvent` `opened`, labelled `gov:question` | the question history (`questions.py`): created today |
+| ruling | Owner ruled on #396 | `IssuesEvent` `labeled` `gov:ruled` by the owner | the question history's label events |
+| lapse | Question #388 lapsed | `IssuesEvent` `labeled` `gov:lapsed` by the owner | the question history's label events |
+| record merged | GOV-0021 merged, answering #396 | `IssuesEvent` `closed` on a `gov:question` that has a record in the checkout | the question history's close events |
+| red | Reviewer requested changes on PR #438 | `PullRequestReviewEvent` `changes_requested` by `productswarm-reviewer[bot]` | the reviewer's reviews of open PRs |
+| committee convened | Committee convened on #311 | not used | the owner's `**Convening a committee**` comment (`committees.py`) |
+
+A record's merge is read from its question closing (the record PR's `Closes #N`), because the events API's merge event carries no title or files. It counts only when a record in the checkout names that question in its front matter `question:`, and it links the record file. The question history covers only questions created in the window, so the fallbacks miss an older question's ruling or lapse when the events can't be read.
+
+**Planted defect caught** is left out: #331 is closed, and no gate issue posts a fixed result line (such as `**Gate: pass**`) to read. A future gate issue that does can add it.
+
+**API calls added per build:** none of its own. To cover all of today, the header's events read (#402) now also reads on until a page ends before UTC midnight, still at most 3 pages; on a busy day it may read a second or third page where it used to stop at the first.
 
 ## What the numbers say
 
