@@ -9,13 +9,17 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
     PR (GOV-0011's round count and Authority line);
   - open `gov:question` issues, `gov:lapsed` ones closed in the window, and
     governance/INDEX.md from the checkout (the governance section, #355).
-  - for the desk's trends (#406, questions.py): `gov:question`s created in the window with
-    their label and close events, PRs merged in the window, and record dates from the checkout.
+  - for the desk's trends (#406) and how the questions went (#407), questions.py:
+    `gov:question`s created in the window with their label and close events, PRs merged in
+    the window, and record dates from the checkout.
+  - for every page's header (#402, activity.py): the repo's public events, 1 to 3 pages, to
+    say when the owner last acted.
 
-Builds four pages in one look (layout.py), and copies the self-hosted fonts beside them:
+Builds four pages in one look (layout.py), each headed by a red LIVE mark, the build time
+and the owner's last act (#402), and copies the self-hosted fonts beside them:
   - index.html, the desk: on the floor (floor.py), the committee desk while one is open (#404),
-    what the numbers say (trends.py), precedent in use (precedent.py), a card per past
-    committee (#409), and a pointer to the other two (#397 fills it);
+    what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
+    committee (#409), and a pointer to the other pages (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
     progress and spend;
   - decisions.html: the governance section with the full decision log, open committees with
@@ -39,6 +43,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import activity
 import authority
 import committees
 import floor
@@ -118,14 +123,16 @@ def tracking_comments(repo: str, numbers: list[int]) -> dict[int, list[dict]]:
 
 def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
           with_actions: bool = False, with_committees: bool = False,
-          with_questions: bool = False, with_precedent: bool = False) -> dict:
+          with_questions: bool = False, with_precedent: bool = False,
+          with_activity: bool = False) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
     also reads the v3 progress section's data (progress.py), `with_actions` the Actions
     reviewer section's (reviewer_runs.py), `with_committees` the committee Discussions
     (committees.py, GraphQL), `with_questions` the gov:question history the desk's trends
     read (questions.py, REST, search and GraphQL), and `with_precedent` the GOV citations
-    (precedent.py). Only the page shows them, so swarm's snapshot() and the digest leave all
-    five off and make none of those calls; main() asks for them."""
+    (precedent.py), and `with_activity` the repo's events for the header (activity.py). Only
+    the page shows them, so swarm's snapshot() and the digest leave all six off and make none
+    of those calls; main() asks for them."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
     items: dict[int, dict] = {}   # issues and PRs, for precedent.py's bodies
@@ -156,7 +163,9 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
             "committees": committees.fetch(repo, gh_items, gh_json) if with_committees else None,
             "questions": questions.fetch(repo, now, days, gh_items) if with_questions else None,
             "precedent": fetch_precedent(repo, now, days, list(items.values()))
-                         if with_precedent else None}
+                         if with_precedent else None,
+            "activity": activity.fetch(repo, gh_json, committees.owner_login())
+                        if with_activity else None}
 
 
 def fetch_precedent(repo: str, now: dt.datetime, days: int, items: list[dict]) -> dict:
@@ -386,6 +395,11 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
                                                   p.get("headRefOid"))
         prs[-1]["needs_owner"] = needs_owner(rv, prs[-1]["author"])
 
+    comms = committees.build(data.get("committees"))
+    owner = committees.owner_login()
+    history = (questions.build(data["questions"], now, window, owner)
+               if data.get("questions") is not None else None)
+
     today = now.date()
     days = [today - dt.timedelta(days=i) for i in range(SPEND_DAYS)]
     per_day = {d: sum(s["daily"].get(d, 0.0) for s in sessions) for d in days}
@@ -400,11 +414,14 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
          "progress": progress.build(data["progress"]) if data.get("progress") else None,
          "reviewer_runs": reviewer_runs.build(
              data.get("actions"), [p for p in prs if not p["draft"] and unreviewed(p)], now),
-         "committees": committees.build(data.get("committees")),
-         "trends": trends.build(questions.build(data["questions"], now, window,
-                                                committees.owner_login())
-                                if data.get("questions") is not None else None),
+         "committees": comms,
+         "trends": trends.build(history),
+         "questions_went": questions.went(history, committees.records(),
+                                          {c.get("question") for c in comms["committees"]}, owner),
          "precedent": precedent.build(data.get("precedent"), data.get("records") or {}, now, window),
+         "activity": data.get("activity"),   # the repo's events; the wire (#405) reuses them
+         "owner_last_acted": activity.owner_last_acted(data.get("activity"),
+                                                       committees.owner_login(), repo, now),
          "spend": {"per_day": per_day, "today": per_day[today],
                    "unpriced": [s for s in sessions if s["cost"] is None]}}
     m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
@@ -604,22 +621,28 @@ def rulings(m: dict) -> dict[str, str]:
     return {r["id"]: r["ruling"] for r in (m.get("governance") or {}).get("all_records") or []}
 
 
+def owner_line(m: dict) -> str:
+    """The header's "Owner last acted" line (#402), on every page."""
+    return activity.header(m.get("owner_last_acted"), m["now"], ago)
+
+
 def render_desk(m: dict) -> str:
     """The desk (index.html): on the floor (#403), the committee desk while a committee is open
-    (#404), what the numbers say (#406), precedent in use (#408), a card per past committee
-    (#409), and a pointer to the other pages. #397's later panels join it."""
+    (#404), what the numbers say (#406), how the questions went (#407), precedent in use
+    (#408), a card per past committee (#409), and a pointer to the other pages. #397's later panels join it."""
     repo = m["repo"]
     out = ["<h1>The desk</h1>",
            floor.render(m.get("floor"), repo),
            committees.desk(m.get("committees"), repo),
            trends.render(m.get("trends")),
+           questions.render_went(m.get("questions_went")),
            precedent.render(m.get("precedent"), repo),
            committees.past(m.get("committees"), rulings(m), repo),
            '<p class="pointer">The needs-you list, sessions, open PRs, reviewer sweeps, v3 '
            'progress and spend are on <a href="operations.html">Operations</a>; the full '
            'decision log, open and lapsed gov questions, and every committee\'s round grid are on '
            '<a href="decisions.html">Decisions</a>.</p>']
-    return layout.page("index.html", TITLE, repo, stamp(m["now"]), "\n".join(o for o in out if o))
+    return layout.page("index.html", TITLE, repo, m["now"], "\n".join(o for o in out if o), owner_line(m))
 
 
 def render_operations(m: dict) -> str:
@@ -682,7 +705,7 @@ def render_operations(m: dict) -> str:
         note += (f" Left out of totals, with no tokens or an unpriced model: "
                  f"{len(sp['unpriced'])} session(s) ({ids}).")
     out.append(f'<p class="muted method">Method: {esc(note)}</p>')
-    return layout.page("operations.html", TITLE, repo, stamp(now), "\n".join(out))
+    return layout.page("operations.html", TITLE, repo, now, "\n".join(out), owner_line(m))
 
 
 def render_decisions(m: dict) -> str:
@@ -693,14 +716,14 @@ def render_decisions(m: dict) -> str:
            governance.render(m["governance"], repo, now, m["days"], ago, stamp, full=True),
            committees.render(m.get("committees"), repo, part="open"),
            committees.render(m.get("committees"), repo, part="ended")]
-    return layout.page("decisions.html", TITLE, repo, stamp(now), "\n".join(o for o in out if o))
+    return layout.page("decisions.html", TITLE, repo, now, "\n".join(o for o in out if o), owner_line(m))
 
 
 def render_authority(m: dict) -> str:
     """authority.html: who may decide what, from governance/jurisdictions.yml (#410)."""
     a = m.get("authority") or authority.build(None, [])
-    return layout.page("authority.html", TITLE, m["repo"], stamp(m["now"]),
-                       authority.render(a, m["repo"]))
+    return layout.page("authority.html", TITLE, m["repo"], m["now"],
+                       authority.render(a, m["repo"]), owner_line(m))
 
 
 def render(m: dict) -> dict[str, str]:
@@ -727,7 +750,8 @@ def default_repo() -> str | None:
 # What one run needs, with headroom. Against this repo on 2026-11-04 (#392's PR), a page
 # rebuild made 23 REST calls and 19 GraphQL queries (before #392: 258 and 9), and the digest
 # 5 and 8. The workflow token's allowance is 1,000 an hour of each, shared with the digest.
-# precedent.py (#408) adds about 20 REST calls on a full read and 5 GraphQL queries.
+# precedent.py (#408) adds about 20 REST calls on a full read and 5 GraphQL queries, and the
+# header's repo events (#402, activity.py) 1 to 3 REST calls.
 PAGE_NEEDS = {"core": 100, "graphql": 55}
 DIGEST_NEEDS = {"core": 30, "graphql": 30}
 SPACING = dt.timedelta(minutes=5)       # a nudged rebuild waits this long after a published one
@@ -815,7 +839,8 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
-                     with_committees=True, with_questions=True, with_precedent=True)
+                     with_committees=True, with_questions=True, with_precedent=True,
+                     with_activity=True)
         data["records"] = precedent.load_records()
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)

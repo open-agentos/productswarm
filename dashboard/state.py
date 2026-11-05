@@ -11,6 +11,7 @@ Each later #397 panel adds its slice here.
 import datetime as dt
 from pathlib import Path
 
+import activity
 import committees
 import generate
 import precedent
@@ -102,5 +103,7 @@ def state(m: dict) -> dict:
         "progress": m.get("progress"),
         "reviewer_runs": reviewer_runs(m["reviewer_runs"]),
         "trends": m.get("trends"),   # #406: each trend's sentence and its series by day
+        "questions_went": m.get("questions_went"),   # #407: counts, and each question's categories
         "precedent": precedent.state(m.get("precedent")),   # #408; the next build carries it forward
+        "owner_last_acted": activity.state(m.get("owner_last_acted")),   # #402: the header's line
     })

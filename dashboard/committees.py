@@ -251,9 +251,11 @@ def records(path: Path = DECISIONS) -> dict[int, dict]:
         rid = re.search(r"^id:\s*(\S+)", fm.group(1), re.M)
         status = re.search(r"^status:\s*(\S+)", fm.group(1), re.M)
         date = re.search(r"^date:\s*[\"']?(\d{4}-\d{2}-\d{2})", fm.group(1), re.M)
+        shape = re.search(r"^shape:\s*(\S+)", fm.group(1), re.M)
         if q and rid:
             out[int(q.group(1))] = {"id": rid.group(1), "status": status.group(1) if status else None,
-                                    "file": f.name, "date": date.group(1) if date else None}
+                                    "file": f.name, "date": date.group(1) if date else None,
+                                    "shape": shape.group(1) if shape else None}
     return out
 
 

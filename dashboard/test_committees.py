@@ -198,7 +198,7 @@ class CommitteeTest(Fixture):
         self.assertFalse(any(p["model_differs"] for p in com["posts"]))
         self.assertTrue(com["ruled"])
         self.assertEqual(com["record"], {"id": "GOV-0021", "status": "in-force", "file": "GOV-0021-when.md",
-                                         "date": "2026-11-04"})
+                                         "date": "2026-11-04", "shape": None})
         self.assertEqual(set(com["owner_comments"]), {"convening", "summary", "ruling"})
         self.assertEqual(com["owner_comments"]["summary"]["url"], f"{QURL}#issuecomment-25")
         self.assertEqual(com["notes"], [])
