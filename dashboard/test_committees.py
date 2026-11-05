@@ -10,6 +10,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -558,7 +559,8 @@ class PageStillBuildsTest(unittest.TestCase):
             try:
                 now = dt.datetime.now(dt.timezone.utc)
                 data = g.fetch(REPO, now, 14, with_committees=True)
-                rc = g.main(["--repo", REPO, "--out", str(d / "index.html")])
+                with mock.patch.object(g.precedent, "published", return_value=None):   # no Pages fetch in tests
+                    rc = g.main(["--repo", REPO, "--out", str(d / "index.html")])
                 plain = g.fetch(REPO, now, 14)
             finally:
                 os.environ["PATH"] = old

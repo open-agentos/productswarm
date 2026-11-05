@@ -12,6 +12,7 @@ import datetime as dt
 from pathlib import Path
 
 import generate
+import precedent
 
 SCHEMA = 1
 
@@ -84,4 +85,5 @@ def state(m: dict) -> dict:
         "committees": m.get("committees"),
         "progress": m.get("progress"),
         "reviewer_runs": reviewer_runs(m["reviewer_runs"]),
+        "precedent": precedent.state(m.get("precedent")),   # #408; the next build carries it forward
     })

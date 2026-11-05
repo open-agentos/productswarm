@@ -36,6 +36,7 @@ import committees
 import ghql
 import governance
 import layout
+import precedent
 import progress
 import reviewer_runs
 import spend
@@ -104,17 +105,21 @@ def tracking_comments(repo: str, numbers: list[int]) -> dict[int, list[dict]]:
 
 
 def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
-          with_actions: bool = False, with_committees: bool = False) -> dict:
+          with_actions: bool = False, with_committees: bool = False,
+          with_precedent: bool = False) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
     also reads the v3 progress section's data (progress.py), `with_actions` the Actions
     reviewer section's (reviewer_runs.py), and `with_committees` the committee Discussions
-    (committees.py, GraphQL). Only the page shows them, so swarm's snapshot() and the digest
-    leave all three off and make no Actions or GraphQL calls; main() asks for them."""
+    (committees.py, GraphQL), and `with_precedent` the GOV citations (precedent.py). Only the
+    page shows them, so swarm's snapshot() and the digest leave them off and make no Actions
+    or GraphQL calls; main() asks for them."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
+    items: dict[int, dict] = {}   # issues and PRs, for precedent.py's bodies
     for path in (f"repos/{repo}/issues?state=open&per_page=100",
                  f"repos/{repo}/issues?state=closed&since={since}&per_page=100"):
         for it in gh_items(path):
+            items[it["number"]] = it
             if "pull_request" not in it:
                 issues[it["number"]] = it
     comments = tracking_comments(repo, [s["issue"] for s in tracking_issues(issues.values())])
@@ -131,7 +136,30 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
             "reviews": reviews, "index": index,
             "progress": progress.fetch(repo, gh_json) if with_progress else None,
             "actions": reviewer_runs.fetch(repo, now, reviews) if with_actions else None,
-            "committees": committees.fetch(repo, gh_items, gh_json) if with_committees else None}
+            "committees": committees.fetch(repo, gh_items, gh_json) if with_committees else None,
+            "precedent": fetch_precedent(repo, now, days, list(items.values()))
+                         if with_precedent else None}
+
+
+def fetch_precedent(repo: str, now: dt.datetime, days: int, items: list[dict]) -> dict:
+    """precedent.py's data, leaving out tracking issues and the digest issue, and carrying
+    counts forward from the last published state.json."""
+    import digest   # here, not at the top: digest imports this module
+    skip = ({t["issue"] for t in tracking_issues(items)}
+            | {i["number"] for i in items if (i.get("body") or "").lstrip().startswith(digest.MARKER)})
+    return precedent.fetch(repo, now, days, items, skip, gh_items, ghql, load_owner(),
+                           precedent.published(repo))
+
+
+def load_owner() -> str | None:
+    """humans.owner's login from jurisdictions.yml (launcher/swarm.py reads it the same way),
+    or None if it can't be read: the owner's citations then count only in the total."""
+    try:
+        sys.path.insert(0, str(HERE.parent / "launcher"))
+        import swarm
+        return swarm.owner_login()
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------- deriving state
@@ -353,6 +381,7 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
             "reviewer_runs": reviewer_runs.build(
                 data.get("actions"), [p for p in prs if not p["draft"] and unreviewed(p)], now),
             "committees": committees.build(data.get("committees")),
+            "precedent": precedent.build(data.get("precedent"), data.get("records") or {}, now, window),
             "spend": {"per_day": per_day, "today": per_day[today],
                       "unpriced": [s for s in sessions if s["cost"] is None]}}
 
@@ -552,6 +581,7 @@ def render_desk(m: dict) -> str:
     committee = committees.render(m.get("committees"), repo, part="open")
     out = ["<h1>The desk</h1>",
            committee or '<p class="muted">No committee is sitting.</p>',
+           precedent.render(m.get("precedent"), repo),
            '<p class="pointer">The needs-you list, sessions, open PRs, reviewer sweeps, v3 '
            'progress and spend are on <a href="operations.html">Operations</a>; the full '
            'decision log, open and lapsed gov questions and past committees are on '
@@ -656,7 +686,8 @@ def default_repo() -> str | None:
 # What one run needs, with headroom. Against this repo on 2026-11-04 (#392's PR), a page
 # rebuild made 23 REST calls and 19 GraphQL queries (before #392: 258 and 9), and the digest
 # 5 and 8. The workflow token's allowance is 1,000 an hour of each, shared with the digest.
-PAGE_NEEDS = {"core": 80, "graphql": 50}
+# precedent.py (#408) adds about 20 REST calls on a full read and 5 GraphQL queries.
+PAGE_NEEDS = {"core": 100, "graphql": 55}
 DIGEST_NEEDS = {"core": 30, "graphql": 30}
 SPACING = dt.timedelta(minutes=5)       # a nudged rebuild waits this long after a published one
 WORKFLOW = "dashboard.yml"
@@ -743,7 +774,8 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
-                     with_committees=True)
+                     with_committees=True, with_precedent=True)
+        data["records"] = precedent.load_records()
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
         return 1
