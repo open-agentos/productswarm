@@ -541,8 +541,8 @@ class CliTest(Base):
 
     def test_launch_unknown_role(self):
         self.l.root = Path(__file__).resolve().parent.parent
-        self.assertEqual(swarm.main(["launch", "designer", "--issue", "1", "--repo", "o/r"], self.l), 1)
-        self.assertIn("unknown role 'designer'", self.lines[-1])
+        self.assertEqual(swarm.main(["launch", "juggler", "--issue", "1", "--repo", "o/r"], self.l), 1)
+        self.assertIn("unknown role 'juggler'", self.lines[-1])
         self.assertEqual(swarm.main(["launch", "../roles/builder", "--issue", "1", "--repo", "o/r"], self.l), 1)
 
     def test_corrupt_state_file(self):
