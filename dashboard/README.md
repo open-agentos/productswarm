@@ -15,15 +15,16 @@ It reads GitHub through `gh api`, so inside a swarm session it acts as the role'
 
 ## Pages
 
-One build writes three pages, and the fonts, into the `--out` page's directory (#401, part of #397):
+One build writes four pages, and the fonts, into the `--out` page's directory (#401, part of #397):
 
 | Page | What it shows |
 |---|---|
 | `index.html`, the **desk** | [On the floor](#on-the-floor), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), [precedent in use](#precedent-in-use), a card per [past committee](#past-committees), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" with their round grids |
+| `authority.html` | The [authority map](#authority-map): who may decide what, one row per domain in `governance/jurisdictions.yml` |
 
-Every page carries `noindex`, reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the three pages. The authority map (#410) joins the footer when it lands. `generate.render(model)` returns the pages by file name.
+Every page carries `noindex`, reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the four pages. `generate.render(model)` returns the pages by file name.
 
 ### Look
 
@@ -162,7 +163,7 @@ The desk's trends (#406): each one is a sentence and a sparkline, never a bare c
 - **Open PRs** and the issues they close.
 - **`gov:question` issues**: the open ones, with the sessions blocked on each, and `gov:lapsed` ones closed within `--days`.
 - **The `gov:question` history** for [What the numbers say](#what-the-numbers-say): every question created in the window, its label and close events, PRs merged in the window, and each record's front-matter `date:` from the checkout.
-- **`governance/INDEX.md`**, from the checkout the page is built in (`dashboard.yml` checks out `main`).
+- **`governance/INDEX.md`** and **`governance/jurisdictions.yml`**, from the checkout the page is built in (`dashboard.yml` checks out `main`).
 - **v3 progress:** see [v3 progress](#v3-progress).
 - **Reviewer workflow runs and jobs** from the Actions API, and the reviews and commits of the PRs they reviewed (see [Actions reviewer](#actions-reviewer)). Never job logs.
 - **Committee Discussions** (`committees.py`, #353): every Discussion in the "Committees" category, through `gh api graphql`, plus the `gov:question` each one serves (from a `<!-- productswarm-committee question=N -->` marker, else the `Committee for #N:` title) and that question's record in `governance/decisions/` (front matter `question: "#N"`). Members come from the `## Members` or `### Members` table, the post order from rule 1 under `Rules`, and round posts are top-level comments headed `Round N: <seat>` by that seat's App. From each post it keeps only the round, seat, author, time, link, signature model, the first bold phrase of its Recommendation and the first sentence of its Position (#404). From the owner's comments on the question it keeps only whether the convening, summary and ruling comments exist, when, and their links, so no cost line or other text reaches the page. It derives status (convened, round N, summary, ratified, record), §7.2 diversity, the next seat, rounds used of 3 and posts per member per UTC day against §8's 6. A Discussion that doesn't match #314's layout shows as "unparsed". A token that can't read Discussions gives a note and the rest of the page still builds. Only the page reads these (`fetch(..., with_committees=True)` in `main()`); `swarm inbox`, `swarm watch` and the digest skip the GraphQL calls. The page shows them in the Committees section below.
@@ -223,6 +224,16 @@ Red is used only for the LIVE mark. The same data is `committee_desk` in `state.
 - **Numbers:** rounds used of 3 (and "stopped early" if rule 6 stopped it), the members' models and whether §7.2 was met, whole minutes from the first round post to the last, and the swing: how many seats changed their recommendation between any two of their posts.
 
 So #314's card reads GOV-0021, "dissent: proposer", 2 of 3 rounds, two models (§7.2 met), and a swing of 3 of 3 seats. The same data is `past_committees` in `state.json`.
+
+## Authority map
+
+`authority.py` draws `authority.html` from `governance/jurisdictions.yml` in the checkout (#410). It's a reference page, not live data, so it isn't in `state.json` and adds no API calls.
+
+- **One row per domain**, in file order: its name, description and note (and "always one-way" where the file says so), who decides (agents in blue, the owner in amber, "nobody: ask" when `decide` is empty), the owner, who ratifies, who is vote-eligible and the default shape. An identity reference the file's `identities` doesn't list shows as written, in grey.
+- **Records:** the domain's in-force rows of `governance/INDEX.md` (the same rows the governance section parses), counted and linked to `decisions.html`, with those past their review-by date named.
+- Above the table, the file's `quorum` and `consent_window`; below it, any domain an in-force record names that the file doesn't list.
+
+The page is stdlib only, so `authority.read()` understands just this file's shape: nested `key: value` mappings, `[a, b]` lists, quoted strings and comments. Anything else (block lists, block scalars, odd indents, duplicate keys) or a domain without `owner` or `default_shape` makes the page say "can't read governance/jurisdictions.yml" and draw no table, rather than guess. `test_authority.py` fails if any domain in the real file is missing from the page.
 
 ## v3 progress
 

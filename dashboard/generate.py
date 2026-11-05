@@ -12,17 +12,19 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
   - for the desk's trends (#406, questions.py): `gov:question`s created in the window with
     their label and close events, PRs merged in the window, and record dates from the checkout.
 
-Builds three pages in one look (layout.py), and copies the self-hosted fonts beside them:
+Builds four pages in one look (layout.py), and copies the self-hosted fonts beside them:
   - index.html, the desk: on the floor (floor.py), the committee desk while one is open (#404),
     what the numbers say (trends.py), precedent in use (precedent.py), a card per past
     committee (#409), and a pointer to the other two (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
     progress and spend;
   - decisions.html: the governance section with the full decision log, open committees with
-    their round grids, and ended committees.
+    their round grids, and ended committees;
+  - authority.html: the authority map, who may decide what, from governance/jurisdictions.yml
+    in the checkout (authority.py, #410).
 Stdlib only, no JavaScript, per the default in gov question #26.
 
-    python3 dashboard/generate.py                 # writes dashboard/out/{index,operations,decisions}.html
+    python3 dashboard/generate.py                 # writes dashboard/out/{index,operations,decisions,authority}.html
     python3 dashboard/generate.py --out /tmp/x/index.html --days 7 --idle-minutes 15
 """
 from __future__ import annotations
@@ -37,6 +39,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import authority
 import committees
 import floor
 import ghql
@@ -142,8 +145,12 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
         index = governance.INDEX.read_text(encoding="utf-8")
     except OSError:
         index = None   # the section says so; the rest of the page still builds
+    try:
+        jurisdictions = authority.JURISDICTIONS.read_text(encoding="utf-8")
+    except OSError:
+        jurisdictions = None   # the authority map says so (#410)
     return {"repo": repo, "issues": list(issues.values()), "comments": comments, "prs": prs or [],
-            "reviews": reviews, "index": index,
+            "reviews": reviews, "index": index, "jurisdictions": jurisdictions,
             "progress": progress.fetch(repo, gh_json) if with_progress else None,
             "actions": reviewer_runs.fetch(repo, now, reviews) if with_actions else None,
             "committees": committees.fetch(repo, gh_items, gh_json) if with_committees else None,
@@ -383,23 +390,25 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
     days = [today - dt.timedelta(days=i) for i in range(SPEND_DAYS)]
     per_day = {d: sum(s["daily"].get(d, 0.0) for s in sessions) for d in days}
 
-    return {"repo": repo, "now": now, "idle_minutes": int(idle_after.total_seconds() // 60),
-            "issue_titles": {n: i["title"] for n, i in issues.items()},
-            "sessions": sessions, "prs": prs,
-            "floor": floor.build([(s, events_of[s["session_id"]]) for s in sessions], now), "gov": gov, "days": window,
-            "governance": governance.build(data.get("index"), gov, data["issues"], now,
-                                           now - dt.timedelta(days=window), parse_ts,
-                                           time_to_live, ttl_date),
-            "progress": progress.build(data["progress"]) if data.get("progress") else None,
-            "reviewer_runs": reviewer_runs.build(
-                data.get("actions"), [p for p in prs if not p["draft"] and unreviewed(p)], now),
-            "committees": committees.build(data.get("committees")),
-            "trends": trends.build(questions.build(data["questions"], now, window,
-                                                   committees.owner_login())
-                                   if data.get("questions") is not None else None),
-            "precedent": precedent.build(data.get("precedent"), data.get("records") or {}, now, window),
-            "spend": {"per_day": per_day, "today": per_day[today],
-                      "unpriced": [s for s in sessions if s["cost"] is None]}}
+    m = {"repo": repo, "now": now, "idle_minutes": int(idle_after.total_seconds() // 60),
+         "issue_titles": {n: i["title"] for n, i in issues.items()},
+         "sessions": sessions, "prs": prs,
+         "floor": floor.build([(s, events_of[s["session_id"]]) for s in sessions], now), "gov": gov, "days": window,
+         "governance": governance.build(data.get("index"), gov, data["issues"], now,
+                                        now - dt.timedelta(days=window), parse_ts,
+                                        time_to_live, ttl_date),
+         "progress": progress.build(data["progress"]) if data.get("progress") else None,
+         "reviewer_runs": reviewer_runs.build(
+             data.get("actions"), [p for p in prs if not p["draft"] and unreviewed(p)], now),
+         "committees": committees.build(data.get("committees")),
+         "trends": trends.build(questions.build(data["questions"], now, window,
+                                                committees.owner_login())
+                                if data.get("questions") is not None else None),
+         "precedent": precedent.build(data.get("precedent"), data.get("records") or {}, now, window),
+         "spend": {"per_day": per_day, "today": per_day[today],
+                   "unpriced": [s for s in sessions if s["cost"] is None]}}
+    m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
+    return m
 
 
 TTL_RE = re.compile(r"^###\s*Time to live\s*\n+\s*(\S[^\n]*?)\s*$", re.M)
@@ -687,10 +696,17 @@ def render_decisions(m: dict) -> str:
     return layout.page("decisions.html", TITLE, repo, stamp(now), "\n".join(o for o in out if o))
 
 
+def render_authority(m: dict) -> str:
+    """authority.html: who may decide what, from governance/jurisdictions.yml (#410)."""
+    a = m.get("authority") or authority.build(None, [])
+    return layout.page("authority.html", TITLE, m["repo"], stamp(m["now"]),
+                       authority.render(a, m["repo"]))
+
+
 def render(m: dict) -> dict[str, str]:
     """Every page, by file name, in layout.PAGES order."""
     pages = {"index.html": render_desk, "operations.html": render_operations,
-             "decisions.html": render_decisions}
+             "decisions.html": render_decisions, "authority.html": render_authority}
     return {f: pages[f](m) for f, _ in layout.PAGES}
 
 
