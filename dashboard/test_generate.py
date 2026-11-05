@@ -16,6 +16,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import generate as g  # noqa: E402
+import live  # noqa: E402
 
 REPO = "open-agentos/productswarm"
 NOW = dt.datetime(2026, 11, 2, 12, 0, tzinfo=dt.timezone.utc)
@@ -168,7 +169,10 @@ class PageTest(unittest.TestCase):
             self.assertIn('<meta name="robots" content="noindex, nofollow">', head, name)
             self.assertIn('<meta http-equiv="refresh" content="300">', head, name)
             self.assertIn('<meta name="viewport" content="width=device-width, initial-scale=1">', head, name)
-            self.assertNotIn("<script", page.lower(), name)
+            # Only the desk carries a script: the live refresh, allowed by hash (#411).
+            rest = page.replace(f"<script>{live.script()}</script>", "") if name == "index.html" else page
+            self.assertNotIn("<script", rest.lower(), name)
+            self.assertIn('http-equiv="Content-Security-Policy"', head, name)
             self.assertIn("#F4F3EE", head, name)   # one look (layout.py)
             self.assertIn('src:url("fonts/IBMPlexSans-Regular-Latin1.woff2")', head, name)
             # Nothing loaded from a third party: the only URLs in the head are the fonts.
