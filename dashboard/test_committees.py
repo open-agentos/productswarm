@@ -332,8 +332,10 @@ class CommitteeTest(Fixture):
         now = dt.datetime(2026, 11, 4, 15, 0, tzinfo=dt.timezone.utc)
         model = g.build(data, now, dt.timedelta(minutes=15))
         self.assertEqual(model["committees"]["committees"][0]["status"], "record GOV-0021")
-        page = g.render(model)
-        self.assertIn("<h2>Committees</h2>", page)
+        pages = g.render(model)
+        self.assertIn("<h2>Committees</h2>", pages["index.html"])        # the desk (#401)
+        self.assertIn("<h2>Past committees</h2>", pages["decisions.html"])   # it ended
+        page = "".join(pages.values())
         self.assertNotIn("<script", page.lower())
         for text in (repr(model), page):
             self.assertNotIn("2.89", text)
@@ -439,17 +441,26 @@ class RenderTest(Fixture):
         self.assertEqual(self.page([], notes=["no Committees Discussion category"]), "")
         data = {"repo": REPO, "issues": [], "comments": {}, "prs": [], "reviews": {}, "committees": None}
         now = dt.datetime(2026, 11, 4, 15, 0, tzinfo=dt.timezone.utc)
-        self.assertNotIn("Committees", g.render(g.build(data, now, dt.timedelta(minutes=15))))
+        for page in g.render(g.build(data, now, dt.timedelta(minutes=15))).values():
+            self.assertNotIn("Committees", page)
 
-    def test_open_committees_come_after_needs_you(self):
+    def test_open_committees_are_on_the_desk(self):
         (self.decisions / "GOV-0021-when.md").unlink()
         data = {"repo": REPO, "issues": [], "comments": {}, "prs": [], "reviews": {},
                 "committees": {"discussions": [discussion(comments=[post(*POSTS_314[0])])],
                                "questions": {311: question(False, False)}, "notes": []}}
         now = dt.datetime(2026, 11, 4, 15, 0, tzinfo=dt.timezone.utc)
-        page = g.render(g.build(data, now, dt.timedelta(minutes=15)))
-        self.assertLess(page.index("Needs you"), page.index("<h2>Committees</h2>"))
-        self.assertLess(page.index("<h2>Committees</h2>"), page.index("<h2>Sessions</h2>"))
+        pages = g.render(g.build(data, now, dt.timedelta(minutes=15)))
+        self.assertIn("<h2>Committees</h2>", pages["index.html"])
+        for other in ("operations.html", "decisions.html"):   # #401: only the desk shows it
+            self.assertNotIn("Committees</h2>", pages[other])
+
+    def test_parts(self):
+        open_one = discussion(comments=[post(*POSTS_314[0])])
+        (self.decisions / "GOV-0021-when.md").unlink()
+        m = self.build([open_one], {311: question(False, False)}, [])
+        self.assertIn("<h2>Committees</h2>", c.render(m, REPO, part="open"))
+        self.assertEqual(c.render(m, REPO, part="ended"), "")
 
 
 def fake_gh_json(pages: dict, fail: str | None = None):

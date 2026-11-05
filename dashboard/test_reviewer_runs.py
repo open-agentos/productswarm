@@ -217,7 +217,7 @@ class FetchTest(unittest.TestCase):
     def test_page_still_builds_without_actions(self):
         m = g.build({"repo": REPO, "issues": [], "comments": {}, "prs": [],
                      "actions": {"error": rr.NO_ACTIONS}}, NOW, dt.timedelta(minutes=15))
-        html = g.render(m)
+        html = g.render(m)["operations.html"]
         self.assertIn("<h2>Actions reviewer</h2>", html)
         self.assertIn("actions: read", html)
         self.assertNotIn("cost", html.split("<h2>Actions reviewer</h2>")[1].split("<h2>")[0]

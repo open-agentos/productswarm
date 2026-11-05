@@ -1,21 +1,39 @@
 # Swarm dashboard
 
-A read-only page showing what every agent session is doing. Built by `generate.py`: Python stdlib only, one static HTML file, no JavaScript (option 1 in gov question #26, which the owner chose).
+Read-only pages showing what every agent session is doing and how the swarm is governed. Built by `generate.py`: Python stdlib only, static HTML files, no JavaScript (option 1 in gov question #26, which the owner chose).
 
 ## Generate it
 
 ```bash
-python3 dashboard/generate.py            # writes dashboard/out/index.html (git-ignored)
+python3 dashboard/generate.py            # writes dashboard/out/ (git-ignored)
 open dashboard/out/index.html
 ```
 
-Options: `--repo owner/name` (default: this checkout's `origin`), `--out PATH`, `--days N` (include sessions that stopped in the last N days, default 14), `--idle-minutes N` (default 15).
+Options: `--repo owner/name` (default: this checkout's `origin`), `--out PATH` (the desk page; the other pages and `fonts/` are written beside it), `--days N` (include sessions that stopped in the last N days, default 14), `--idle-minutes N` (default 15).
 
 It reads GitHub through `gh api`, so inside a swarm session it acts as the role's App.
 
+## Pages
+
+One build writes three pages, and the fonts, into the `--out` page's directory (#401, part of #397):
+
+| Page | What it shows |
+|---|---|
+| `index.html`, the **desk** | [On the floor](#on-the-floor), open committees (the open part of [Committees](#committees)), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
+| `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
+| `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, and ended committees as "Past committees" |
+
+Every page carries `noindex`, reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the three pages. The authority map (#410) joins the footer when it lands. `generate.render(model)` returns the pages by file name.
+
+### Look
+
+`layout.py` holds the look and the page shell every page uses, so colours and fonts are set in one place: paper `#F4F3EE`, ink, agents blue `#1F4FB8` (active sessions), owner amber `#A35A00` (what waits on the owner), and red `#C2361B` only for live marks and blocks (#397). Text is IBM Plex Sans, numbers, times and code Plex Mono, headings Plex Sans Condensed.
+
+The fonts are **self-hosted**, so the public page loads nothing from a third party. `static/fonts/` holds the Latin-1 subset, as woff2, of only the four faces the CSS uses (Sans 400 and 600, Mono 400, Sans Condensed 600), from IBM's `@ibm/plex-sans` 1.1.0, `@ibm/plex-mono` 2.5.0 and `@ibm/plex-sans-condensed` 2.0.0 packages, with their SIL Open Font License. Together they add 82,776 bytes (87,232 with the licence) to the published site. `generate.py` copies them to `fonts/` beside the pages on every build, before writing the pages. A character outside Latin-1 (an arrow, say) falls back to the system font.
+
 ## Where it's published
 
-`.github/workflows/dashboard.yml` regenerates the page every 15 minutes (plus a manual run) and publishes it to GitHub Pages at <https://open-agentos.github.io/productswarm/>. It runs on a schedule only, never on issue, comment or PR events, and its token can read the repo but not write to it (`pages` and `id-token` are only for the deploy), per the owner's choice on #32.
+`.github/workflows/dashboard.yml` regenerates the pages every 15 minutes (plus a manual run) and publishes it to GitHub Pages at <https://open-agentos.github.io/productswarm/>. It runs on a schedule only, never on issue, comment or PR events, and its token can read the repo but not write to it (`pages` and `id-token` are only for the deploy), per the owner's choice on #32.
 
 GitHub runs that schedule hours apart here, so the nudge in `.github/workflows/digest-nudge.yml` (shared with the digest) dispatches `dashboard.yml` on `main` when something happens: an issue or PR is opened, closed, reopened or relabelled, a PR is pushed or reviewed, or a Discussion post or comment is created or edited (#351). The nudge passes no event data and holds no secrets; `dashboard.yml` itself still runs only on its schedule and dispatch, and the schedule stays as the safety net. An open page reloads itself every 300 seconds with a `<meta http-equiv="refresh">` tag (plain HTML, no script), so it picks up a rebuild within about five minutes.
 
@@ -40,6 +58,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `schema` | `1` |
 | `built_at`, `repo`, `idle_minutes` | when and for which repo it was built, and the idle threshold |
 | `needs_you` | the needs-you list below, without over-cap items |
+| `floor` | [on the floor](#on-the-floor): `cards`, each with `session_id`, `role`, `model`, `status`, `started_ts`, `run_minutes`, `issue`, `pr`, `gov_question`, `activity` (the plain words), `events_per_slot` (six counts, oldest first) and `slots_used` (`editing`, `reading`, `commands`); and `idle`, each with `session_id`, `role` and `idle_minutes` |
 | `sessions` | each session's `session_id`, `role`, `model`, `status`, `issue`, `pr`, `gov_question`, `last_event`, `last_ts`, `started_ts` and `tracking_issue` |
 | `prs` | open PRs: `number`, `title`, `url`, `author`, `draft`, `review`, `created_ts`, `closes`, `needs_owner` |
 | `gov_questions` | open `gov:question`s with their fields, time to live and the `session_id`s waiting on them |
@@ -48,9 +67,31 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 
 It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
 
+## On the floor
+
+The desk opens with a card for each active or blocked session (`floor.py`, #403, part 4 of #397). It's built from the heartbeat events `generate.py` already reads, so it adds **no API calls** per build.
+
+A card shows the role (in agents blue; a blocked card has a red edge), the model, how long the session has run (its first event to now), what it's doing in plain words, and an activity line: events per 5-minute slot over the last 30 minutes, as inline SVG. Under the line it says in how many of those six slots the session was editing, reading or running commands. Idle sessions share one quiet line, e.g. "idle: docs 40 min, reviewer 2 h". Stopped sessions aren't on the floor. Nothing on the floor shows tokens or cost.
+
+The plain words come from the session's latest event and its tool names, through one table, `floor.TEMPLATES`; the first row that matches wins:
+
+| Situation | Tools in the latest event | Words |
+|---|---|---|
+| blocked on a question | any | Waiting on #396 |
+| `pr_opened` | any | Opened PR #394 |
+| any | Edit, Write or NotebookEdit | Editing files on #392 |
+| any | Bash | Running commands on #392 |
+| any | only Read, Grep or Glob | Reading code on #392 |
+| `session_started` | none of these | Starting up |
+| any | none of these, or no tool names | Working on #392 |
+
+"on #392" is the session's issue, or "on PR #391" if it has only a PR, or nothing.
+
+What today's events can't give: words like "Running tests" or "Checking the diff of PR #391", and counts of files read, edited or tests run. An event lists only the distinct tool names used since the previous one (heartbeat/SCHEMA.md), never commands, paths or counts (GOV-0002). Showing those needs a new captured field, which is a `security` question for the owner; once one is ruled, it adds rows to `TEMPLATES`, not new logic.
+
 ## Needs you
 
-The page opens with one ordered list of everything waiting on the owner (L5). `launcher/swarm inbox` prints the same list. Both come from `needs_you()` in `generate.py`, so the page and the command always show the same items in the same order.
+The operations page opens with one ordered list of everything waiting on the owner (L5). `launcher/swarm inbox` prints the same list. Both come from `needs_you()` in `generate.py`, so the page and the command always show the same items in the same order.
 
 | Order | What | Within the kind |
 |---|---|---|
@@ -107,7 +148,7 @@ The digest issue isn't a `[heartbeat]` tracking issue or a `gov:question`, so it
 
 `governance.py` builds this section (#355). It replaced the page's old "Open gov questions" table and still shows everything that table did.
 
-- **Recent decision records:** the 8 newest rows of `governance/INDEX.md`, newest first. Each row shows the ID (linked to its file), the one-line ruling, domain, shape, status and review-by date. A record whose review-by date has passed is marked "review date passed", because it is not precedent until someone re-affirms it (GOVERNANCE.md §6). One due within 30 days is marked "review due soon". Older records that are past or due get one line under the table, so no flag is hidden. The full index is a link.
+- **Decision log:** on the decisions page, every row of `governance/INDEX.md`, newest first (#401). (`governance.render(..., full=False)` gives the old 8 newest, with one line for older flagged records.) Each row shows the ID (linked to its file), the one-line ruling, domain, shape, status and review-by date. A record whose review-by date has passed is marked "review date passed", because it is not precedent until someone re-affirms it (GOVERNANCE.md §6). One due within 30 days is marked "review due soon". The index itself is a link.
 - **Open gov questions:** a line of counts by shape and by domain, then one row per question. Each row shows its labels, its domain (`### Domain` in the template body), and its shape: an owner's `gov:shape/*` label if there is one, otherwise the body's `### Suggested shape`, marked "suggested". It also shows whether the question is blocking (the `gov:blocking` label or a "yes" under `### Blocking?`), its age, its time to live with days left or "past TTL", and the sessions waiting on it.
 - **Lapsed questions:** questions labelled `gov:lapsed`, open, or closed within `--days`, each with its time to live. A muted line notes that a lapsed default is not precedent (GOVERNANCE.md §8).
 
@@ -115,7 +156,7 @@ The needs-you list and its past-TTL flag don't change. This section is for readi
 
 ## Committees
 
-`committees.render()` draws the committees `committees.py` reads (#354). Open committees come right after the needs-you list and its tiles. Committees that ended (record merged, or the question closed) go in a collapsed "N ended" `<details>`. With no committees there's no section.
+`committees.render()` draws the committees `committees.py` reads (#354). Open committees, with the unparsed and read-problem lines, are on the desk (`part="open"`). Committees that ended (record merged, or the question closed) are on the decisions page under "Past committees", in a collapsed "N ended" `<details>` (`part="ended"`). With no committees there's no section; with none ended, no "Past committees".
 
 For each committee:
 

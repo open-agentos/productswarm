@@ -1,9 +1,9 @@
 """The dashboard's governance section (#355, part 3 of #348).
 
 Three parts, all from public repo data:
-  - recent decision records: the newest rows of governance/INDEX.md, read from the
-    checkout, with records past their review-by date (not precedent, GOVERNANCE.md §6)
-    and those due within REVIEW_SOON_DAYS marked;
+  - decision records: the newest rows of governance/INDEX.md (on the decisions page,
+    all of them), read from the checkout, with records past their review-by date (not
+    precedent, GOVERNANCE.md §6) and those due within REVIEW_SOON_DAYS marked;
   - open gov questions: domain, shape, blocking, age and time to live, from the
     Governance question template's body and the issue's labels;
   - lapsed questions (`gov:lapsed`), open, or closed within the page's window.
@@ -178,6 +178,7 @@ def build(index_text: str | None, gov: list[dict], issues: list[dict], now: dt.d
     records = parse_index(index_text)
     questions = [{**q, **q["fields"], **ttl_state(ttl_date(q["ttl"]), today)} for q in gov]
     return {"records": recent_records(records, today),
+            "all_records": recent_records(records, today, n=len(records)),
             "older_flagged": older_flagged(records, today),
             "index_found": index_text is not None,
             "questions": questions,
@@ -201,23 +202,26 @@ def inline(text: str) -> str:
     return "".join(f"<code>{p}</code>" if i % 2 else p for i, p in enumerate(parts))
 
 
-def records_html(g: dict, repo: str) -> str:
+def records_html(g: dict, repo: str, full: bool = False) -> str:
+    """The records table: the RECENT newest with a line for older flagged ones, or, when
+    full, every record in INDEX.md (the decisions page's log, #401)."""
     base = f"https://github.com/{esc(repo)}/blob/main/governance"
-    if not g["records"]:
+    records = g["all_records"] if full else g["records"]
+    if not records:
         why = "none" if g["index_found"] else f"{INDEX_PATH} not found"
         return f'<p class="muted">{esc(why)}</p>'
     rows = []
-    for r in g["records"]:
+    for r in records:
         flag = {"passed": ' <span class="pill s-blocked">review date passed</span>'
                           '<br><span class="muted">not precedent until re-affirmed</span>',
                 "soon": ' <span class="pill s-idle">review due soon</span>'}.get(r["flag"], "")
-        rows.append(f'<tr><td><a href="{base}/{esc(r["file"])}">{esc(r["id"])}</a></td>'
+        rows.append(f'<tr><td><a class="id" href="{base}/{esc(r["file"])}">{esc(r["id"])}</a></td>'
                     f"<td>{inline(r['ruling'])}</td><td>{esc(r['domain'])}</td>"
                     f"<td>{esc(r['shape'])}</td><td>{esc(r['status'])}</td>"
                     f"<td>{esc(r['review_by_text'])}{flag}</td></tr>")
     return ('<div class="scroll"><table><tr><th>Record</th><th>Ruling</th><th>Domain</th>'
             f'<th>Shape</th><th>Status</th><th>Review by</th></tr>{"".join(rows)}</table></div>'
-            f'{older_html(g, base)}<p class="muted"><a href="https://github.com/{esc(repo)}/blob/main/{INDEX_PATH}">'
+            f'{"" if full else older_html(g, base)}<p class="muted"><a href="https://github.com/{esc(repo)}/blob/main/{INDEX_PATH}">'
             "Full index</a></p>")
 
 
@@ -286,10 +290,14 @@ def lapsed_html(g: dict, days: int) -> str:
     return f'<ul>{"".join(items)}</ul>{note}'
 
 
-def render(g: dict, repo: str, now: dt.datetime, days: int, ago, stamp) -> str:
+def render(g: dict, repo: str, now: dt.datetime, days: int, ago, stamp, full: bool = False) -> str:
+    """The section. With full, the records part is the whole decision log, not the newest
+    RECENT (the decisions page, #401)."""
+    records = (f"<h3>Decision log ({len(g['all_records'])})</h3>" if full
+               else "<h3>Recent decision records</h3>") + records_html(g, repo, full)
     return "\n".join([
         "<h2>Governance</h2>",
-        f"<h3>Recent decision records</h3>{records_html(g, repo)}",
+        records,
         f"<h3>Open gov questions ({len(g['questions'])})</h3>{questions_html(g, now, ago, stamp)}",
         f"<h3>Lapsed questions</h3>{lapsed_html(g, days)}",
     ])

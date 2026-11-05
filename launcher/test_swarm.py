@@ -690,7 +690,7 @@ class InboxTest(unittest.TestCase):
         self.assertEqual(cli[0], "1. [blocked] #28 GOV-Q: someone waits · builder session blocked- "
                                  "is blocked on it · 50m ago")
         self.assertEqual(cli[1], "   https://github.com/open-agentos/productswarm/issues/28")
-        page = g.render(m)
+        page = g.render(m)["operations.html"]   # the needs-you list (#401)
         section = page[page.index('<ol class="inbox">'):page.index("</ol>")]
         shown = [html.unescape(re.sub(r"<[^>]+>", "", li)).split(" · session")[0]
                  for li in re.findall(r"<li[^>]*>(.*?)</li>", section)]

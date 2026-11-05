@@ -151,20 +151,63 @@ class PageTest(unittest.TestCase):
         self.assertEqual(m["prs"][0]["closes"], [{"number": 4, "title": "Dashboard <generator>"}])
 
     def test_render_escapes_and_links(self):
-        page = g.render(self.model())
+        page = g.render(self.model())["operations.html"]
         self.assertNotIn("<b>generator</b>", page)
         self.assertIn("Add &lt;b&gt;generator&lt;/b&gt;", page)
         self.assertIn("Dashboard &lt;generator&gt;", page)
         self.assertIn(f"https://github.com/{REPO}/issues/26", page)
         self.assertIn("1 stopped", page)
-        self.assertNotIn("<script", page)
-        self.assertIn('<meta name="robots" content="noindex, nofollow">', page)
 
-    def test_render_reloads_itself_without_script(self):
-        page = g.render(self.model())
-        head = page.split("</head>")[0]
-        self.assertIn('<meta http-equiv="refresh" content="300">', head)
-        self.assertNotIn("<script", page.lower())
+    def test_every_page_keeps_the_shell(self):
+        pages = g.render(self.model())
+        self.assertEqual(list(pages), ["index.html", "operations.html", "decisions.html"])
+        for name, page in pages.items():
+            head = page.split("</head>")[0]
+            self.assertIn('<meta name="robots" content="noindex, nofollow">', head, name)
+            self.assertIn('<meta http-equiv="refresh" content="300">', head, name)
+            self.assertIn('<meta name="viewport" content="width=device-width, initial-scale=1">', head, name)
+            self.assertNotIn("<script", page.lower(), name)
+            self.assertIn("#F4F3EE", head, name)   # one look (layout.py)
+            self.assertIn('src:url("fonts/IBMPlexSans-Regular-Latin1.woff2")', head, name)
+            # Nothing loaded from a third party: the only URLs in the head are the fonts.
+            self.assertNotIn("//", head.replace("http-equiv", ""), name)
+            foot = page.split('<footer class="foot">')[1]
+            for other in pages:
+                if other == name:
+                    self.assertIn('aria-current="page"', foot)
+                else:
+                    self.assertIn(f'href="{other}"', foot, name)
+
+    def test_each_section_lands_on_its_page(self):
+        m = self.model()
+        m["progress"] = None   # progress.render's own tests cover it; it needs its own data
+        pages = g.render(m)
+        where = {
+            "index.html": ["<h1>The desk</h1>"],
+            "operations.html": ["<h2>Needs you (", "spent today (est.)", "<h2>Sessions</h2>",
+                                "<h2>Open pull requests</h2>", "<h2>Actions reviewer</h2>",
+                                "<h2>Spend per day (est.)</h2>"],
+            "decisions.html": ["<h2>Governance</h2>", "<h3>Decision log (",
+                               "<h3>Open gov questions (", "<h3>Lapsed questions</h3>"],
+        }
+        for name, heads in where.items():
+            for h in heads:
+                self.assertIn(h, pages[name], h)
+                for other in set(pages) - {name}:
+                    self.assertNotIn(h, pages[other], f"{h} also on {other}")
+        self.assertIn('href="operations.html"', pages["index.html"].split("<footer")[0])
+        self.assertIn('href="decisions.html"', pages["index.html"].split("<footer")[0])
+
+    def test_decisions_page_has_the_full_log(self):
+        rows = "\n".join(f"| [GOV-{n:04d}](decisions/GOV-{n:04d}-x.md) | Ruling {n} | ops | rule | in force | 2027-06-01 |"
+                         for n in range(1, 13))
+        index = "| ID | Ruling | Domain | Shape | Status | Review by |\n|---|---|---|---|---|---|\n" + rows
+        m = g.build({"repo": REPO, "issues": [], "comments": {}, "prs": [], "index": index}, NOW, IDLE)
+        pages = g.render(m)
+        self.assertIn("<h3>Decision log (12)</h3>", pages["decisions.html"])
+        for n in range(1, 13):
+            self.assertIn(f">GOV-{n:04d}</a>", pages["decisions.html"])
+        self.assertNotIn("Decision log", pages["operations.html"] + pages["index.html"])
 
 
 FAKE_GH = r"""#!/usr/bin/env python3
@@ -218,7 +261,13 @@ class EndToEndTest(unittest.TestCase):
                     else:
                         os.environ[k] = v
             self.assertEqual(rc, 0)
-            page = (d / "out" / "index.html").read_text()
+            out = d / "out"
+            self.assertIn("<h1>The desk</h1>", (out / "index.html").read_text())
+            self.assertIn("<h2>Governance</h2>", (out / "decisions.html").read_text())
+            for f in g.layout.FONT_FILES:   # self-hosted beside the pages
+                self.assertEqual((out / "fonts" / f).read_bytes(),
+                                 (g.layout.FONTS_SRC / f).read_bytes())
+            page = (out / "operations.html").read_text()
             self.assertIn("#4 Dashboard generator", page)
             self.assertIn("s-active", page)
             self.assertIn("<h2>v3 progress</h2>", page)

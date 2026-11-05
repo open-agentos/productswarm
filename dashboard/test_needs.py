@@ -83,7 +83,7 @@ class NeedsYouTest(unittest.TestCase):
     def test_empty(self):
         m = build([tracking(54, "active")], {54: [comment([ev("active", "working_on", 1, issue=4)])]})
         self.assertEqual(g.needs_you(m), [])
-        self.assertIn(g.NEEDS_EMPTY, g.render(m))
+        self.assertIn(g.NEEDS_EMPTY, g.render(m)["operations.html"])
 
     def test_time_to_live(self):
         self.assertEqual(g.time_to_live(GOV_BODY), "2026-11-09")
@@ -250,7 +250,7 @@ class PastTimeToLiveTest(unittest.TestCase):
         item = next(i for i in g.needs_you(m) if i["ref"] == "#62")
         line = g.needs_line(item, NOW)
         self.assertTrue(line.startswith("[gov question] #62 GOV-Q: past recently · past time to live (2026-11-01)"))
-        self.assertIn(html.escape(line), g.render(m))
+        self.assertIn(html.escape(line), g.render(m)["operations.html"])
 
     def test_ttl_date(self):
         self.assertEqual(g.ttl_date("2026-11-30"), g.dt.date(2026, 11, 30))
@@ -262,7 +262,7 @@ class PastTimeToLiveTest(unittest.TestCase):
 class PageTest(unittest.TestCase):
     def test_first_section_matches_the_list(self):
         m = model()
-        page = g.render(m)
+        page = g.render(m)["operations.html"]
         self.assertLess(page.index("<h2>Needs you (8)</h2>"), page.index("<h2>Sessions</h2>"))
         section = page[page.index('<ol class="inbox">'):page.index("</ol>")]
         shown = [html.unescape(re.sub(r"<[^>]+>", "", li)).split(" · session")[0]

@@ -87,7 +87,7 @@ class PageTest(unittest.TestCase):
         self.assertEqual({s["session_id"]: s["cost"] for s in m["sessions"]}, {"s1": 24.0, "s2": None})
 
     def test_page_states_method_and_figures(self):
-        page = g.render(self.model())
+        page = g.render(self.model())["operations.html"]
         self.assertIn("spent today (est.)", page)
         self.assertIn("$24.00", page)
         self.assertIn("API list-price equivalent", page)
