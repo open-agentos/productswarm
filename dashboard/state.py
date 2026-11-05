@@ -70,6 +70,17 @@ def reviewer_runs(r: dict) -> dict:
     return {**r, "unreviewed": [p["number"] for p in r.get("unreviewed") or []]}
 
 
+# A floor card (floor.py) minus its unfilled template; it has no tokens or cost to drop.
+CARD_FIELDS = ("session_id", "role", "model", "status", "started_ts", "run_minutes", "issue", "pr",
+               "gov_question", "activity", "events_per_slot", "slots_used")
+
+
+def floor(f: dict | None) -> dict | None:
+    if f is None:
+        return None
+    return {"cards": [pick(c, CARD_FIELDS) for c in f["cards"]], "idle": f["idle"]}
+
+
 def state(m: dict) -> dict:
     gov = {k: v for k, v in m["governance"].items() if k != "questions"}
     return plain({
@@ -79,6 +90,7 @@ def state(m: dict) -> dict:
         "idle_minutes": m["idle_minutes"],
         "needs_you": needs(m),
         "sessions": [session(s) for s in m["sessions"]],
+        "floor": floor(m.get("floor")),
         "prs": [pick(p, PR_FIELDS) for p in m["prs"]],
         "gov_questions": [gov_question(q) for q in m["governance"]["questions"]],
         "governance": {**gov, "days": m["days"]},

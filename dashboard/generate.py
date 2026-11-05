@@ -11,7 +11,8 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
     governance/INDEX.md from the checkout (the governance section, #355).
 
 Builds three pages in one look (layout.py), and copies the self-hosted fonts beside them:
-  - index.html, the desk: the committee desk while one is open (#404), and a pointer to the
+  - index.html, the desk: on the floor (floor.py), the committee desk while one is open (#404),
+    and a pointer to the
     other two (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
     progress and spend;
@@ -35,6 +36,7 @@ import sys
 from pathlib import Path
 
 import committees
+import floor
 import ghql
 import governance
 import layout
@@ -307,13 +309,14 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
     repo = data["repo"]
     issues = {i["number"]: i for i in data["issues"]}
     open_issues = {n for n, i in issues.items() if i.get("state") == "open"}
-    sessions = []
+    sessions, events_of = [], {}
     for s in tracking_issues(issues.values()):
         events = session_events(s, data["comments"].get(s["issue"], []), repo)
         d = derive(s, events, open_issues, now, idle_after)
         d["cap"] = (caps or {}).get(d["role"])
         d["over_cap"] = d["status"] != "stopped" and over_cap(d["cost"], d["cap"])
         sessions.append(d)
+        events_of[d["session_id"]] = events
     epoch = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
     sessions.sort(key=lambda s: (STATUS_ORDER[s["status"]], -(s["last_ts"] or epoch).timestamp()))
 
@@ -347,7 +350,8 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
 
     return {"repo": repo, "now": now, "idle_minutes": int(idle_after.total_seconds() // 60),
             "issue_titles": {n: i["title"] for n, i in issues.items()},
-            "sessions": sessions, "prs": prs, "gov": gov, "days": window,
+            "sessions": sessions, "prs": prs,
+            "floor": floor.build([(s, events_of[s["session_id"]]) for s in sessions], now), "gov": gov, "days": window,
             "governance": governance.build(data.get("index"), gov, data["issues"], now,
                                            now - dt.timedelta(days=window), parse_ts,
                                            time_to_live, ttl_date),
@@ -548,10 +552,11 @@ TITLE = "Swarm dashboard"
 
 
 def render_desk(m: dict) -> str:
-    """The desk (index.html): the committee desk while a committee is open (#404), and a
-    pointer to the other pages."""
+    """The desk (index.html): on the floor (#403), the committee desk while a committee is open
+    (#404), and a pointer to the other pages. #397's later panels join it."""
     repo = m["repo"]
     out = ["<h1>The desk</h1>",
+           floor.render(m.get("floor"), repo),
            committees.desk(m.get("committees"), repo),
            '<p class="pointer">The needs-you list, sessions, open PRs, reviewer sweeps, v3 '
            'progress and spend are on <a href="operations.html">Operations</a>; the full '
