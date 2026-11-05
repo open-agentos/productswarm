@@ -13,6 +13,8 @@ from pathlib import Path
 
 import committees
 import generate
+import layout
+import live
 import precedent
 
 SCHEMA = 1
@@ -26,8 +28,7 @@ PR_FIELDS = ("number", "title", "url", "author", "draft", "review", "created_ts"
 NEEDS_FIELDS = ("kind", "ref", "title", "url", "detail", "since", "session_url", "past_ttl")
 
 
-def rfc3339(t: dt.datetime) -> str:
-    return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+rfc3339 = generate.rfc3339
 
 
 def plain(x):
@@ -82,6 +83,12 @@ def floor(f: dict | None) -> dict | None:
     return {"cards": [pick(c, CARD_FIELDS) for c in f["cards"]], "idle": f["idle"]}
 
 
+def desk(m: dict) -> dict:
+    """The desk's masthead and panels as node trees, which the live refresh draws (#411)."""
+    mast = layout.masthead("index.html", m["repo"], generate.stamp(m["now"]))
+    return live.trees({"mast": mast, **generate.desk_panels(m)})
+
+
 def state(m: dict) -> dict:
     gov = {k: v for k, v in m["governance"].items() if k != "questions"}
     return plain({
@@ -103,4 +110,5 @@ def state(m: dict) -> dict:
         "reviewer_runs": reviewer_runs(m["reviewer_runs"]),
         "trends": m.get("trends"),   # #406: each trend's sentence and its series by day
         "precedent": precedent.state(m.get("precedent")),   # #408; the next build carries it forward
+        "desk": desk(m),   # #411: what the desk's live refresh draws
     })

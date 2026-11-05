@@ -6,7 +6,8 @@ static/fonts/LICENSE.txt), self-hosted: generate.py copies them beside the pages
 public page loads nothing from a third party. Only the Latin-1 subset of the four faces the
 CSS uses is shipped; other characters (arrows, for one) fall back to the system font.
 
-Stdlib only, no JavaScript (#26).
+Stdlib only. Every page carries a Content-Security-Policy; only the desk carries a script,
+the live refresh (live.py, #411, option 2 of #396), and the policy allows it by hash alone.
 """
 from __future__ import annotations
 
@@ -14,9 +15,11 @@ import html
 import shutil
 from pathlib import Path
 
+import live
+
 FONTS_SRC = Path(__file__).resolve().parent / "static" / "fonts"
 FONTS_DIR = "fonts"          # beside the pages, so the pages link fonts/<file>
-REFRESH_SECONDS = 300        # an open page reloads itself; plain HTML, no script (#26, #351)
+REFRESH_SECONDS = 300        # an open page reloads itself, script or not (#351); the desk also polls (#411)
 
 # (family, weight, file). Only the faces the CSS below uses.
 FONTS = (
@@ -148,6 +151,7 @@ ul.trends svg.spark circle { fill:var(--agent); stroke:none; }
   color:var(--agent); }
 .past .call.split { color:var(--ink); }
 .past ul { margin:6px 0 0; padding:0; list-style:none; font-size:13px; color:var(--muted); }
+header.mast .live.stale { background:var(--quiet); }
 footer.foot { margin-top:40px; padding-top:8px; border-top:2px solid var(--ink);
   display:flex; flex-wrap:wrap; gap:4px 18px; font:600 13px/1.6 var(--cond);
   text-transform:uppercase; letter-spacing:.06em; }
@@ -170,22 +174,34 @@ def nav(current: str) -> str:
     return "".join(links)
 
 
-def page(current: str, title: str, repo: str, built: str, body: str) -> str:
-    """One whole page in the shared shell: head (noindex, refresh, CSS), masthead, the body,
-    and the footer linking every page."""
+def masthead(current: str, repo: str, built: str) -> str:
+    """What's inside the page's <header>. The desk's live refresh redraws it too (#411)."""
+    return (f'<span class="name">productswarm · {esc(dict(PAGES)[current])}</span>'
+            f'<span class="muted">{esc(repo)} · built <span class="stamp">{esc(built)}</span></span>')
+
+
+def page(current: str, title: str, repo: str, built: str, body: str,
+         built_at: str | None = None) -> str:
+    """One whole page in the shared shell: head (noindex, CSP, refresh, CSS), masthead, the
+    body, and the footer linking every page. Given `built_at` (RFC 3339), the page also
+    carries the live refresh script, which polls state.json (#411); only the desk does."""
     name = dict(PAGES)[current]
-    return "\n".join([
+    js = live.script() if built_at else None
+    box = ' data-panel="mast"' if js else ""
+    return "\n".join(part for part in [
         '<!doctype html><html lang="en"><head><meta charset="utf-8">',
+        f'<meta http-equiv="Content-Security-Policy" content="{live.csp(js)}">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         '<meta name="robots" content="noindex, nofollow">',  # published publicly; see #33
         f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">',
-        f"<title>{esc(name)} · {esc(title)} · {esc(repo)}</title><style>{CSS}</style></head><body>",
-        f'<header class="mast"><span class="name">productswarm · {esc(name)}</span>'
-        f'<span class="muted">{esc(repo)} · built <span class="stamp">{esc(built)}</span></span></header>',
+        f"<title>{esc(name)} · {esc(title)} · {esc(repo)}</title><style>{CSS}</style></head>"
+        + (f'<body data-built-at="{esc(built_at)}">' if built_at else "<body>"),
+        f'<header class="mast"{box}>{masthead(current, repo, built)}</header>',
         f"<main>{body}</main>",
         f'<footer class="foot">{nav(current)}</footer>',
+        f"<script>{js}</script>" if js else None,
         "</body></html>\n",
-    ])
+    ] if part is not None)
 
 
 def copy_fonts(out_dir: Path) -> int:

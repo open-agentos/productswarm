@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import committees as c  # noqa: E402
 import generate as g    # noqa: E402
+import live  # noqa: E402
 
 REPO = "open-agentos/productswarm"
 OWNER = "mattmcalister"
@@ -357,7 +358,7 @@ class CommitteeTest(Fixture):
         self.assertNotIn('class="desk"', pages["index.html"])            # it ended: no desk (#404)
         self.assertIn("<h2>Past committees</h2>", pages["decisions.html"])   # it ended
         page = "".join(pages.values())
-        self.assertNotIn("<script", page.lower())
+        self.assertNotIn("<script", page.replace(f"<script>{live.script()}</script>", "").lower())
         for text in (repr(model), page):
             self.assertNotIn("2.89", text)
             self.assertNotIn("Cost", text)

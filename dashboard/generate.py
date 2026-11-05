@@ -20,7 +20,8 @@ Builds three pages in one look (layout.py), and copies the self-hosted fonts bes
     progress and spend;
   - decisions.html: the governance section with the full decision log, open committees with
     their round grids, and ended committees.
-Stdlib only, no JavaScript, per the default in gov question #26.
+Stdlib only. The desk carries one inline script, the live refresh (live.py, #411), per
+option 2 of gov question #396; the other pages carry none.
 
     python3 dashboard/generate.py                 # writes dashboard/out/{index,operations,decisions}.html
     python3 dashboard/generate.py --out /tmp/x/index.html --days 7 --idle-minutes 15
@@ -595,22 +596,36 @@ def rulings(m: dict) -> dict[str, str]:
     return {r["id"]: r["ruling"] for r in (m.get("governance") or {}).get("all_records") or []}
 
 
+def desk_panels(m: dict) -> dict[str, str]:
+    """The desk's panels by name, in page order: on the floor (#403), the committee desk while
+    a committee is open (#404), what the numbers say (#406), precedent in use (#408) and a card
+    per past committee (#409). Each is drawn into a `data-panel` box that the live refresh
+    redraws from state.json (#411), so an empty one still gets its box. #397's later panels
+    join here."""
+    repo = m["repo"]
+    return {"floor": floor.render(m.get("floor"), repo),
+            "committee_desk": committees.desk(m.get("committees"), repo),
+            "trends": trends.render(m.get("trends")),
+            "precedent": precedent.render(m.get("precedent"), repo),
+            "past_committees": committees.past(m.get("committees"), rulings(m), repo)}
+
+
+def rfc3339(t: dt.datetime) -> str:
+    return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def render_desk(m: dict) -> str:
-    """The desk (index.html): on the floor (#403), the committee desk while a committee is open
-    (#404), what the numbers say (#406), precedent in use (#408), a card per past committee
-    (#409), and a pointer to the other pages. #397's later panels join it."""
+    """The desk (index.html): its panels (desk_panels), then a pointer to the other pages.
+    It carries the live refresh script (#411)."""
     repo = m["repo"]
     out = ["<h1>The desk</h1>",
-           floor.render(m.get("floor"), repo),
-           committees.desk(m.get("committees"), repo),
-           trends.render(m.get("trends")),
-           precedent.render(m.get("precedent"), repo),
-           committees.past(m.get("committees"), rulings(m), repo),
+           *(f'<div data-panel="{n}">{h}</div>' for n, h in desk_panels(m).items()),
            '<p class="pointer">The needs-you list, sessions, open PRs, reviewer sweeps, v3 '
            'progress and spend are on <a href="operations.html">Operations</a>; the full '
            'decision log, open and lapsed gov questions, and every committee\'s round grid are on '
            '<a href="decisions.html">Decisions</a>.</p>']
-    return layout.page("index.html", TITLE, repo, stamp(m["now"]), "\n".join(o for o in out if o))
+    return layout.page("index.html", TITLE, repo, stamp(m["now"]), "\n".join(out),
+                       built_at=rfc3339(m["now"]))
 
 
 def render_operations(m: dict) -> str:
