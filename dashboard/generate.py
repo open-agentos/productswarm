@@ -733,6 +733,9 @@ def too_soon(repo: str, now: dt.datetime) -> str | None:
     return None
 
 
+STATE_FILE = "state.json"   # the page's data, written beside it (state.py, #400)
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Render the swarm dashboard to a static HTML file.")
     ap.add_argument("--repo", help="owner/name (default: this checkout's origin)")
@@ -760,11 +763,14 @@ def main(argv: list[str]) -> int:
         return 1
     model = build(data, now, dt.timedelta(minutes=args.idle_minutes), caps=load_caps(),
                   window=args.days)
+    import state   # here, not at the top: state imports this module
+    page, data_json = render(model), json.dumps(state.state(model), indent=1) + "\n"
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render(model), encoding="utf-8")
+    out.write_text(page, encoding="utf-8")
+    (out.parent / STATE_FILE).write_text(data_json, encoding="utf-8")   # #400
     live = sum(s["status"] != "stopped" for s in model["sessions"])
-    print(f"wrote {out}: {live} live / {len(model['sessions'])} sessions, "
+    print(f"wrote {out} and {STATE_FILE}: {live} live / {len(model['sessions'])} sessions, "
           f"{len(model['prs'])} open PRs, {len(model['gov'])} open gov questions")
     return 0
 
