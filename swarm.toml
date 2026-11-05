@@ -75,3 +75,9 @@ role = "designer"
 count = 1
 model = "claude-opus-5-5"
 spend_cap_usd = 5
+
+[[session]]
+role = "analyst"
+count = 1
+model = "claude-opus-5-5"
+spend_cap_usd = 5
