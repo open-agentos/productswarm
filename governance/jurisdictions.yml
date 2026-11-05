@@ -21,7 +21,7 @@ identities:
     builder: "productswarm-builder[bot]"
     reviewer: "productswarm-reviewer[bot]"
     docs: "productswarm-docs[bot]"
-    esigner: "productswarm-designer[bot]"
+    designer: "productswarm-designer[bot]"
 
 quorum: 0.5          # fraction of vote_eligible who must vote for a vote to count
 consent_window: 48h  # default objection window for the consent shape
