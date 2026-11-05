@@ -123,7 +123,7 @@ class LapsedTest(unittest.TestCase):
 class PageTest(unittest.TestCase):
     def test_section_replaces_old_table(self):
         page = g.render(build([question(5, labels=["gov:deliberating"], ttl="2026-11-01"),
-                               question(6, labels=["gov:lapsed"])]))
+                               question(6, labels=["gov:lapsed"])]))["decisions.html"]
         self.assertNotIn("<h2>Open gov questions</h2>", page)
         self.assertIn("<h2>Governance</h2>", page)
         self.assertIn('href="https://github.com/open-agentos/productswarm/blob/main/governance/'
@@ -132,7 +132,7 @@ class PageTest(unittest.TestCase):
         self.assertIn("review date passed", page)
         self.assertIn("not precedent until re-affirmed", page)
         self.assertIn("<code>a | b</code>", page)
-        self.assertNotIn("Older records to review", page)   # all 4 are in the newest 8
+        self.assertNotIn("Older records to review", page)   # the full log hides none (#401)
         self.assertIn("past TTL", page)
         self.assertIn("gov:deliberating", page)   # labels the old table showed stay
         self.assertIn("By shape: authoritative 2", page)
@@ -140,7 +140,7 @@ class PageTest(unittest.TestCase):
         self.assertNotIn("<script", page)
 
     def test_missing_index_and_no_questions(self):
-        page = g.render(build([], index=None))
+        page = g.render(build([], index=None))["decisions.html"]
         self.assertIn("governance/INDEX.md not found", page)
         self.assertIn("None open or closed in the last 14 days.", page)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the swarm dashboard: one static, read-only HTML page.
+"""Render the swarm dashboard: static, read-only HTML pages (#401).
 
 Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the role's App):
   - heartbeat events from the comments on `[heartbeat]` tracking issues (GOV-0003,
@@ -10,13 +10,15 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
   - open `gov:question` issues, `gov:lapsed` ones closed in the window, and
     governance/INDEX.md from the checkout (the governance section, #355).
 
-Builds a page showing each session's role, current issue, last activity and status,
-the open PRs, and a governance section: recent decision records, the open gov questions
-with the sessions waiting on them, and lapsed questions.
+Builds three pages in one look (layout.py), and copies the self-hosted fonts beside them:
+  - index.html, the desk: open committees, and a pointer to the other two (#397 fills it);
+  - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
+    progress and spend;
+  - decisions.html: the governance section with the full decision log, and ended committees.
 Stdlib only, no JavaScript, per the default in gov question #26.
 
-    python3 dashboard/generate.py                 # writes dashboard/out/index.html
-    python3 dashboard/generate.py --out /tmp/x.html --days 7 --idle-minutes 15
+    python3 dashboard/generate.py                 # writes dashboard/out/{index,operations,decisions}.html
+    python3 dashboard/generate.py --out /tmp/x/index.html --days 7 --idle-minutes 15
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ from pathlib import Path
 import committees
 import ghql
 import governance
+import layout
 import progress
 import reviewer_runs
 import spend
@@ -468,45 +471,6 @@ def needs_line(item: dict, now: dt.datetime) -> str:
 
 # ---------------------------------------------------------------- rendering
 
-CSS = """
-:root { --bg:#fff; --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --card:#f6f8fa;
-  --active:#1a7f37; --idle:#9a6700; --blocked:#cf222e; --stopped:#8c959f; --link:#0969da; }
-@media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8d96a0;
-  --line:#30363d; --card:#161b22; --active:#3fb950; --idle:#d29922; --blocked:#f85149;
-  --stopped:#6e7681; --link:#4493f8; } }
-* { box-sizing:border-box; }
-body { margin:0; padding:24px 16px; background:var(--bg); color:var(--fg);
-  font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
-main { max-width:1100px; margin:0 auto; }
-h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:16px; margin:28px 0 8px; }
-h3 { font-size:14px; margin:16px 0 6px; }
-a { color:var(--link); text-decoration:none; } a:hover { text-decoration:underline; }
-.muted { color:var(--muted); }
-.needs { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 0; }
-.needs div { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:8px 12px; }
-.needs b { font-size:18px; margin-right:4px; }
-.needs .hot { border-color:var(--blocked); }
-ol.inbox { margin:0; padding-left:24px; }
-ol.inbox li { padding:4px 0; border-bottom:1px solid var(--line); }
-ol.inbox li.k-blocked::marker { color:var(--blocked); font-weight:600; }
-.scroll { overflow-x:auto; }
-table { border-collapse:collapse; width:100%; }
-th, td { text-align:left; padding:6px 10px 6px 0; border-bottom:1px solid var(--line); vertical-align:top; }
-th { font-weight:600; color:var(--muted); font-size:12px; white-space:nowrap; }
-.pill { display:inline-block; padding:0 8px; border-radius:10px; font-size:12px; font-weight:600;
-  color:#fff; white-space:nowrap; }
-.s-active { background:var(--active); } .s-idle { background:var(--idle); }
-.s-blocked { background:var(--blocked); } .s-stopped { background:var(--stopped); }
-code { font-size:12px; }
-.num { text-align:right; white-space:nowrap; }
-table.narrow { width:auto; min-width:240px; }
-.method { max-width:720px; font-size:12px; }
-table.grid td { min-width:160px; }
-.now { font-weight:600; }
-details summary { cursor:pointer; margin:12px 0 4px; color:var(--muted); }
-"""
-
-
 NONE = '<span class="muted">none</span>'
 
 
@@ -578,10 +542,25 @@ def needs_section(m: dict) -> str:
     return f'<h2>Needs you ({len(items)})</h2><ol class="inbox">{"".join(lis)}</ol>'
 
 
-REFRESH_SECONDS = 300  # an open page reloads itself; plain HTML, no script (#26, #351)
+TITLE = "Swarm dashboard"
 
 
-def render(m: dict) -> str:
+def render_desk(m: dict) -> str:
+    """The desk (index.html). Until #397's panels land it shows the open committees and a
+    pointer to the other pages."""
+    repo = m["repo"]
+    committee = committees.render(m.get("committees"), repo, part="open")
+    out = ["<h1>The desk</h1>",
+           committee or '<p class="muted">No committee is sitting.</p>',
+           '<p class="pointer">The needs-you list, sessions, open PRs, reviewer sweeps, v3 '
+           'progress and spend are on <a href="operations.html">Operations</a>; the full '
+           'decision log, open and lapsed gov questions and past committees are on '
+           '<a href="decisions.html">Decisions</a>.</p>']
+    return layout.page("index.html", TITLE, repo, stamp(m["now"]), "\n".join(out))
+
+
+def render_operations(m: dict) -> str:
+    """operations.html: what needs the owner, and the swarm's day-to-day running."""
     repo, now, titles = m["repo"], m["now"], m["issue_titles"]
     live = [s for s in m["sessions"] if s["status"] != "stopped"]
     stopped = [s for s in m["sessions"] if s["status"] == "stopped"]
@@ -592,13 +571,7 @@ def render(m: dict) -> str:
         return f'<div class="{"hot" if hot and n else ""}"><b>{n}</b>{esc(label)}</div>'
 
     out = [
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
-        '<meta name="viewport" content="width=device-width, initial-scale=1">',
-        '<meta name="robots" content="noindex, nofollow">',  # published publicly; see #33
-        f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">',
-        f"<title>Swarm dashboard · {esc(repo)}</title><style>{CSS}</style></head><body><main>",
-        f"<h1>Swarm dashboard</h1><div class=\"muted\">{esc(repo)} · generated {esc(stamp(now))}"
-        f" · idle after {m['idle_minutes']} min without an event</div>",
+        f'<h1>Operations</h1><div class="muted">idle after {m["idle_minutes"]} min without an event</div>',
         needs_section(m),
         '<div class="needs">',
         tile(blocked, "blocked sessions", hot=True),
@@ -608,7 +581,6 @@ def render(m: dict) -> str:
         tile(sum(s["status"] == "idle" for s in live), "idle"),
         f'<div><b>{esc(spend.usd(m["spend"]["today"]))}</b>spent today (est.)</div>',
         "</div>",
-        committees.render(m.get("committees"), repo),
         "<h2>Sessions</h2>",
         session_rows(m, live) if live else '<p class="muted">No live sessions.</p>',
     ]
@@ -631,11 +603,9 @@ def render(m: dict) -> str:
     else:
         out.append('<p class="muted">None.</p>')
 
-    out.append(governance.render(m["governance"], repo, now, m["days"], ago, stamp))
-
+    out.append(reviewer_runs.render(m["reviewer_runs"], repo, now, ago, stamp))
     if m.get("progress"):
         out.append(progress.render(m["progress"], repo))
-    out.append(reviewer_runs.render(m["reviewer_runs"], repo, now, ago, stamp))
 
     sp = m["spend"]
     out.append("<h2>Spend per day (est.)</h2>")
@@ -649,9 +619,24 @@ def render(m: dict) -> str:
         note += (f" Left out of totals, with no tokens or an unpriced model: "
                  f"{len(sp['unpriced'])} session(s) ({ids}).")
     out.append(f'<p class="muted method">Method: {esc(note)}</p>')
+    return layout.page("operations.html", TITLE, repo, stamp(now), "\n".join(out))
 
-    out.append("</main></body></html>\n")
-    return "\n".join(out)
+
+def render_decisions(m: dict) -> str:
+    """decisions.html: the governance section with the full decision log, and ended
+    committees."""
+    repo, now = m["repo"], m["now"]
+    out = ["<h1>Decisions</h1>",
+           governance.render(m["governance"], repo, now, m["days"], ago, stamp, full=True),
+           committees.render(m.get("committees"), repo, part="ended")]
+    return layout.page("decisions.html", TITLE, repo, stamp(now), "\n".join(o for o in out if o))
+
+
+def render(m: dict) -> dict[str, str]:
+    """Every page, by file name, in layout.PAGES order."""
+    pages = {"index.html": render_desk, "operations.html": render_operations,
+             "decisions.html": render_decisions}
+    return {f: pages[f](m) for f, _ in layout.PAGES}
 
 
 # ---------------------------------------------------------------- CLI
@@ -734,9 +719,10 @@ def too_soon(repo: str, now: dt.datetime) -> str | None:
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description="Render the swarm dashboard to a static HTML file.")
+    ap = argparse.ArgumentParser(description="Render the swarm dashboard's static HTML pages.")
     ap.add_argument("--repo", help="owner/name (default: this checkout's origin)")
-    ap.add_argument("--out", default=str(HERE / "out" / "index.html"), help="output file")
+    ap.add_argument("--out", default=str(HERE / "out" / "index.html"),
+                    help="the desk page; the other pages and fonts/ go beside it")
     ap.add_argument("--days", type=int, default=DAYS, help="include sessions closed in the last N days")
     ap.add_argument("--idle-minutes", type=int, default=IDLE_MINUTES,
                     help="a live session is idle after this long without an event")
@@ -762,9 +748,14 @@ def main(argv: list[str]) -> int:
                   window=args.days)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render(model), encoding="utf-8")
+    pages = render(model)
+    layout.copy_fonts(out.parent)   # before the pages, so a published page never lacks them
+    for name, page in pages.items():
+        (out if name == "index.html" else out.parent / name).write_text(page, encoding="utf-8")
     live = sum(s["status"] != "stopped" for s in model["sessions"])
-    print(f"wrote {out}: {live} live / {len(model['sessions'])} sessions, "
+    others = ", ".join(n for n in pages if n != "index.html")
+    print(f"wrote {out}, {others} and {layout.FONTS_DIR}/ beside it: "
+          f"{live} live / {len(model['sessions'])} sessions, "
           f"{len(model['prs'])} open PRs, {len(model['gov'])} open gov questions")
     return 0
 

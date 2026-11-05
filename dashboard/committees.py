@@ -509,17 +509,26 @@ def one(c: dict, repo: str) -> str:
     return "\n".join(out)
 
 
-def render(m: dict | None, repo: str) -> str:
+def render(m: dict | None, repo: str, part: str = "all") -> str:
     """The "Committees" section: open committees, then ended ones collapsed. Empty when there
-    are no committees and nothing to say about reading them."""
+    are no committees and nothing to say about reading them.
+
+    part="open" is the open committees with the unparsed and read-problem lines (the desk);
+    part="ended" is only the ended ones, as "Past committees" (the decisions page, #401), and
+    empty when none have ended."""
     m = m or {"committees": [], "notes": []}
     parsed = [c for c in m["committees"] if c["status"] != "unparsed"]
     unparsed = [c for c in m["committees"] if c["status"] == "unparsed"]
     notes = [n for n in m["notes"] if not n.endswith(": unparsed") and n != "no Committees Discussion category"]
-    if not m["committees"] and not notes:
-        return ""
     live = [c for c in parsed if not ended(c)]
     done = [c for c in parsed if ended(c)]
+    if part == "ended":
+        if not done:
+            return ""
+        return "\n".join(["<h2>Past committees</h2>", f"<details><summary>{len(done)} ended</summary>",
+                          *[one(c, repo) for c in done], "</details>"])
+    if not m["committees"] and not notes:
+        return ""
     out = ["<h2>Committees</h2>"]
     out += [one(c, repo) for c in live]
     if not live:
@@ -530,6 +539,6 @@ def render(m: dict | None, repo: str) -> str:
             for c in unparsed) + "</p>")
     if notes:
         out.append(f'<p class="muted">{esc("; ".join(notes))}</p>')
-    if done:
+    if done and part == "all":
         out += [f"<details><summary>{len(done)} ended</summary>", *[one(c, repo) for c in done], "</details>"]
     return "\n".join(out)
