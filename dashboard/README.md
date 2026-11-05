@@ -19,9 +19,9 @@ One build writes three pages, and the fonts, into the `--out` page's directory (
 
 | Page | What it shows |
 |---|---|
-| `index.html`, the **desk** | Open committees (the open part of [Committees](#committees)), and a one-line pointer to the other pages. #397's later issues add the desk's panels here. |
+| `index.html`, the **desk** | The [committee desk](#committee-desk) while a committee is open, and a one-line pointer to the other pages. #397's later issues add the desk's panels here. |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
-| `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, and ended committees as "Past committees" |
+| `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" |
 
 Every page carries `noindex`, reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the three pages. The authority map (#410) joins the footer when it lands. `generate.render(model)` returns the pages by file name.
 
@@ -63,6 +63,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `gov_questions` | open `gov:question`s with their fields, time to live and the `session_id`s waiting on them |
 | `governance` | recent and flagged records, counts by shape and domain, lapsed questions |
 | `committees`, `progress`, `reviewer_runs` | those sections' data; `reviewer_runs.unreviewed` is PR numbers |
+| `committee_desk` | each open committee as the desk shows it: `discussion`, `url`, `question`, `question_title`, `question_url`, `round`, `max_rounds`, `waiting_on`, `seats` (each `seat`, `role`, `model`, `recommendation`, `swing` (`moved`, `held` or null), `moved_from`, `summary`, `round`, `posted`, `url`) and `consensus` (`agree`, `seats`, `converging`, `consensus`, `text`); `[]` when none is open |
 
 It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
 
@@ -119,7 +120,7 @@ The digest issue isn't a `[heartbeat]` tracking issue or a `gov:question`, so it
 - **`governance/INDEX.md`**, from the checkout the page is built in (`dashboard.yml` checks out `main`).
 - **v3 progress:** see [v3 progress](#v3-progress).
 - **Reviewer workflow runs and jobs** from the Actions API, and the reviews and commits of the PRs they reviewed (see [Actions reviewer](#actions-reviewer)). Never job logs.
-- **Committee Discussions** (`committees.py`, #353): every Discussion in the "Committees" category, through `gh api graphql`, plus the `gov:question` each one serves (from a `<!-- productswarm-committee question=N -->` marker, else the `Committee for #N:` title) and that question's record in `governance/decisions/` (front matter `question: "#N"`). Members come from the `## Members` or `### Members` table, the post order from rule 1 under `Rules`, and round posts are top-level comments headed `Round N: <seat>` by that seat's App. From each post it keeps only the round, seat, author, time, link, signature model and the first bold phrase of its Recommendation. From the owner's comments on the question it keeps only whether the convening, summary and ruling comments exist, when, and their links, so no cost line or other text reaches the page. It derives status (convened, round N, summary, ratified, record), §7.2 diversity, the next seat, rounds used of 3 and posts per member per UTC day against §8's 6. A Discussion that doesn't match #314's layout shows as "unparsed". A token that can't read Discussions gives a note and the rest of the page still builds. Only the page reads these (`fetch(..., with_committees=True)` in `main()`); `swarm inbox`, `swarm watch` and the digest skip the GraphQL calls. The page shows them in the Committees section below.
+- **Committee Discussions** (`committees.py`, #353): every Discussion in the "Committees" category, through `gh api graphql`, plus the `gov:question` each one serves (from a `<!-- productswarm-committee question=N -->` marker, else the `Committee for #N:` title) and that question's record in `governance/decisions/` (front matter `question: "#N"`). Members come from the `## Members` or `### Members` table, the post order from rule 1 under `Rules`, and round posts are top-level comments headed `Round N: <seat>` by that seat's App. From each post it keeps only the round, seat, author, time, link, signature model, the first bold phrase of its Recommendation and the first sentence of its Position (#404). From the owner's comments on the question it keeps only whether the convening, summary and ruling comments exist, when, and their links, so no cost line or other text reaches the page. It derives status (convened, round N, summary, ratified, record), §7.2 diversity, the next seat, rounds used of 3 and posts per member per UTC day against §8's 6. A Discussion that doesn't match #314's layout shows as "unparsed". A token that can't read Discussions gives a note and the rest of the page still builds. Only the page reads these (`fetch(..., with_committees=True)` in `main()`); `swarm inbox`, `swarm watch` and the digest skip the GraphQL calls. The page shows them in the Committees section below.
 
 ## Governance
 
@@ -133,7 +134,7 @@ The needs-you list and its past-TTL flag don't change. This section is for readi
 
 ## Committees
 
-`committees.render()` draws the committees `committees.py` reads (#354). Open committees, with the unparsed and read-problem lines, are on the desk (`part="open"`). Committees that ended (record merged, or the question closed) are on the decisions page under "Past committees", in a collapsed "N ended" `<details>` (`part="ended"`). With no committees there's no section; with none ended, no "Past committees".
+`committees.render()` draws the committees `committees.py` reads (#354). Open committees, with the unparsed and read-problem lines, are on the decisions page (`part="open"`); the desk shows them as the [committee desk](#committee-desk) instead. Committees that ended (record merged, or the question closed) are on the decisions page under "Past committees", in a collapsed "N ended" `<details>` (`part="ended"`). With no committees there's no section; with none ended, no "Past committees".
 
 For each committee:
 
@@ -145,6 +146,16 @@ For each committee:
 Phrases are compared as text, ignoring case and spacing. So #314 shows "dissent: proposer": its round-2 phrase is "Option 3 as 3c" and the other two say "Option 3 as 3c+E".
 
 Discussions that don't match #314's layout are listed as muted "Unparsed" links. Read problems ("can't read Discussions", a question that couldn't be read, a marker that disagrees with the title) go on one muted line. A repo with no Committees category shows nothing. The section shows no cost and no post or summary text beyond each recommendation phrase.
+
+## Committee desk
+
+`committees.desk()` draws each open committee at the top of the desk (#404), styled like an election-night desk. With no open committee the desk shows none of it. It reads only what `committees.build()` derives, so it adds no API calls.
+
+- **Band** (dark): a red "LIVE" mark, "Committee", the question (linked, with its title), "Round N of 3" (the round the next post belongs to), "waiting on <seat>" (or "rounds over" once no seat is due) and the Discussion's link.
+- **A card per seat:** seat, role and model; the seat's latest recommendation, large (the Recommendation section's first bold phrase, from `phrase()`; "no recommendation yet" without one); its swing from its previous post, "moved from <phrase>" or "held" (nothing on its first post); the first sentence of its **Position** section in quotes, as written (only emphasis and code marks dropped), cut at a word break to about 140 characters ("no Position section" without one); and a link to the post with its round and time. The seat that's up next has a blue top edge.
+- **Consensus bar:** how many seats share the most common latest recommendation, as "k of N"; "k of N · converging" when that number rose since the end of the previous round; "consensus" when every seat's latest phrase matches. Phrases compare as text, ignoring case and spacing, like `same()`. So #314 reads "1 of 3" after round 1 and "2 of 3 · converging" after round 2.
+
+Red is used only for the LIVE mark. The same data is `committee_desk` in `state.json`.
 
 ## v3 progress
 
