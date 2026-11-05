@@ -31,6 +31,23 @@ When `generate.py` skips, it writes no page, so `dashboard.yml` must skip its up
 
 The page is **public**, because this repo is. It shows nothing that isn't already public in the repo's issues and comments, and it carries `noindex` so search engines skip it, per the owner's choice on #33. GitHub may delay scheduled runs, and disables them on public repos after 60 days without repo activity.
 
+## state.json
+
+Each build also writes `state.json` beside `index.html` (so `_site/state.json` on Pages): the data the page shows, as JSON, with no HTML (`state.py`, #400). It's written only when the page is, so a skipped build leaves both as they were. Timestamps are RFC 3339 in UTC (`2026-11-05T07:20:08Z`); dates are `YYYY-MM-DD`.
+
+| Key | What |
+|---|---|
+| `schema` | `1` |
+| `built_at`, `repo`, `idle_minutes` | when and for which repo it was built, and the idle threshold |
+| `needs_you` | the needs-you list below, without over-cap items |
+| `sessions` | each session's `session_id`, `role`, `model`, `status`, `issue`, `pr`, `gov_question`, `last_event`, `last_ts`, `started_ts` and `tracking_issue` |
+| `prs` | open PRs: `number`, `title`, `url`, `author`, `draft`, `review`, `created_ts`, `closes`, `needs_owner` |
+| `gov_questions` | open `gov:question`s with their fields, time to live and the `session_id`s waiting on them |
+| `governance` | recent and flagged records, counts by shape and domain, lapsed questions |
+| `committees`, `progress`, `reviewer_runs` | those sections' data; `reviewer_runs.unreviewed` is PR numbers |
+
+It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
+
 ## Needs you
 
 The page opens with one ordered list of everything waiting on the owner (L5). `launcher/swarm inbox` prints the same list. Both come from `needs_you()` in `generate.py`, so the page and the command always show the same items in the same order.
