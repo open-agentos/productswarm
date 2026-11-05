@@ -2,7 +2,7 @@
 
 A swarm of agent sessions building tools for running agent swarms. This repo is also the Phase 0 test bed for [open-agentos/agent-governance](https://github.com/open-agentos/agent-governance).
 
-Each session is a Claude Code session with one role: planner, builder, reviewer or docs. Each role acts on GitHub as its own GitHub App. The tools here let the owner start the swarm, see what every session is doing, and see what's waiting on them. [PRODUCT.md](PRODUCT.md) says what we're building and why.
+Each session is a Claude Code session with one role: planner, builder, reviewer, docs, designer or analyst. Each role acts on GitHub as its own GitHub App. The tools here let the owner start the swarm, see what every session is doing, and see what's waiting on them. [PRODUCT.md](PRODUCT.md) says what we're building and why.
 
 ## What's here
 
@@ -14,6 +14,7 @@ Each session is a Claude Code session with one role: planner, builder, reviewer 
 | `swarm.toml` | The swarm manifest: which roles to run, how many of each, their model and an optional spend cap | [launcher/README.md](launcher/README.md#the-swarm-manifest) |
 | `ops/` | Role identities: one GitHub App per role, and `ops/swarm-session`, which starts a session as that App | [ops/README.md](ops/README.md) |
 | `roles/` | The prompt each role starts from | |
+| `research/` | The analyst's record of the landscape outside productswarm: similar and adjacent products, and platform changes | [research/landscape.md](research/landscape.md) |
 | `GOVERNANCE.md`, `governance/` | Who decides what, the rulings so far (`governance/INDEX.md`) and the Phase 0 log | [GOVERNANCE.md](GOVERNANCE.md) |
 
 Everything is Python stdlib plus the `gh` CLI. The launcher needs Python 3.11+ (for `tomllib`) and macOS Terminal.
