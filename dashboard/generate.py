@@ -11,11 +11,13 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
     governance/INDEX.md from the checkout (the governance section, #355).
 
 Builds three pages in one look (layout.py), and copies the self-hosted fonts beside them:
-  - index.html, the desk: on the floor (floor.py), open committees, and a pointer to the
+  - index.html, the desk: on the floor (floor.py), the committee desk while one is open (#404),
+    and a pointer to the
     other two (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
     progress and spend;
-  - decisions.html: the governance section with the full decision log, and ended committees.
+  - decisions.html: the governance section with the full decision log, open committees with
+    their round grids, and ended committees.
 Stdlib only, no JavaScript, per the default in gov question #26.
 
     python3 dashboard/generate.py                 # writes dashboard/out/{index,operations,decisions}.html
@@ -550,18 +552,17 @@ TITLE = "Swarm dashboard"
 
 
 def render_desk(m: dict) -> str:
-    """The desk (index.html): on the floor (#403), the open committees, and a pointer to the
-    other pages. #397's later panels join it."""
+    """The desk (index.html): on the floor (#403), the committee desk while a committee is open
+    (#404), and a pointer to the other pages. #397's later panels join it."""
     repo = m["repo"]
-    committee = committees.render(m.get("committees"), repo, part="open")
     out = ["<h1>The desk</h1>",
            floor.render(m.get("floor"), repo),
-           committee or '<p class="muted">No committee is sitting.</p>',
+           committees.desk(m.get("committees"), repo),
            '<p class="pointer">The needs-you list, sessions, open PRs, reviewer sweeps, v3 '
            'progress and spend are on <a href="operations.html">Operations</a>; the full '
-           'decision log, open and lapsed gov questions and past committees are on '
+           'decision log, open and lapsed gov questions, and every committee\'s round grid are on '
            '<a href="decisions.html">Decisions</a>.</p>']
-    return layout.page("index.html", TITLE, repo, stamp(m["now"]), "\n".join(out))
+    return layout.page("index.html", TITLE, repo, stamp(m["now"]), "\n".join(o for o in out if o))
 
 
 def render_operations(m: dict) -> str:
@@ -628,11 +629,12 @@ def render_operations(m: dict) -> str:
 
 
 def render_decisions(m: dict) -> str:
-    """decisions.html: the governance section with the full decision log, and ended
-    committees."""
+    """decisions.html: the governance section with the full decision log, open committees
+    with their round grids (#404), and ended committees."""
     repo, now = m["repo"], m["now"]
     out = ["<h1>Decisions</h1>",
            governance.render(m["governance"], repo, now, m["days"], ago, stamp, full=True),
+           committees.render(m.get("committees"), repo, part="open"),
            committees.render(m.get("committees"), repo, part="ended")]
     return layout.page("decisions.html", TITLE, repo, stamp(now), "\n".join(o for o in out if o))
 

@@ -11,6 +11,7 @@ Each later #397 panel adds its slice here.
 import datetime as dt
 from pathlib import Path
 
+import committees
 import generate
 
 SCHEMA = 1
@@ -94,6 +95,7 @@ def state(m: dict) -> dict:
         "gov_questions": [gov_question(q) for q in m["governance"]["questions"]],
         "governance": {**gov, "days": m["days"]},
         "committees": m.get("committees"),
+        "committee_desk": committees.desk_states(m.get("committees")),
         "progress": m.get("progress"),
         "reviewer_runs": reviewer_runs(m["reviewer_runs"]),
     })
