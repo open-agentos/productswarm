@@ -100,9 +100,28 @@ def at(minute: int, day: int = 4, hour: int = 14) -> str:
     return f"2026-11-{day:02d}T{hour:02d}:{minute:02d}:00Z"
 
 
-def post(rnd, seat, minute, reco, model=None, login=None, day=4, hour=14):
+# The opening of each #314 post's Position section, in POSTS_314's order (#404).
+POSITIONS_314 = [
+    "I back **option 3 with two changes** (call it 3b). The test for red is the evidence attached to a finding.",
+    "I back **option 3, in the proposer's 3b form**, with four amendments (3c below). I tried to break the rule\n"
+    "and couldn't.",
+    "I back **option 3 in the proposer's 3b form, with the challenger's four amendments (3c)**, plus one "
+    "condition from the eval's side (call it **3c+E**): **the eval rubric has to change in step with the "
+    "reviewer's rule, and the C stage 2 bar has to stay what the owner pre-registered.**\n\nThe reason is "
+    "measurability.",
+    "I now back **3c+E**: my 3b, plus all four of the challenger's amendments, plus the planner's E1–E3 as a "
+    "separate eval issue. I add one precedence rule.",
+    "I now back **3c+E** as the proposer restated it in Round 2, with one added condition on the "
+    "Overstep-over-red precedence rule (below). No dissent on the red test or on the block list.",
+    "I back **option 3 as 3c+E**, as the proposer restated it in Round 2, plus both of the challenger's Round 2 "
+    "additions. I drop my one point of dispute."]
+DEFAULT_POSITION = "I back **something else** here. Nothing more from this post."
+
+
+def post(rnd, seat, minute, reco, model=None, login=None, day=4, hour=14, position=DEFAULT_POSITION):
     role, table_model = SEATS[seat]
-    body = (f"## Round {rnd}: {seat} ({role})\n\n### Position\n\nI back **something else** here.\n\n"
+    pos = "" if position is None else f"### Position\n\n{position}\n\n"
+    body = (f"## Round {rnd}: {seat} ({role})\n\n{pos}"
             f"### Evidence\n\n**Not this.**\n\n### Recommendation\n\n{reco}\n\n"
             f"-- {role} ({model or table_model})")
     return {"author": {"login": login or f"productswarm-{role}"}, "createdAt": at(minute, day, hour),
@@ -334,7 +353,7 @@ class CommitteeTest(Fixture):
         model = g.build(data, now, dt.timedelta(minutes=15))
         self.assertEqual(model["committees"]["committees"][0]["status"], "record GOV-0021")
         pages = g.render(model)
-        self.assertIn("<h2>Committees</h2>", pages["index.html"])        # the desk (#401)
+        self.assertNotIn('class="desk"', pages["index.html"])            # it ended: no desk (#404)
         self.assertIn("<h2>Past committees</h2>", pages["decisions.html"])   # it ended
         page = "".join(pages.values())
         self.assertNotIn("<script", page.lower())
@@ -342,7 +361,8 @@ class CommitteeTest(Fixture):
             self.assertNotIn("2.89", text)
             self.assertNotIn("Cost", text)
             self.assertNotIn("2 rounds of 3", text)   # nor any other summary text
-            self.assertNotIn("I back", text)          # nor round-post text beyond the phrase
+            self.assertNotIn("Nothing more", text)    # nor round-post text beyond the phrase
+            self.assertNotIn("Not this", text)        # and the Position's first sentence (#404)
 
     def test_records_and_owner_from_the_checkout(self):
         self.assertEqual(c.records()[311]["id"], "GOV-0021")
@@ -446,15 +466,18 @@ class RenderTest(Fixture):
             self.assertNotIn("Committees", page)
 
     def test_open_committees_are_on_the_desk(self):
-        (self.decisions / "GOV-0021-when.md").unlink()
+        # g.build reads the checkout's records, where #311 has GOV-0021: use a question without one.
         data = {"repo": REPO, "issues": [], "comments": {}, "prs": [], "reviews": {},
-                "committees": {"discussions": [discussion(comments=[post(*POSTS_314[0])])],
-                               "questions": {311: question(False, False)}, "notes": []}}
+                "committees": {"discussions": [discussion(title="Committee for #9999: x",
+                                                          comments=[post(*POSTS_314[0])])],
+                               "questions": {9999: question(False, False)}, "notes": []}}
         now = dt.datetime(2026, 11, 4, 15, 0, tzinfo=dt.timezone.utc)
         pages = g.render(g.build(data, now, dt.timedelta(minutes=15)))
-        self.assertIn("<h2>Committees</h2>", pages["index.html"])
-        for other in ("operations.html", "decisions.html"):   # #401: only the desk shows it
-            self.assertNotIn("Committees</h2>", pages[other])
+        self.assertIn('<section class="desk">', pages["index.html"])     # the desk (#404)
+        self.assertNotIn('<table class="grid">', pages["index.html"])
+        self.assertIn("<h2>Committees</h2>", pages["decisions.html"])     # the grid moved (#404)
+        self.assertIn('<table class="grid">', pages["decisions.html"])
+        self.assertNotIn("Committees</h2>", pages["operations.html"])
 
     def test_parts(self):
         open_one = discussion(comments=[post(*POSTS_314[0])])
@@ -462,6 +485,128 @@ class RenderTest(Fixture):
         m = self.build([open_one], {311: question(False, False)}, [])
         self.assertIn("<h2>Committees</h2>", c.render(m, REPO, part="open"))
         self.assertEqual(c.render(m, REPO, part="ended"), "")
+
+
+def posts_314(n: int, **kw) -> list[dict]:
+    """#314's first n posts, with their real Position openings."""
+    return [post(*p, position=pos, **kw) for p, pos in list(zip(POSTS_314, POSITIONS_314))[:n]]
+
+
+class DeskTest(Fixture):
+    """The committee desk (#404), over #314's posts with #311 still open."""
+    def setUp(self):
+        super().setUp()
+        (self.decisions / "GOV-0021-when.md").unlink()
+
+    def open(self, comments):
+        return self.build([discussion(comments=comments)], {311: question(False, False)})
+
+    def desk(self, comments):
+        (d,) = c.desk_states(self.open(comments))
+        return d
+
+    def test_summary_is_the_positions_first_sentence(self):
+        com = self.one([discussion(comments=posts_314(6))], {311: question(False, False)})
+        self.assertEqual([p["summary"] for p in com["posts"]], [
+            "I back option 3 with two changes (call it 3b).",
+            "I back option 3, in the proposer's 3b form, with four amendments (3c below).",
+            "I back option 3 in the proposer's 3b form, with the challenger's four amendments (3c), plus one "
+            "condition from the eval's side (call it…",
+            "I now back 3c+E: my 3b, plus all four of the challenger's amendments, plus the planner's E1–E3 as "
+            "a separate eval issue.",
+            "I now back 3c+E as the proposer restated it in Round 2, with one added condition on the "
+            "Overstep-over-red precedence rule (below).",
+            "I back option 3 as 3c+E, as the proposer restated it in Round 2, plus both of the challenger's "
+            "Round 2 additions."])
+        self.assertTrue(all(len(p["summary"]) <= c.SUMMARY_LEN for p in com["posts"]))
+
+    def test_missing_position_section(self):
+        comments = posts_314(1) + [post(*POSTS_314[1], position=None)]
+        d = self.desk(comments)
+        self.assertIsNone(d["seats"][1]["summary"])
+        self.assertEqual(d["seats"][1]["recommendation"], "Option 3, as the proposer's 3b, plus these four "
+                         "amendments (3c)")
+        html = c.desk(self.open(comments), REPO)
+        self.assertIn('<p class="muted">no Position section</p>', html)
+        self.assertEqual(c.summary("### Position\n\n\n### Evidence\n\nx"), None)
+
+    def test_band_and_cards_mid_round_2(self):
+        d = self.desk(posts_314(4))
+        self.assertEqual((d["round"], d["max_rounds"], d["waiting_on"]), (2, 3, "challenger"))
+        proposer, challenger, domain = d["seats"]
+        self.assertEqual(proposer["recommendation"], "Option 3 as 3c")
+        self.assertEqual(proposer["swing"], "moved")
+        self.assertEqual(proposer["moved_from"], "Option 3, with changes 1 and 2 (3b)")
+        self.assertEqual(proposer["round"], 2)
+        self.assertEqual((challenger["swing"], challenger["round"]), (None, 1))   # no round 2 post yet
+        html = c.desk(self.open(posts_314(4)), REPO)
+        self.assertIn('<div class="band"><span class="live">LIVE</span><span class="tag">Committee</span>'
+                      f'<span class="q"><a href="{QURL}">#311</a></span><span>Round 2 of 3</span>'
+                      '<span>waiting on challenger</span>', html)
+        self.assertIn('<div class="reco">Option 3 as 3c</div>'
+                      '<div class="swing">moved from Option 3, with changes 1 and 2 (3b)</div>'
+                      "<blockquote>“I now back 3c+E: my 3b, plus all four of the challenger&#x27;s amendments, "
+                      "plus the planner&#x27;s E1–E3 as a separate eval issue.”</blockquote>"
+                      f'<div class="when"><a href="{DURL}#discussioncomment-223">round 2 · 11-04 14:23 UTC</a>'
+                      "</div>", html)
+        self.assertIn('<div class="seat up">', html)                  # the challenger is up next
+        self.assertEqual(html.count('<div class="seat">') + html.count('<div class="seat up">'), 3)
+        self.assertEqual(html.count("var(--red)"), 0)                 # red comes from the CSS, LIVE only
+
+    def test_bar_for_each_round(self):
+        # Round 1: three different phrases. Round 2: 3c, 3c+E, 3c+E (two agree, up from one).
+        self.assertEqual(self.desk(posts_314(3))["consensus"]["text"], "1 of 3")
+        self.assertEqual(self.desk(posts_314(6))["consensus"],
+                         {"agree": 2, "seats": 3, "converging": True, "consensus": False,
+                          "text": "2 of 3 · converging"})
+        # Round 3: the proposer joins the others.
+        third = posts_314(6) + [post(3, "proposer", 40, "**Option 3 as 3c+E**")]
+        self.assertEqual(self.desk(third)["consensus"]["text"], "consensus")
+        self.assertEqual(self.desk(third)["seats"][0]["moved_from"], "Option 3 as 3c")
+        html = c.desk(self.open(third), REPO)
+        self.assertIn('<div class="bar done"><span class="marks"><span class="on"></span>'
+                      '<span class="on"></span><span class="on"></span></span><b>consensus</b></div>', html)
+
+    def test_bar_without_a_rise_and_held(self):
+        held = posts_314(3) + [post(2, "proposer", 30, "**Option 3, with changes 1 and 2 (3b).**")]
+        d = self.desk(held)
+        self.assertEqual(d["consensus"]["text"], "1 of 3")                # no rise: no "converging"
+        self.assertEqual((d["seats"][0]["swing"], d["seats"][0]["moved_from"]), ("held", None))
+        self.assertIn('<div class="swing">held</div>', c.desk(self.open(held), REPO))
+
+    def test_convened_with_no_posts(self):
+        d = self.desk([])
+        self.assertEqual((d["round"], d["waiting_on"], d["consensus"]["text"]), (1, "proposer", "0 of 3"))
+        html = c.desk(self.open([]), REPO)
+        self.assertEqual(html.count('<div class="reco none">no recommendation yet</div>'), 3)
+        self.assertIn('<div class="when muted">up next</div>', html)
+        self.assertEqual(html.count('<div class="when muted">not posted yet</div>'), 2)
+
+    def test_no_open_committee_no_desk(self):
+        (self.decisions / "GOV-0021-when.md").write_text('---\nid: GOV-0021\nquestion: "#311"\n---\n')
+        m = self.build([discussion()])
+        self.assertEqual(c.desk_states(m), [])
+        self.assertEqual(c.desk(m, REPO), "")
+        self.assertEqual(c.desk(None, REPO), "")
+        self.assertEqual(c.desk(self.build([discussion(number=400, title="chat", body="x")]), REPO), "")
+
+    def test_state_json_carries_the_desk(self):
+        import json
+        import state as st
+        data = {"repo": REPO, "issues": [], "comments": {}, "prs": [], "reviews": {},
+                "committees": {"discussions": [discussion(title="Committee for #9999: x", comments=posts_314(4))],
+                               "questions": {9999: question(False, False)}, "notes": []}}
+        now = dt.datetime(2026, 11, 4, 15, 0, tzinfo=dt.timezone.utc)
+        out = json.loads(json.dumps(st.state(g.build(data, now, dt.timedelta(minutes=15)))))
+        (d,) = out["committee_desk"]
+        self.assertEqual(sorted(d), ["consensus", "discussion", "max_rounds", "question", "question_title",
+                                     "question_url", "round", "seats", "url", "waiting_on"])
+        self.assertEqual(sorted(d["seats"][0]), ["model", "moved_from", "posted", "recommendation", "role",
+                                                 "round", "seat", "summary", "swing", "url"])
+        self.assertEqual(d["seats"][0]["posted"], "2026-11-04T14:23:00Z")
+        self.assertEqual(d["consensus"]["text"], "2 of 3 · converging")
+        data["committees"]["discussions"] = []
+        self.assertEqual(st.state(g.build(data, now, dt.timedelta(minutes=15)))["committee_desk"], [])
 
 
 def fake_gh_json(pages: dict, fail: str | None = None):

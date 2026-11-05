@@ -9,12 +9,17 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
     PR (GOV-0011's round count and Authority line);
   - open `gov:question` issues, `gov:lapsed` ones closed in the window, and
     governance/INDEX.md from the checkout (the governance section, #355).
+  - for the desk's trends (#406, questions.py): `gov:question`s created in the window with
+    their label and close events, PRs merged in the window, and record dates from the checkout.
 
 Builds three pages in one look (layout.py), and copies the self-hosted fonts beside them:
-  - index.html, the desk: open committees, and a pointer to the other two (#397 fills it);
+  - index.html, the desk: on the floor (floor.py), the committee desk while one is open (#404),
+    what the numbers say (trends.py), precedent in use (precedent.py), and a pointer to the
+    other two (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
     progress and spend;
-  - decisions.html: the governance section with the full decision log, and ended committees.
+  - decisions.html: the governance section with the full decision log, open committees with
+    their round grids, and ended committees.
 Stdlib only, no JavaScript, per the default in gov question #26.
 
     python3 dashboard/generate.py                 # writes dashboard/out/{index,operations,decisions}.html
@@ -33,13 +38,16 @@ import sys
 from pathlib import Path
 
 import committees
+import floor
 import ghql
 import governance
 import layout
 import precedent
 import progress
+import questions
 import reviewer_runs
 import spend
+import trends
 
 HERE = Path(__file__).resolve().parent
 
@@ -70,9 +78,10 @@ AUTHORITY_RE = re.compile(r"^[\s>*-]*Authority\s*:?[\s*]*:?\s*(pass|fail)\b", re
 
 # ---------------------------------------------------------------- reading GitHub
 
-def gh_items(path: str) -> list[dict]:
-    """Every item of a paginated list endpoint."""
-    r = subprocess.run(["gh", "api", "--paginate", path, "--jq", ".[]"],
+def gh_items(path: str, jq: str = ".[]") -> list[dict]:
+    """Every item of a paginated list endpoint; `jq` picks the items out of each page
+    (`.items[]` for search)."""
+    r = subprocess.run(["gh", "api", "--paginate", path, "--jq", jq],
                        capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         raise RuntimeError(f"gh api {path} failed: {r.stderr.strip()[:300]}")
@@ -106,13 +115,14 @@ def tracking_comments(repo: str, numbers: list[int]) -> dict[int, list[dict]]:
 
 def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
           with_actions: bool = False, with_committees: bool = False,
-          with_precedent: bool = False) -> dict:
+          with_questions: bool = False, with_precedent: bool = False) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
     also reads the v3 progress section's data (progress.py), `with_actions` the Actions
-    reviewer section's (reviewer_runs.py), and `with_committees` the committee Discussions
-    (committees.py, GraphQL), and `with_precedent` the GOV citations (precedent.py). Only the
-    page shows them, so swarm's snapshot() and the digest leave them off and make no Actions
-    or GraphQL calls; main() asks for them."""
+    reviewer section's (reviewer_runs.py), `with_committees` the committee Discussions
+    (committees.py, GraphQL), `with_questions` the gov:question history the desk's trends
+    read (questions.py, REST, search and GraphQL), and `with_precedent` the GOV citations
+    (precedent.py). Only the page shows them, so swarm's snapshot() and the digest leave all
+    five off and make none of those calls; main() asks for them."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
     items: dict[int, dict] = {}   # issues and PRs, for precedent.py's bodies
@@ -137,6 +147,7 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
             "progress": progress.fetch(repo, gh_json) if with_progress else None,
             "actions": reviewer_runs.fetch(repo, now, reviews) if with_actions else None,
             "committees": committees.fetch(repo, gh_items, gh_json) if with_committees else None,
+            "questions": questions.fetch(repo, now, days, gh_items) if with_questions else None,
             "precedent": fetch_precedent(repo, now, days, list(items.values()))
                          if with_precedent else None}
 
@@ -333,13 +344,14 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
     repo = data["repo"]
     issues = {i["number"]: i for i in data["issues"]}
     open_issues = {n for n, i in issues.items() if i.get("state") == "open"}
-    sessions = []
+    sessions, events_of = [], {}
     for s in tracking_issues(issues.values()):
         events = session_events(s, data["comments"].get(s["issue"], []), repo)
         d = derive(s, events, open_issues, now, idle_after)
         d["cap"] = (caps or {}).get(d["role"])
         d["over_cap"] = d["status"] != "stopped" and over_cap(d["cost"], d["cap"])
         sessions.append(d)
+        events_of[d["session_id"]] = events
     epoch = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
     sessions.sort(key=lambda s: (STATUS_ORDER[s["status"]], -(s["last_ts"] or epoch).timestamp()))
 
@@ -373,7 +385,8 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
 
     return {"repo": repo, "now": now, "idle_minutes": int(idle_after.total_seconds() // 60),
             "issue_titles": {n: i["title"] for n, i in issues.items()},
-            "sessions": sessions, "prs": prs, "gov": gov, "days": window,
+            "sessions": sessions, "prs": prs,
+            "floor": floor.build([(s, events_of[s["session_id"]]) for s in sessions], now), "gov": gov, "days": window,
             "governance": governance.build(data.get("index"), gov, data["issues"], now,
                                            now - dt.timedelta(days=window), parse_ts,
                                            time_to_live, ttl_date),
@@ -381,6 +394,9 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
             "reviewer_runs": reviewer_runs.build(
                 data.get("actions"), [p for p in prs if not p["draft"] and unreviewed(p)], now),
             "committees": committees.build(data.get("committees")),
+            "trends": trends.build(questions.build(data["questions"], now, window,
+                                                   committees.owner_login())
+                                   if data.get("questions") is not None else None),
             "precedent": precedent.build(data.get("precedent"), data.get("records") or {}, now, window),
             "spend": {"per_day": per_day, "today": per_day[today],
                       "unpriced": [s for s in sessions if s["cost"] is None]}}
@@ -575,18 +591,20 @@ TITLE = "Swarm dashboard"
 
 
 def render_desk(m: dict) -> str:
-    """The desk (index.html). Until #397's panels land it shows the open committees and a
-    pointer to the other pages."""
+    """The desk (index.html): on the floor (#403), the committee desk while a committee is open
+    (#404), what the numbers say (#406), precedent in use (#408), and a pointer to the other
+    pages. #397's later panels join it."""
     repo = m["repo"]
-    committee = committees.render(m.get("committees"), repo, part="open")
     out = ["<h1>The desk</h1>",
-           committee or '<p class="muted">No committee is sitting.</p>',
+           floor.render(m.get("floor"), repo),
+           committees.desk(m.get("committees"), repo),
+           trends.render(m.get("trends")),
            precedent.render(m.get("precedent"), repo),
            '<p class="pointer">The needs-you list, sessions, open PRs, reviewer sweeps, v3 '
            'progress and spend are on <a href="operations.html">Operations</a>; the full '
-           'decision log, open and lapsed gov questions and past committees are on '
+           'decision log, open and lapsed gov questions, and every committee\'s round grid are on '
            '<a href="decisions.html">Decisions</a>.</p>']
-    return layout.page("index.html", TITLE, repo, stamp(m["now"]), "\n".join(out))
+    return layout.page("index.html", TITLE, repo, stamp(m["now"]), "\n".join(o for o in out if o))
 
 
 def render_operations(m: dict) -> str:
@@ -653,11 +671,12 @@ def render_operations(m: dict) -> str:
 
 
 def render_decisions(m: dict) -> str:
-    """decisions.html: the governance section with the full decision log, and ended
-    committees."""
+    """decisions.html: the governance section with the full decision log, open committees
+    with their round grids (#404), and ended committees."""
     repo, now = m["repo"], m["now"]
     out = ["<h1>Decisions</h1>",
            governance.render(m["governance"], repo, now, m["days"], ago, stamp, full=True),
+           committees.render(m.get("committees"), repo, part="open"),
            committees.render(m.get("committees"), repo, part="ended")]
     return layout.page("decisions.html", TITLE, repo, stamp(now), "\n".join(o for o in out if o))
 
@@ -774,7 +793,7 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
-                     with_committees=True, with_precedent=True)
+                     with_committees=True, with_questions=True, with_precedent=True)
         data["records"] = precedent.load_records()
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
