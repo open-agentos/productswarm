@@ -205,6 +205,7 @@ class CallCountTest(unittest.TestCase):
     SESSIONS = 60
     RUNS = 15
     OPEN_PRS = 3
+    QUESTIONS = 30
 
     def rebuild(self):
         base = f"repos/{REPO}"
@@ -220,6 +221,11 @@ class CallCountTest(unittest.TestCase):
                      "isDraft": False, "createdAt": ts(30), "reviewDecision": "",
                      "closingIssuesReferences": [], "headRefOid": SHA} for i in range(self.OPEN_PRS)],
             "rate_limit": limits(),
+            # #406's question history: QUESTIONS gov questions in the window, PRs merged.
+            f"{base}/issues": [{"number": 600 + i, "title": "q", "state": "open",
+                                "created_at": ts(60), "html_url": "u", "labels": []}
+                               for i in range(self.QUESTIONS)],
+            "search/issues": [{"number": 700, "pull_request": {"merged_at": ts(30)}}],
             f"{base}/actions/workflows/reviewer.yml/runs": runs_,
             **{f"{base}/actions/runs/{i}/jobs": [
                 {"name": "plan", "status": "completed", "conclusion": "success", "html_url": "j"},
@@ -252,7 +258,8 @@ class CallCountTest(unittest.TestCase):
         graphql = [c for c in calls if c[:2] == ["api", "graphql"]]
         queries = [next(x for x in c if x.startswith("query=")) for c in graphql]
         # 60 tracking issues: 3 GraphQL queries of 25, never one REST call per issue.
-        self.assertEqual(sum(bool(re.search(r"\bi\d+: issue\(", q)) for q in queries), 3)
+        self.assertEqual(sum(bool(re.search(r"\bi\d+: issue\(\w+: \d+\) { comments", q))
+                             for q in queries), 3)
         self.assertFalse([c for c in rest if "/comments" in " ".join(c)], rest)
         # 15 reviewed PRs: one GraphQL query, no REST reviews or commits per PR. Open PRs'
         # reviews stay one REST call each (generate.fetch() needs their bodies).
@@ -261,8 +268,13 @@ class CallCountTest(unittest.TestCase):
         self.assertFalse([c for c in rest if "/commits" in " ".join(c)], rest)
         # Runs: one list call, then one jobs call per run, at most MAX_RUNS.
         self.assertEqual(len([c for c in rest if "/jobs" in " ".join(c)]), self.RUNS)
-        # The whole rebuild: 30 calls. On main before #392 the same data took 100.
-        self.assertLessEqual(len(calls), 30, "\n".join(map(str, calls)))
+        # #406's trends: one REST list of gov questions, one search for merged PRs, and one
+        # GraphQL query per 25 questions for their label and close events.
+        self.assertEqual(len([c for c in rest if "labels=gov:question" in " ".join(c)]), 1)
+        self.assertEqual(len([c for c in rest if "search/issues" in " ".join(c)]), 1)
+        self.assertEqual(sum("timelineItems(" in q for q in queries), 2)
+        # The whole rebuild: 34 calls (30 before #406). On main before #392 the same data took 100.
+        self.assertLessEqual(len(calls), 34, "\n".join(map(str, calls)))
         self.assertLess(len(rest), g.PAGE_NEEDS["core"])
         self.assertLess(len(graphql), g.PAGE_NEEDS["graphql"])
 

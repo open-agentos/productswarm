@@ -84,4 +84,5 @@ def state(m: dict) -> dict:
         "committees": m.get("committees"),
         "progress": m.get("progress"),
         "reviewer_runs": reviewer_runs(m["reviewer_runs"]),
+        "trends": m.get("trends"),   # #406: each trend's sentence and its series by day
     })

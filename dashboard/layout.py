@@ -93,6 +93,12 @@ table.grid td { min-width:160px; }
 .id { white-space:nowrap; }
 details summary { cursor:pointer; margin:12px 0 4px; color:var(--muted); }
 .pointer { margin:28px 0 0; padding:10px 12px; border-left:3px solid var(--agent); background:var(--card); }
+ul.trends { list-style:none; margin:0; padding:0; }
+ul.trends li { display:flex; align-items:center; gap:12px; padding:8px 0;
+  border-bottom:1px solid var(--line); font-size:16px; }
+ul.trends li.few { color:var(--muted); }
+svg.spark { flex:none; fill:none; stroke:var(--agent); stroke-width:1.5; }
+svg.spark circle { fill:var(--agent); stroke:none; }
 footer.foot { margin-top:40px; padding-top:8px; border-top:2px solid var(--ink);
   display:flex; flex-wrap:wrap; gap:4px 18px; font:600 13px/1.6 var(--cond);
   text-transform:uppercase; letter-spacing:.06em; }
