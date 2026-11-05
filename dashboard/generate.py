@@ -17,7 +17,7 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
 
 Builds four pages in one look (layout.py), each headed by a red LIVE mark, the build time
 and the owner's last act (#402), and copies the self-hosted fonts beside them:
-  - index.html, the desk: on the floor (floor.py), the committee desk while one is open (#404),
+  - index.html, the desk: on the floor (floor.py), the wire (wire.py, #405), the committee desk while one is open (#404),
     what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
     committee (#409), and a pointer to the other pages (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
@@ -56,6 +56,7 @@ import questions
 import reviewer_runs
 import spend
 import trends
+import wire
 
 HERE = Path(__file__).resolve().parent
 
@@ -164,7 +165,7 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
             "questions": questions.fetch(repo, now, days, gh_items) if with_questions else None,
             "precedent": fetch_precedent(repo, now, days, list(items.values()))
                          if with_precedent else None,
-            "activity": activity.fetch(repo, gh_json, committees.owner_login())
+            "activity": activity.fetch(repo, gh_json, committees.owner_login(), wire.midnight(now))
                         if with_activity else None}
 
 
@@ -422,6 +423,9 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
          "activity": data.get("activity"),   # the repo's events; the wire (#405) reuses them
          "owner_last_acted": activity.owner_last_acted(data.get("activity"),
                                                        committees.owner_login(), repo, now),
+         "wire": wire.build(data.get("activity"), data.get("questions"), data.get("reviews"), comms,
+                            committees.records(), owner, repo, now)   # #405: today's governance events
+                 if data.get("activity") is not None or data.get("questions") is not None else None,
          "spend": {"per_day": per_day, "today": per_day[today],
                    "unpriced": [s for s in sessions if s["cost"] is None]}}
     m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
@@ -628,11 +632,12 @@ def owner_line(m: dict) -> str:
 
 def render_desk(m: dict) -> str:
     """The desk (index.html): on the floor (#403), the committee desk while a committee is open
-    (#404), what the numbers say (#406), how the questions went (#407), precedent in use
-    (#408), a card per past committee (#409), and a pointer to the other pages. #397's later panels join it."""
+    (#404), the wire (#405), what the numbers say (#406), how the questions went (#407),
+    precedent in use (#408), a card per past committee (#409), and a pointer to the other pages. #397's later panels join it."""
     repo = m["repo"]
     out = ["<h1>The desk</h1>",
            floor.render(m.get("floor"), repo),
+           wire.render(m.get("wire")),
            committees.desk(m.get("committees"), repo),
            trends.render(m.get("trends")),
            questions.render_went(m.get("questions_went")),

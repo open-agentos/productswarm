@@ -1,8 +1,9 @@
 """The repo's public events, and when the owner last acted (#402, part 3 of #397).
 
 `fetch()` reads `repos/{repo}/events`, 100 a page, newest first, up to the 3 pages (300
-events) the API keeps, and stops at the first page with an event by the owner. The wire
-(#405) reuses the same events, so a build reads them once. `owner_last_acted()` picks the
+events) the API keeps. It stops at the first page with an event by the owner, unless given
+`since`: then it also reads on until a page ends before `since`. The wire (#405) passes UTC
+midnight, so it gets all of today's events (within those 300) from the same read. `owner_last_acted()` picks the
 owner's newest event from them; `header()` draws it for the masthead on every page.
 
 What the events API does here (checked 2026-11-05 against this repo):
@@ -35,9 +36,10 @@ VERBS = {"labeled": "labelled", "unlabeled": "unlabelled", "opened": "opened", "
          "reopened": "reopened", "assigned": "assigned", "unassigned": "unassigned"}
 
 
-def fetch(repo: str, gh_json, owner: str | None) -> dict:
+def fetch(repo: str, gh_json, owner: str | None, since: dt.datetime | None = None) -> dict:
     """{"events": [...], "pages": n} newest first, or {"events": None, "error": ...} if they
     can't be read. Never raises for an API failure: the page builds without them."""
+    found = False
     events: list[dict] = []
     pages = 0
     try:
@@ -47,7 +49,11 @@ def fetch(repo: str, gh_json, owner: str | None) -> dict:
                 raise ValueError("events: not a list")
             pages += 1
             events += [e for e in got if isinstance(e, dict)]
-            if len(got) < PER_PAGE or any(by(e, owner) for e in got):
+            found = found or any(by(e, owner) for e in got)
+            # The list is in id order, so its last event says how far back the page reaches.
+            last = parse_ts((got[-1] if got and isinstance(got[-1], dict) else {}).get("created_at"))
+            reached = since is None or last is None or last < since
+            if len(got) < PER_PAGE or (found and reached):
                 break
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, TypeError):
         return {"events": None, "error": UNREADABLE}
