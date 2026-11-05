@@ -29,6 +29,7 @@ ROLES = {
     "builder": {"contents": "write", "issues": "write", "pull_requests": "write"},
     "reviewer": {"contents": "read", "issues": "write", "pull_requests": "write"},
     "docs": {"contents": "write", "issues": "write", "pull_requests": "write"},
+    "designer": {"contents": "read", "issues": "write", "pull_requests": "write"},
 }
 
 
