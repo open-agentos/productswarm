@@ -142,6 +142,7 @@ table.precedent td.num { min-width:34px; }
 .floor .spark { display:block; margin:6px 0 2px; }
 .floor .spark .bar { fill:var(--agent); } .floor .spark .zero { fill:var(--line); }
 .floor .used, .idle { font-size:13px; }
+.watcher ul { margin:0; padding-left:20px; font-size:14px; } .watcher .stale { color:var(--red); }
 ul.trends { list-style:none; margin:0; padding:0; }
 ul.trends li { display:flex; align-items:center; gap:12px; padding:8px 0;
   border-bottom:1px solid var(--line); font-size:16px; }

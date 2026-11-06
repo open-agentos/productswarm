@@ -141,5 +141,49 @@ class SkippedBuildTest(unittest.TestCase):
         self.assertEqual(self.run_main(NUDGE, [runs(7), recent]), (0, []))
 
 
+class WatcherStateTest(unittest.TestCase):
+    """#459: the watcher's state from the [watch] issue, in state.json as `watcher`."""
+
+    def built(self, *issues):
+        return st.state(g.build({"repo": REPO, "issues": list(issues), "comments": {}, "prs": []},
+                                NOW, IDLE, watch_interval=5))
+
+    def test_each_list_without_cost(self):
+        from test_floor import FULL, watch_issue
+        state = dict(FULL)
+        state["running"] = [state["running"][0] | {"cost_usd": 4.2}]
+        w = self.built(watch_issue(state))["watcher"]
+        self.assertEqual(set(w), set(st.WATCHER_FIELDS))
+        self.assertEqual((w["status"], w["issue"], w["stale"], w["age_minutes"]), ("ok", 70, False, 1))
+        self.assertEqual(w["checked"], "2026-11-02T11:59:00Z")
+        self.assertEqual([len(w[k]) for k in ("running", "held", "skipped", "failed")], [1, 1, 1, 1])
+        self.assertEqual(w["running"][0], {"ref": "#405", "kind": "build", "role": "builder",
+                                           "started": "2026-11-02T11:09:00Z"})
+        self.assertEqual(w["held"][0]["reason"], "held: 2 of 2 running")
+        # No cost key or figure ("spend_cap_usd" in no_cap's fixed sentence names a setting).
+        self.assertNotIn("cost_usd", json.dumps(w))
+        self.assertNotIn("4.2", json.dumps(w))
+
+    def test_stale(self):
+        from test_floor import pub, watch_issue
+        w = self.built(watch_issue(pub(checked_ago=40)))["watcher"]
+        self.assertEqual((w["stale"], w["age_minutes"]), (True, 40))
+
+    def test_missing_malformed_and_wrong_author(self):
+        from test_floor import FULL, watch_issue
+        import watch
+        self.assertEqual(self.built(issue(4, "x"))["watcher"], {"status": "missing"})
+        self.assertEqual(self.built(watch_issue(None, body=watch.WATCH_MARKER))["watcher"],
+                         {"status": "malformed", "issue": 70})
+        self.assertEqual(self.built(watch_issue(FULL, login="mallory"))["watcher"],
+                         {"status": "not_owner"})
+
+    def test_markers_match(self):
+        import floor
+        import watch
+        self.assertEqual(floor.WATCH_MARKER, watch.WATCH_MARKER)
+        self.assertEqual(floor.STALE_CHECKS, watch.STALE_CHECKS)
+
+
 if __name__ == "__main__":
     unittest.main()

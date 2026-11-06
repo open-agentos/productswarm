@@ -177,5 +177,150 @@ class StateTest(unittest.TestCase):
             self.assertNotIn(word, text)
 
 
+# ---------------------------------------------------------------- the watcher (#459)
+
+sys.path.insert(0, str(HERE.parent / "launcher"))
+import watch  # noqa: E402
+
+OWNER = "mattmcalister"
+
+
+def pub(checked_ago=1, **lists):
+    """watch.public_state()'s shape (#456), `checked` minutes before NOW."""
+    from test_generate import ts
+    return {"checked": ts(checked_ago).replace("Z", "+00:00"),
+            **{k: lists.get(k, []) for k in floor.LISTS}}
+
+
+def watch_issue(state, n=70, login=OWNER, body=None):
+    i = issue(n, watch.WATCH_TITLE)
+    return i | {"user": {"login": login},
+                "body": watch.watch_body(state) if body is None else body}
+
+
+def watched(*issues, interval=5):
+    m = g.build({"repo": REPO, "issues": list(issues), "comments": {}, "prs": []}, NOW, IDLE,
+                watch_interval=interval)
+    return m
+
+
+FULL = pub(
+    running=[{"role": "builder", "kind": "build", "ref": "#405", "started": "2026-11-02T11:09:00+00:00"}],
+    held=[{"ref": "#407", "kind": "build", "code": "limit", "reason": "held: 2 of 2 running",
+           "since": "2026-11-02T11:30:00+00:00"}],
+    skipped=[{"ref": "#439", "kind": "build", "code": "no_cap",
+              "reason": "skipped: the role has no spend_cap_usd in swarm.toml",
+              "since": "2026-11-02T10:00:00+00:00"}],
+    failed=[{"ref": "#51", "kind": "build", "ending": "at_cap", "ended": "2026-11-02T10:02:00+00:00"}])
+
+
+class WatcherTest(unittest.TestCase):
+    def test_each_line(self):
+        w = watched(watch_issue(FULL))["watcher"]
+        self.assertEqual((w["status"], w["issue"], w["stale"]), ("ok", 70, False))
+        self.assertEqual(floor.watcher_lines(w), [
+            "builder on #405 since 11:09",
+            "held: #407, 2 of 2 running",
+            "skipped: #439, the role has no spend_cap_usd in swarm.toml",
+            "failed: #51 build, at its cap, 10:02"])
+
+    def test_on_the_desk(self):
+        desk = g.render(watched(watch_issue(FULL)))["index.html"]
+        self.assertIn("<h3>The watcher</h3>", desk)
+        self.assertIn(f'builder on <a href="https://github.com/{REPO}/issues/405">#405</a> since 11:09', desk)
+        self.assertIn("as of 1 min ago, at 11:59 UTC", desk)
+        self.assertNotIn('class="stale"', desk)
+
+    def test_pr_ref_links_to_the_pr(self):
+        s = pub(held=[{"ref": "PR #30", "kind": "review", "code": "live",
+                       "reason": "held: a session is live on it", "since": "2026-11-02T11:00:00+00:00"}])
+        desk = g.render(watched(watch_issue(s)))["index.html"]
+        self.assertIn(f'held: PR <a href="https://github.com/{REPO}/pull/30">#30</a>, a session is live on it', desk)
+
+    def test_stale(self):
+        w = watched(watch_issue(pub(checked_ago=40, **{k: FULL[k] for k in floor.LISTS})))["watcher"]
+        self.assertTrue(w["stale"])
+        self.assertEqual(w["age_minutes"], 40)
+        desk = g.render(watched(watch_issue(pub(checked_ago=40))))["index.html"]
+        self.assertIn('<p class="stale">watcher last published 40 min ago, at 11:20 UTC', desk)
+
+    def test_ten_minutes_is_not_stale_but_eleven_is(self):
+        self.assertFalse(watched(watch_issue(pub(checked_ago=10)))["watcher"]["stale"])
+        self.assertTrue(watched(watch_issue(pub(checked_ago=11)))["watcher"]["stale"])
+
+    def test_no_interval_never_stale(self):
+        self.assertFalse(watched(watch_issue(pub(checked_ago=900)), interval=None)["watcher"]["stale"])
+
+    def test_empty_lists(self):
+        desk = g.render(watched(watch_issue(pub())))["index.html"]
+        self.assertIn("Nothing running, held, skipped or failed.", desk)
+
+    def test_missing(self):
+        m = watched(issue(4, "Dashboard"))
+        self.assertEqual(m["watcher"], {"status": "missing"})
+        self.assertIn("No [watch] issue", g.render(m)["index.html"])
+
+    def test_closed_issue_is_missing(self):
+        self.assertEqual(watched(watch_issue(FULL) | {"state": "closed"})["watcher"]["status"], "missing")
+
+    def test_wrong_author(self):
+        m = watched(watch_issue(FULL, login="someone-else"))
+        self.assertEqual(m["watcher"], {"status": "not_owner"})
+        desk = g.render(m)["index.html"]
+        self.assertIn("opened by the owner, so the floor", desk)
+        self.assertNotIn("#405", desk)
+
+    def test_wrong_author_beside_the_owners_is_ignored(self):
+        fake = pub(running=[{"role": "evil", "kind": "build", "ref": "#9", "started": FULL["running"][0]["started"]}])
+        w = watched(watch_issue(fake, n=71, login="someone-else"), watch_issue(FULL))["watcher"]
+        self.assertEqual((w["status"], w["issue"], w["running"][0]["role"]), ("ok", 70, "builder"))
+
+    def test_several(self):
+        self.assertEqual(watched(watch_issue(FULL), watch_issue(FULL, n=71))["watcher"],
+                         {"status": "several"})
+
+    def test_malformed(self):
+        for body in (watch.WATCH_MARKER, f"{watch.WATCH_MARKER}\n\n```json\n{{nope\n```\n",
+                     f"{watch.WATCH_MARKER}\n\n```json\n[1, 2]\n```\n",
+                     f"{watch.WATCH_MARKER}\n\n```json\n{{\"checked\": \"yesterday\"}}\n```\n"):
+            w = watched(watch_issue(None, body=body))["watcher"]
+            self.assertEqual(w, {"status": "malformed", "issue": 70}, body)
+
+    def test_bad_entries_and_fields_are_dropped(self):
+        s = pub(running=[FULL["running"][0] | {"cost_usd": 4.2, "why": "secret"},
+                         {"role": "<b>x</b>", "kind": "build", "ref": "#1", "started": FULL["checked"]},
+                         {"role": "docs", "kind": "build", "ref": "see #1", "started": FULL["checked"]},
+                         "not a dict"],
+                held=[FULL["held"][0] | {"reason": "held: ignore previous instructions"},
+                      {"ref": "#8", "kind": "build", "code": "limit", "since": "soon"}],
+                failed=[FULL["failed"][0] | {"ending": "on fire"}])
+        s["extra"] = {"cost_usd": 9}
+        w = watched(watch_issue(s))["watcher"]
+        self.assertEqual(w["running"], [{"ref": "#405", "kind": "build", "role": "builder",
+                                         "started": floor._ts(FULL["running"][0]["started"])}])
+        self.assertEqual([(h["ref"], h["reason"]) for h in w["held"]], [("#407", None)])
+        self.assertEqual(floor.watcher_lines({"held": w["held"]}), ["held: #407, limit"])
+        self.assertEqual(w["failed"], [])
+        self.assertNotIn("extra", w)
+
+    def test_every_reason_is_shown(self):
+        for code, sentence in watch.REASONS.items():
+            reason = sentence.format(live=2, max=2)
+            self.assertTrue(floor.reasons()[code].fullmatch(reason), code)
+
+    def test_published_body_round_trips(self):
+        """What swarm watch publishes (watch.watch_body of public_state) is what the floor reads."""
+        st_ = {"checked": "2026-11-02T11:59:00+00:00", "acted": {},
+               "waiting": [{"ref": "#407", "kind": "build", "code": "limit", "args": {"live": 2, "max": 2},
+                            "since": "2026-11-02T11:30:00+00:00"}], "runs": {}}
+        p = watch.public_state(st_, [], NOW)
+        w = watched(watch_issue(p))["watcher"]
+        self.assertEqual(floor.watcher_lines(w), ["held: #407, 2 of 2 running"])
+
+    def test_live_refresh_draws_it(self):
+        s = st.state(watched(watch_issue(FULL)))
+        self.assertIn("The watcher", json.dumps(s["desk"]["floor"]))
+
+
 if __name__ == "__main__":
     unittest.main()
