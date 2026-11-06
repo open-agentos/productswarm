@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from unittest import mock
 from pathlib import Path
 from unittest import mock
 
@@ -496,6 +497,27 @@ class LsTest(Base):
             ["-", "planner", M, "-", "blocked on #43", "now", "-", "not launcher", "sid-x"],
             ["docs-1", "docs", M, "-", "no heartbeat yet", "-", "-", "running", "sid-d"],
         ])
+
+    def test_never_acted_only_with_all(self):   # #454
+        now = dt.datetime(2026, 11, 2, 18, 0, tzinfo=dt.timezone.utc)
+        model = {"sessions": [
+            {"session_id": "sid-new", "role": "builder", "model": None, "issue": None, "status": "idle",
+             "gov_question": None, "last_ts": None, "never_acted": False},
+            {"session_id": "sid-empty", "role": "reviewer", "model": None, "issue": None, "status": "idle",
+             "gov_question": None, "last_ts": None, "never_acted": True},
+        ]}
+        rows = swarm.ls_rows(model, [], lambda e: "running", now, lambda t, n: "never")
+        self.assertEqual([r[-1] for r in rows], ["sid-new"])
+        rows = swarm.ls_rows(model, [], lambda e: "running", now, lambda t, n: "never", show_all=True)
+        self.assertEqual([(r[4], r[-1]) for r in rows],
+                         [("idle", "sid-new"), ("idle, never acted", "sid-empty")])
+
+    def test_ls_all_flag_reaches_ls_rows(self):
+        seen = []
+        with mock.patch.object(swarm, "ls", lambda l, repo, idle, show_all=False: seen.append(show_all) or 0):
+            swarm.main(["ls", "--repo", "o/r"], self.l)
+            swarm.main(["ls", "--all", "--repo", "o/r"], self.l)
+        self.assertEqual(seen, [False, True])
 
     def test_spend_column(self):
         usd = lambda x: "-" if x is None else f"${x:,.2f}"  # noqa: E731

@@ -7,6 +7,7 @@ The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session`
 ```bash
 launcher/swarm up [--dry-run]   # start every manifest session that isn't running
 launcher/swarm ls               # live sessions, from the heartbeat tracking issues
+launcher/swarm ls --all         # also sessions that never acted, marked
 launcher/swarm stop builder-1   # end one session the launcher started (name or session id)
 ```
 
@@ -24,7 +25,7 @@ ops/swarm-session <role> --model <model> --session-id <uuid> "<the usual opener 
 
 Sessions you start by hand with `ops/swarm-session` still run in this checkout. CLAUDE.md asks them to do branch work in their own worktree and leave this checkout on `main`.
 
-**`ls`** reads the tracking issues through the dashboard's reader (`dashboard/generate.py`), so status, current issue and last activity mean exactly what they mean on the dashboard. It shows every live session, including ones you started by hand (`PROCESS: not launcher`). A session the launcher just started appears as `no heartbeat yet` until its first event reaches GitHub.
+**`ls`** reads the tracking issues through the dashboard's reader (`dashboard/generate.py`), so status, current issue and last activity mean exactly what they mean on the dashboard. It shows every live session, including ones you started by hand (`PROCESS: not launcher`). A session the launcher just started appears as `no heartbeat yet` until its first event reaches GitHub. A session that never acted (its tracking issue has no events and is older than `--idle-minutes`, like the empty `[heartbeat] reviewer` issues Actions runs left behind) is left out of `ls`, `inbox` and the dashboard's floor and needs-you list; `ls --all` lists it as `idle, never acted` (#454). A newer one with no events stays listed, as its first event may still be on its way.
 
 **`stop`** sends SIGTERM. Claude Code runs its `SessionEnd` hook on SIGTERM, so the heartbeat records `stopped` and the dashboard shows the session as stopped. `stop` waits up to 20 seconds and then tells you whether the heartbeat recorded the stop. It only stops sessions the launcher started, and only you run it (GOV-0008: the launcher never stops a session on its own).
 

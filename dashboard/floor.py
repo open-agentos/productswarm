@@ -9,7 +9,7 @@ can't give, it says how many of those slots used each kind of tool. A new captur
 as a per-event tool-call count, is a GOV-0002 `security` question, not something this module adds.
 
 Idle sessions share one quiet line ("idle: docs 40 min, reviewer 2 h"). Stopped ones aren't on
-the floor. Nothing here carries tokens or cost (GOV-0014; #397).
+the floor, and nor are sessions that never acted (generate.derive()'s `never_acted`, #454). Nothing here carries tokens or cost (GOV-0014; #397).
 
 Reads only the events generate.build() already parsed: no API calls.
 """
@@ -101,7 +101,9 @@ def card(s: dict, events: list[dict], now: dt.datetime) -> dict:
 
 
 def build(sessions: list[tuple[dict, list[dict]]], now: dt.datetime) -> dict:
-    """The floor from (session, its events) pairs, in the sessions' page order."""
+    """The floor from (session, its events) pairs, in the sessions' page order.
+    Sessions that never acted (#454) are left out."""
+    sessions = [(s, ev) for s, ev in sessions if not s.get("never_acted")]
     cards = [card(s, ev, now) for s, ev in sessions if s["status"] in ("active", "blocked")]
     idle = [{"session_id": s["session_id"], "role": s["role"],
              "idle_minutes": int((now - s["last_ts"]).total_seconds() // 60) if s["last_ts"] else None}

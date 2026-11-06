@@ -2,7 +2,8 @@
 """swarm: start, list and stop the sessions in swarm.toml (v1 launcher, GOV-0005 item L2).
 
     launcher/swarm up [--dry-run]   start every manifest session that isn't already running
-    launcher/swarm ls               list live sessions from the heartbeat tracking issues
+    launcher/swarm ls [--all]       list live sessions from the heartbeat tracking issues;
+                                    --all adds sessions that never acted (#454)
     launcher/swarm stop <session>   end one session the launcher started (name or session id)
     launcher/swarm launch <role> --issue N [--pr M] [--model M] [--force] [--dry-run]
                                     start one session on issue N (L3); with --pr, it
@@ -572,22 +573,24 @@ def process_cell(e: Started, local_state: Callable[[Started], str]) -> str:
 
 
 def ls_rows(model: dict, started: list[Started], local_state: Callable[[Started], str],
-            now: dt.datetime, ago: Callable, usd: Callable = lambda x: "-" if x is None else f"${x:,.2f}"
-            ) -> list[list[str]]:
+            now: dt.datetime, ago: Callable, usd: Callable = lambda x: "-" if x is None else f"${x:,.2f}",
+            show_all: bool = False) -> list[list[str]]:
     """One row per live heartbeat session, plus launcher sessions with no heartbeat yet.
+    Sessions that never acted (#454) are left out unless show_all, which marks them.
 
     model is dashboard/generate.py's build() output, so status, current issue and last
     activity are read exactly as the dashboard reads them."""
     by_sid = {e.session_id: e for e in started}
     rows, seen = [], set()
     for s in model["sessions"]:
-        if s["status"] == "stopped":
+        if s["status"] == "stopped" or (s.get("never_acted") and not show_all):
             continue
         e = by_sid.get(s["session_id"])
         seen.add(s["session_id"])
         rows.append([e.name if e else "-", s["role"], s["model"] or "-",
                      f"#{s['issue']}" if s["issue"] else "-",
-                     s["status"] + (f" on #{s['gov_question']}" if s["gov_question"] else ""),
+                     s["status"] + (f" on #{s['gov_question']}" if s["gov_question"] else "")
+                     + (", never acted" if s.get("never_acted") else ""),
                      ago(s["last_ts"], now), spend_cell(s, usd),
                      process_cell(e, local_state) if e else "not launcher", s["session_id"]])
     for e in started:
@@ -623,11 +626,11 @@ def heartbeat(repo: str, idle_minutes: int, now: dt.datetime) -> dict:
     return snapshot(repo, idle_minutes, now)[1]
 
 
-def ls(launcher: Launcher, repo: str, idle_minutes: int) -> int:
+def ls(launcher: Launcher, repo: str, idle_minutes: int, show_all: bool = False) -> int:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     model = heartbeat(repo, idle_minutes, now)
     g = dashboard()
-    rows = ls_rows(model, launcher.live(), launcher.state, now, g.ago, g.spend.usd)
+    rows = ls_rows(model, launcher.live(), launcher.state, now, g.ago, g.spend.usd, show_all)
     if not rows:
         launcher.out("no live sessions")
     else:
@@ -828,6 +831,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_ls = sub.add_parser("ls", help="list live sessions from heartbeat data")
     p_ls.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_ls.add_argument("--idle-minutes", type=int, default=15)
+    p_ls.add_argument("--all", action="store_true", dest="show_all",
+                      help="also list sessions that never acted, marked (#454)")
     p_stop = sub.add_parser("stop", help="end one session the launcher started")
     p_stop.add_argument("session", help="its name (builder-1) or session id")
     p_inbox = sub.add_parser("inbox", help="what's waiting on the owner, most urgent first")
@@ -888,7 +893,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                 return 1
             return launcher.up(sessions, dry_run=args.dry_run)
         if args.cmd == "ls":
-            return ls(launcher, repo, args.idle_minutes)
+            return ls(launcher, repo, args.idle_minutes, args.show_all)
         if args.cmd == "inbox":
             return inbox(launcher, repo, args.idle_minutes, args.manifest)
         if args.cmd == "cost":
