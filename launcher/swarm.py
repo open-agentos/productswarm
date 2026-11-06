@@ -111,7 +111,8 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     that it posts one comment."""
     if issue and called_by:
         # "issue #M" in the why would give the heartbeat two issues and so none: say "#M".
-        why = f" because: {ISSUE_WORD_RE.sub(r'#\1', call_why)}" if call_why else ""
+        safe = ISSUE_WORD_RE.sub(r"#\1", call_why) if call_why else ""
+        why = f" because: {safe}" if safe else ""
         then = (f"answer a call-in on issue #{issue}: {called_by} called you in (GOV-0023){why}. "
                 f"That call counts as asking you in (GOVERNANCE.md section 8). Read the issue, post "
                 f"one comment on it with your contribution, and stop")
