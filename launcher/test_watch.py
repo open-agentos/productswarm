@@ -2172,6 +2172,103 @@ class CallInTest(unittest.TestCase):
             self.assertEqual(watch.swarm_apps(Path(d) / "nope.yml")[0], {})
 
 
+
+class MilestoneCallInTest(unittest.TestCase):
+    """#594 (GOV-0029): `Call in:` lines count on an issue under an open PLAN.md milestone,
+    not only on a `ready` one. #90 is under M1 with no `ready`; #60 is ready."""
+
+    setUp_call = CallInTest.setUp
+    manifest, tick, called, say = CallInTest.manifest, CallInTest.tick, CallInTest.called, CallInTest.say
+
+    def setUp(self):
+        self.setUp_call()
+        sc = self.scene
+        sc.plan = MILESTONE_PLAN
+        sc.prs.append(pr(73, SHA2, closes=(90,)))        # no [build] on #90 to take a slot
+        self.put(milestone_issue(90))
+
+    def put(self, it, events=()):
+        self.scene.issues = [i for i in self.scene.issues if i["number"] != it["number"]] + [it]
+        self.scene.events[it["number"]] = list(events)
+
+    def watcher(self, dry_run=False):
+        return watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=dry_run, manifest_path=self.path,
+                           read=self.scene.read, get_issue=self.scene.get_issue,
+                           get_heartbeat=self.scene.heartbeat, get_reader=self.scene.get_reader)
+
+    def test_a_call_on_a_milestone_issue_without_ready_starts_the_role(self):
+        self.say(call(501, "Call in: docs: check the wording"), n=90)
+        self.assertEqual([t.key for t in self.tick()], ["call-in:90:501:docs"])
+        self.assertEqual(self.called(), [("docs-issue-90", "docs", 90,
+                                          "the builder (productswarm-builder[bot])", "check the wording")])
+        self.assertEqual(self.tick(), [])                 # once per call
+
+    def test_the_owners_call_and_a_blocked_issue_still_count(self):
+        self.put(milestone_issue(90, waits="#456."))
+        self.scene.issues.append(issue(456, title="the blocker"))
+        self.say(call(501, "Call in: planner: plan it", who=OWNER), n=90)
+        self.assertEqual([t.key for t in self.tick()], ["call-in:90:501:planner"])
+
+    def test_no_milestone_or_a_closed_one_doesnt_count(self):
+        no_plan = lambda: setattr(self.scene, "plan", None)
+        cases = {
+            "no milestone line": lambda: self.put(issue(90, body="**Milestone:** no milestone yet\n")),
+            "done milestone": lambda: self.put(milestone_issue(90, "M2")),
+            "milestone not in PLAN.md": lambda: self.put(milestone_issue(90, "M9")),
+            "no PLAN.md on main": no_plan,
+            "non-swarm author": lambda: self.put(milestone_issue(90, author="stranger")),
+            "hold label": lambda: self.put(milestone_issue(90, labels=("hold",))),
+            "gov:question": lambda: self.put(milestone_issue(90, labels=("gov:question",))),
+        }
+        for case, change in cases.items():
+            with self.subTest(case):
+                self.setUp()
+                change()
+                self.say(call(501, "Call in: docs: x"), n=90)
+                self.assertEqual(self.tick(), [], case)
+                self.assertEqual(self.called(), [], case)
+
+    def test_a_ready_milestone_issue_starts_each_role_once(self):
+        self.put(milestone_issue(90, labels=("ready",)), [{**ev("ready", eid=15), "created_at": ts(10)}])
+        self.say(call(501, "Call in: docs: before ready", at=ts(20)),
+                 call(502, "Call in: planner: after ready", at=ts(5)), n=90)
+        self.assertEqual([t.key for t in self.tick()], ["call-in:90:501:docs", "call-in:90:502:planner"])
+        self.assertEqual(sorted(c[0] for c in self.called()), ["docs-issue-90", "planner-issue-90"])
+        self.assertEqual(self.tick(), [])
+
+    def test_the_per_day_limit_counts_across_both(self):
+        self.put(milestone_issue(90, labels=("ready",)),
+                 [{**ev("ready", eid=15), "created_at": "2026-11-03T09:30:00Z"}])
+        self.say(call(501, "Call in: docs: before ready", at="2026-11-03T09:00:00Z"),
+                 call(502, "Call in: reviewer: after ready", at="2026-11-03T10:00:00Z"),
+                 call(503, "Call in: planner: third", at="2026-11-03T11:00:00Z"), n=90)
+        done = {t.key: t.skipped for t in self.tick()}
+        self.assertEqual(done["call-in:90:503"], "#90 already has 2 calls on 2026-11-03 (UTC), the most "
+                                                 "that count per issue per day (GOV-0023)")
+        self.assertEqual(sorted(c[0] for c in self.called()), ["docs-issue-90", "reviewer-issue-90"])
+
+    def test_the_switch_off_covers_milestone_calls(self):
+        self.manifest(ALL_CAPPED)
+        self.say(call(501, "Call in: docs: x"), n=90)
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.called(), [])
+
+    def test_a_milestone_marked_done_before_the_start_refuses_it(self):
+        self.say(call(501, "Call in: docs: x"), n=90)
+        w = self.watcher()
+        real = self.scene.get_reader
+        done = MILESTONE_PLAN.replace("## M1: Daily report runs without the owner",
+                                      "## M1: Daily report runs without the owner\n\n- **Status:** done")
+        self.scene.get_reader = lambda repo, n: swarm.GoReader(plan=lambda: done,
+                                                               state=real(repo, n).state,
+                                                               comments=real(repo, n).comments)
+        w.get_reader = self.scene.get_reader
+        w.tick(NOW)
+        self.assertEqual(self.called(), [])
+        self.assertTrue(any("marked done" in x for x in self.lines if x.startswith("[call-in] #90")),
+                        self.lines)
+
+
 DAILY_ON = 'daily = true\ndaily_at = "08:30"\nreport_issue = 600\n'
 TUE = dt.datetime(2026, 11, 3, 12, 0, tzinfo=dt.timezone.utc)    # NOW: a Tuesday
 UTC = dt.timezone.utc

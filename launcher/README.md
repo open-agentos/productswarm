@@ -184,7 +184,7 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respo
 | `[record]` A `gov:question` whose most recent `gov:ruled` was added by the owner and that needs a record (GOV-0007), with no open PR closing it | `docs` on the question |
 | `[answer]` A `gov:question` whose most recent `ready` was added by the owner, and again when the owner then adds `gov:ruled` (#495) | the role in its "Raised by" field, on the question. If the field starts with `owner` or the owner's login, `planner` (#455) |
 | `[respond]` An open, non-draft PR that `productswarm-builder[bot]` opened, whose latest `productswarm-reviewer[bot]` review at its current head is "changes requested", and whose **Authority** line isn't `fail`, for at most 2 rounds (GOV-0011) | `builder` on the PR, as `swarm launch builder --issue N --pr M` would, where #N is the one issue the PR closes |
-| `[call-in]` A comment on an issue whose most recent `ready` was added by the owner, posted since that label by a swarm App or the owner, with a line `Call in: <role>, <role>: <why>` (GOV-0023, #520). Off unless `call_ins = true` (see "Call-ins" below) | each named role on the issue, once per call, with a prompt that says who called it in and why, and that it posts one comment |
+| `[call-in]` A comment on an issue whose most recent `ready` was added by the owner, posted since that label, or on an issue under an open `PLAN.md` milestone (GOV-0029, #594), by a swarm App or the owner, with a line `Call in: <role>, <role>: <why>` (GOV-0023, #520). Off unless `call_ins = true` (see "Call-ins" below) | each named role on the issue, once per call, with a prompt that says who called it in and why, and that it posts one comment |
 | `[daily]` A working day (Monday to Friday, this machine's local time) at or after `daily_at`, once per day (GOV-0029, #588). Off unless `daily = true` (see "The daily report" below) | `planner` on the report issue, to write the daily report; on Mondays, the daily report and the Monday check-in |
 | `[ask]` The owner's comment on the report issue with a line `Ask: <role>: <question>` (GOV-0029, #590). Off unless `asks = true` (see "Owner asks" below) | the named role on the report issue, once per comment, with a prompt that quotes the question and says it answers in one comment there |
 | `[research]` A comment by the owner or `productswarm-planner[bot]` on an open issue with a line `Research: <question>` (GOV-0029, #591). Off unless `research = true` (see "Research briefs" below) | `analyst` on that issue, once per comment, with a prompt that quotes the question and says the brief goes in `research/` as a PR that closes the issue |
@@ -360,7 +360,7 @@ review_in_actions = true   # optional; default false
 
 ### Call-ins
 
-GOV-0023 lets a swarm App or the owner bring other roles into a `ready` issue by commenting `Call in: <role>, <role>: <why>` (#520). A switch in `[watch]` turns it on:
+GOV-0023 lets a swarm App or the owner bring other roles into a `ready` issue by commenting `Call in: <role>, <role>: <why>` (#520). GOV-0029 adds issues under an open `PLAN.md` milestone (#594). One switch in `[watch]` turns both on:
 
 ```toml
 [watch]
@@ -368,13 +368,17 @@ call_ins = true   # optional; default false
 ```
 
 - **The line.** Any line of the comment that starts `Call in:` (any case). The roles are the comma-separated names before the next colon; the why is the rest of that line, up to 300 characters. Only the first such line in a comment counts.
-- **Who.** The owner, or a login under `identities.agents` in `governance/jurisdictions.yml` (the list GOV-0024 trusts). Anyone else's call is skipped with a reason. A call posted before the owner's most recent `ready` on the issue doesn't count. `gov:question`s the owner labelled `ready` count too.
+- **Who.** The owner, or a login under `identities.agents` in `governance/jurisdictions.yml` (the list GOV-0024 trusts). Anyone else's call is skipped with a reason. `gov:question`s the owner labelled `ready` count too.
+- **Which issues.** Either source opens an issue to calls:
+  - **`ready`:** the owner added its most recent `ready`. Calls count from that label.
+  - **A milestone:** an open, non-question issue that is go by its milestone (GOV-0026): opened by a swarm App or the owner, its `**Milestone:** M<n>` names a milestone in `PLAN.md` on `main` that isn't marked done, and no `hold` label. Unlike a milestone build, an open `**Waits on:**` issue doesn't stop it, and nor does an owner comment (so the owner's own `Call in:` counts). GitHub doesn't say when a body gained its milestone line, so calls count from the issue's creation.
+  - **Both:** the issue is read once, from its creation, so each call starts each role once and the daily limit counts calls from both. Just before the start, the issue is checked again on fresh data: the owner's `ready`, or else its milestone.
 - **Once per call.** Each named role is one trigger, keyed on the comment id and the role, so it starts once. A role naming itself, or a name with no prompt in `roles/`, is skipped with a reason.
 - **At most 2 calls per issue per UTC day**, by when the comment was posted. A call that names no role it could start doesn't count. Later calls that day are skipped with a reason.
 - **Limits.** A call-in run is a headless run like any other: it counts toward `max_live`, needs the role's `spend_cap_usd`, and gets the budget, turn ceiling and denies (GOV-0010, GOV-0012, GOV-0013).
 - **Beside the caller.** It waits only while a session of the **same role** is live on the issue; the caller (often a live builder) and other roles don't hold it.
 - **The run.** Its prompt says it was called in, by whom and why, that the call counts as asking it in (GOVERNANCE.md §8), and that it posts one comment and stops. The Stop hook puts no condition on it.
-- **Off or missing.** Each call is logged once as `skipped: call-ins are off …` and starts nothing. It isn't recorded in `watch.json`, so turning the switch on starts the calls still waiting on `ready` issues (within the daily limit).
+- **Off or missing.** Each call is logged once as `skipped: call-ins are off …` and starts nothing. It isn't recorded in `watch.json`, so turning the switch on starts the calls still waiting on `ready` or milestone issues (within the daily limit).
 - It must be `true` or `false`; anything else is an error. `swarm.toml` is read on every check, so it applies without a restart. The owner commits `swarm.toml`.
 
 ### The daily report
