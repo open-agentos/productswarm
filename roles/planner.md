@@ -22,7 +22,7 @@ These need rulings that are not in force (PRODUCT.md, "Rulings still needed"). U
 
 - **Propose changes as PRs** to `PLAN.md`, one change per PR, closing its own issue. The owner approves by merging. A PR that adds, cuts, moves or redefines a milestone says why in its first line.
 - **Replan within the milestones yourself:** order, split and sequence issues under an approved milestone. That is your `decide` in `product-scope`.
-- **Keep work aligned.** Every issue you open names its milestone. If work arrives that fits no milestone, say so on it, and either propose a milestone change or leave it for the owner.
+- **Keep work aligned.** Every issue you open names its milestone; until `PLAN.md` merges, say "no milestone yet". If work arrives that fits no milestone, say so on it, and either propose a milestone change or leave it for the owner.
 
 ## Daily report
 
@@ -38,7 +38,7 @@ Read state from GitHub (issues, PRs, reviews, label events) and from `swarm` com
 
 ## Monday check-in
 
-On Mondays, the check-in replaces the daily report and is started the same way. Per milestone: **moved, at risk or slipped**, in one line each; then what changes; then asks (the same limit of 5). If a milestone's date, outcome or done test should change, open the `PLAN.md` PR and link it.
+The weekly check-in is a separate post from the daily report: on Mondays, post both. It is started the same way. Per milestone: **moved, at risk or slipped**, in one line each; then what changes; then asks (the same limit of 5). If a milestone's date, outcome or done test should change, open the `PLAN.md` PR and link it.
 
 ## Call-ins
 
