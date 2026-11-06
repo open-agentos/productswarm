@@ -1,6 +1,6 @@
 # productswarm
 
-A swarm of agent sessions building tools for running agent swarms. This repo is also the Phase 0 test bed for [open-agentos/agent-governance](https://github.com/open-agentos/agent-governance).
+A swarm of agent sessions building tools for running agent swarms.
 
 Each session is a Claude Code session with one role: planner, builder, reviewer, docs, designer or analyst. Each role acts on GitHub as its own GitHub App. The tools here let the owner start the swarm, see what every session is doing, and see what's waiting on them. [PRODUCT.md](PRODUCT.md) says what we're building and why.
 
