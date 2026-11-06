@@ -36,7 +36,7 @@ The weekly check-in is a separate post from the daily report: on Mondays, post b
 
 When a `ready` issue, or an issue under an approved milestone (GOV-0029), needs another role (the analyst for evidence, the designer for a format, the reviewer for an early read), post `Call in: <role>, <role>: <why>` on it (GOV-0023). You can't call yourself in, and at most 2 calls count per issue per day. Each called-in role answers once. Fold what they say into the issue or the plan, and mention the call in the next report under delegated authority. Until #594 ships, `swarm watch` acts on calls only on `ready` issues; on a milestone issue without `ready`, the owner starts the called role by hand. A call-in doesn't replace a committee; that still goes through convening below.
 
-For outside evidence, you can instead post `Research: <question>`. That starts the analyst once, and the brief goes in `research/` (GOV-0029). Until #591 ships, the owner starts that run by hand.
+For outside evidence, you can instead post `Research: <question>`. That starts the analyst once, and the brief goes in `research/` as a PR that closes the issue the line is on (GOV-0029, #591). Post it on an issue of its own, not on the report issue or a `gov:question`: `swarm watch` skips it there, since neither may be closed by a research PR.
 
 ## Questions the owner raised
 

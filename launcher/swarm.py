@@ -105,7 +105,8 @@ STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 def opener(role: str, issue: int | None = None, pr: int | None = None,
            called_by: str | None = None, call_why: str | None = None,
            daily: str | None = None, ask: str | None = None,
-           ask_comment: int | None = None) -> str:
+           ask_comment: int | None = None, research: str | None = None,
+           research_comment: int | None = None) -> str:
     """The prompt ops/swarm-session uses when given no args (it passes args on unchanged).
 
     With an issue, it names it: the heartbeat's `working_on` detection matches
@@ -116,8 +117,19 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     that it posts one comment. With daily, a [daily] run (GOV-0029, #588): the planner posts
     `daily` ("the daily report", or on Mondays "the daily report and the Monday check-in")
     on the report issue. With ask, an [ask] run (GOV-0029, #590): the role answers the
-    owner's question, from comment ask_comment on the report issue, in one comment there."""
-    if issue and ask:
+    owner's question, from comment ask_comment on the report issue, in one comment there.
+    With research, a [research] run (GOV-0029, #591): the analyst writes a brief on the
+    question from comment research_comment in research/, as a PR that closes the issue."""
+    if issue and research:
+        # As for an ask: "issue #M" in the question would give the heartbeat two issues.
+        safe = ISSUE_WORD_RE.sub(r"#\1", research)
+        where = f" (comment {research_comment})" if research_comment else ""
+        then = (f"research the question posted on issue #{issue}{where}: \"{safe}\". swarm watch "
+                f"started this run from its [research] trigger (GOV-0029). Write the brief in "
+                f"research/<slug>.md as roles/{role}.md says, open a PR that closes #{issue}, link it "
+                f"in one comment on #{issue}, and stop. If you can't, say why in one comment on "
+                f"#{issue}, and stop")
+    elif issue and ask:
         # As for a call-in's why: "issue #M" in the question would give the heartbeat two issues.
         safe = ISSUE_WORD_RE.sub(r"#\1", ask)
         where = f" (comment {ask_comment})" if ask_comment else ""
@@ -215,6 +227,8 @@ class Started:
     daily: str | None = None          # a [daily] run (GOV-0029, #588): what it writes
     ask: str | None = None            # an [ask] run (GOV-0029, #590): the owner's question
     ask_comment: int | None = None    # and the id of the comment that asked it
+    research: str | None = None       # a [research] run (GOV-0029, #591): the question
+    research_comment: int | None = None   # and the id of the comment that asked it
 
     @classmethod
     def from_dict(cls, d: dict) -> "Started":
@@ -222,7 +236,8 @@ class Started:
                    issue=d.get("issue"), by=d.get("by"), pr=d.get("pr"),
                    budget_usd=d.get("budget_usd"), max_turns=d.get("max_turns"),
                    called_by=d.get("called_by"), call_why=d.get("call_why"),
-                   daily=d.get("daily"), ask=d.get("ask"), ask_comment=d.get("ask_comment"))
+                   daily=d.get("daily"), ask=d.get("ask"), ask_comment=d.get("ask_comment"),
+                   research=d.get("research"), research_comment=d.get("research_comment"))
 
 
 def recovered(sid: str, cmd: str, started: float) -> Started:
@@ -487,7 +502,7 @@ class Launcher:
         session = ["exec", shlex.quote(str(wt / "ops" / "swarm-session")), shlex.quote(s.role),
                    "--model", shlex.quote(s.model), "--session-id", s.session_id]
         prompt = shlex.quote(opener(s.role, s.issue, s.pr, s.called_by, s.call_why, s.daily,
-                                    s.ask, s.ask_comment))
+                                    s.ask, s.ask_comment, s.research, s.research_comment))
         if s.by == "watch":
             result = shlex.quote(str(self.result_file(s.session_id)))
             note = shlex.quote(f"swarm: headless run (claude -p); it ends when done or at its budget, "

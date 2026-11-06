@@ -36,7 +36,7 @@ Anything you find that the swarm should act on becomes a new unlabelled issue, n
 
 ## Started by `Research:`
 
-A `Research: <question>` line from the owner or the planner starts you once (GOV-0029). The brief goes in `research/`, through a PR like your others, and you link it in one comment where the line was posted. Until `swarm watch`'s `[research]` ships (#591), the owner starts these runs by hand.
+A `Research: <question>` line from the owner or the planner starts you once (GOV-0029). A `[research]` run from `swarm watch` (#591) names the issue the line is on and quotes the question: write the brief in `research/<slug>.md`, open a PR that closes that issue, link it in one comment on the issue, and stop. If you can't, say why in one comment on the issue, and stop. The Stop hook holds the run until one of those is done. With `swarm watch`'s `research` switch off, the owner starts these runs by hand.
 
 ## Started by an `Ask:`
 

@@ -385,6 +385,39 @@ class AsksTest(Base):
         self.assertIs(m.load_watch(m.DEFAULT_PATH).asks, False)
 
 
+class ResearchTest(Base):
+    """[watch] research (#591, GOV-0029): off by default; it needs no report_issue."""
+    WATCH = "[watch]\ninterval_minutes = 5\nmax_live = 2\nmax_turns = 200\n"
+
+    def limits(self, extra=""):
+        return m.parse_all(self.WATCH + extra + session(), Path("swarm.toml"), self.roles)[1]
+
+    def test_off_by_default(self):
+        self.assertIs(self.limits().research, False)
+
+    def test_on_alone(self):
+        limits = self.limits("research = true\n")
+        self.assertIs(limits.research, True)
+        self.assertIsNone(limits.report_issue)
+
+    def test_must_be_true_or_false(self):
+        with self.assertRaises(m.ManifestError) as cm:
+            self.limits('research = "yes"\n')
+        self.assertEqual(cm.exception.problems, ["watch: research must be true or false, got 'yes'"])
+
+    def test_cli_shows_it(self):
+        path = self.dir / "swarm.toml"
+        for extra, shown in (("research = true\n", "[research] on"), ("", "[research] off")):
+            path.write_text(self.WATCH + extra + session())
+            out = io.StringIO()
+            with redirect_stdout(out), unittest.mock.patch.object(m, "ROOT", self.dir):
+                self.assertEqual(m.main(["manifest.py", str(path)]), 0)
+            self.assertIn(shown, out.getvalue().splitlines()[-1].split("\t"))
+
+    def test_repo_manifest_leaves_it_off(self):
+        self.assertIs(m.load_watch(m.DEFAULT_PATH).research, False)
+
+
 class ActionsMaxReviewsTest(Base):
     """[watch] actions_max_reviews (#257): optional, a whole number of at least 1."""
     WATCH = "[watch]\ninterval_minutes = 5\nmax_live = 2\nmax_turns = 200\n"

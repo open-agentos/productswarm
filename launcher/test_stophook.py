@@ -64,10 +64,11 @@ class HookCase(unittest.TestCase):
         self.gh = FakeGitHub()
 
     def run_as(self, role, issue_n=None, pr=None, by="watch", called_by=None, daily=None,
-               ask=None, ask_comment=None):
+               ask=None, ask_comment=None, research=None, research_comment=None):
         e = swarm.Started(name=f"{role}-x", role=role, model="m", session_id=SID, started=T0,
                           issue=issue_n, pr=pr, by=by, called_by=called_by, daily=daily,
-                          ask=ask, ask_comment=ask_comment)
+                          ask=ask, ask_comment=ask_comment, research=research,
+                          research_comment=research_comment)
         (self.home / "launcher" / "sessions.json").write_text(json.dumps([e.__dict__]))
 
     def decide(self, active=False):
@@ -399,6 +400,59 @@ class AskTest(HookCase):
         self.run_as("builder", 600, ask="why is M1 late?", ask_comment=901)
         e = stophook.entry_for(self.home, SID)
         self.assertEqual((e.ask, e.ask_comment), ("why is M1 late?", 901))
+
+
+ANALYST = "productswarm-analyst[bot]"
+
+
+class ResearchTest(HookCase):
+    """#591: a [research] run stops once a PR it opened touches research/ and names its
+    issue, or once it has commented on the issue (saying why it can't)."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_as("analyst", 300, research="who ships a daily report?", research_comment=901)
+        self.gh.put("issues/300", issue(300, labels=()))
+        self.gh.put("issues/300/comments", [])
+        self.gh.put("pulls", [])
+
+    def brief_pr(self, n=40, who=ANALYST, at=AFTER, body="Closes #300", files=("research/daily.md",)):
+        self.gh.put("pulls", [{"number": n, "user": {"login": who}, "created_at": at,
+                               "title": "Research: daily reports", "body": body}])
+        self.gh.put(f"pulls/{n}/files", [{"filename": f} for f in files])
+
+    def test_no_pr_and_no_comment_blocks(self):
+        self.assertBlocks("No PR of yours", "touches research/", "#300", "say why in one comment")
+
+    def test_its_pr_touching_research_lets_it_stop(self):
+        self.brief_pr()
+        self.assertAllows()
+
+    def test_a_pr_that_doesnt_count_blocks(self):
+        for kw in (dict(files=("launcher/watch.py",)), dict(who=ME["builder"]), dict(at=BEFORE),
+                   dict(body="Closes #301")):
+            with self.subTest(**{k: str(v) for k, v in kw.items()}):
+                self.brief_pr(**kw)
+                (self.home / "launcher" / f"{SID}.stop.json").unlink(missing_ok=True)  # MAX_BLOCKS
+                self.assertBlocks("No PR of yours")
+
+    def test_a_comment_on_the_issue_lets_it_stop(self):
+        self.gh.put("issues/300/comments", [{"user": {"login": ANALYST}, "created_at": AFTER,
+                                             "body": "Can't: no public sources yet."}])
+        self.assertAllows()
+
+    def test_someone_elses_or_an_earlier_comment_doesnt(self):
+        self.gh.put("issues/300/comments", [{"user": {"login": OWNER}, "created_at": AFTER},
+                                            {"user": {"login": ANALYST}, "created_at": BEFORE}])
+        self.assertBlocks("No PR of yours")
+
+    def test_a_closed_issue_lets_it_stop(self):
+        self.gh.put("issues/300", issue(300, labels=(), state="closed"))
+        self.assertAllows()
+
+    def test_the_entry_keeps_the_research_across_a_save(self):
+        e = stophook.entry_for(self.home, SID)
+        self.assertEqual((e.research, e.research_comment), ("who ships a daily report?", 901))
 
 
 class GuardTest(HookCase):
