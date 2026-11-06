@@ -175,6 +175,8 @@ The launcher adds these to the usual `ops/swarm-session <role> --model <model> -
 
 The run still opens in its own Terminal window, so the pid file, `swarm ls` and `swarm stop` work as before, and the heartbeat hook still records `started` and `stopped`. Before the run starts, the window prints one line saying it is headless and where its result goes. After that the window shows only stderr. The loop reads the result file once the run has ended (see "How each run ended" below).
 
+The window's command is written to `~/.productswarm/launcher/<session-id>.window.sh`, and the line typed into the window only runs that file: `exec /bin/sh <file> --session-id <id>` (#550). Terminal types the command into a shell that may still be starting, and while it is, the tty keeps only the first 1024 bytes of a line (`swarm.MAX_CANON`). A headless run's full command is longer than that. Cut there, it left the shell waiting on an open quote: no pid file, no result file and no transcript. That was the "no result (no result file)" runs on 6 Nov. The file is removed once the session has exited. This applies to every session the launcher starts, interactive ones too.
+
 The deny patterns back up auto mode's classifier for the two rules governance cares about most: agents never merge (GOV-0011), and agents never add or remove labels such as `ready` and `gov:ruled` (GOV-0006):
 
 ```
@@ -212,9 +214,11 @@ Once a run the loop started is no longer live, the next check reads its result f
 
 `cost_usd` is the result's `total_cost_usd`: Claude Code's client-side estimate. It stays on this machine. GOV-0002, GOV-0003 and GOV-0004 still govern what reaches GitHub, and nothing new is posted.
 
-- **The trigger stays done.** The loop never restarts a run by itself (GOV-0012), unless it was `limited`.
+- **The trigger stays done.** The loop never restarts a run by itself (GOV-0012), unless it was `limited`, it never started, or it is a `[build]` that waits on an open issue (both below, #550).
+- **A run that never started is tried again (#550).** That's a `no result` run with no result file, or with no JSON result and no Claude Code transcript (`<session-id>.jsonl` under `~/.claude/projects/`, or `$CLAUDE_CONFIG_DIR/projects/`). Claude Code never ran, so nothing was spent. Its trigger leaves `"acted"`, along with any review triggers its reviewer pass covered, and starts again on the same check, within the usual limits. The log says `it never started, so trying again (retry 1 of 2)`. That happens at most twice per trigger (`watch.MAX_RETRIES`). The record counts its `"tries"` and keeps the earlier session ids in `"never_started"`. After the third start fails, the record gets `"gave_up": true` and the trigger stays done. A `no result` run that has a transcript (for example after `swarm stop`) ran, so it isn't tried again.
 - **A `limited` run is tried again after the hold (#489).** Claude Code reports a usage limit as `subtype` `success` with `is_error` set, after a second or two and at $0.00: the run never started work. Its trigger leaves `"acted"`, along with any review triggers its reviewer pass covered, so it fires again with no label change. The record gets an `"until"` time: the next time the result's "resets 12pm (Europe/London)" names (in that zone, or this machine's if it names none), or 30 minutes after the run ended (`watch.LIMIT_HOLD`) if there's no reset time the loop can read. The limit is account-wide, so until then the loop holds **every** start, says so once, and lists each held trigger in `swarm inbox` as `held: usage limit (until HH:MM)`, in this machine's time. Triggers that start nothing (skipped, refused, covered) are not held. Other errors behave as before.
 - **`swarm inbox` lists a run that ended at cap**, with its ref, which limit it reached and its cost, so you can decide whether to restart it, for example by adding `ready` again. It drops off the list once a later run on the same ref has started, or after 7 days (`watch.RUNS_DAYS`).
+- **`swarm inbox` lists a run that failed**: one that never started after its retries, under "swarm watch runs that failed", with every session id it was tried as. It drops off the list as a run that ended at cap does. Add the label again to try once more.
 - **`swarm inbox` lists each recorded run's cost** from the last 7 days, newest first. Records older than that are dropped from `watch.json`.
 - **Unpushed work is kept.** As for any session, `tidy()` keeps an exited run's worktree if it has uncommitted or unpushed work, and `swarm ls` names it.
 - **The dashboard doesn't show these.** It is built and published by a GitHub Action, which can't read this machine's `watch.json`, and publishing the costs would send them to GitHub.
@@ -328,7 +332,7 @@ The planner's task issues name their blockers on a line of the body: `**Waits on
 - **Open** means an open issue in that check's reading of GitHub. A closed issue, or a number that isn't an open issue, doesn't hold the build.
 - `swarm inbox` lists the hold as `held: waits on #456`, naming only the issues still open. It is logged once per reason, in `--dry-run` too.
 - The hold never goes into `acted` in `watch.json`, so the build starts on the first check after every listed issue is closed, with no need to take `ready` off and put it back.
-- A blocker the builder finds that isn't on the line still ends its run, as before. The builder's comment asks you to add it to the line, and you add `ready` again once you have.
+- **A builder that finds a blocker sends the build back to held (#550).** This covers a blocker that isn't on the line, or one the loop's reading missed. The `[build]` run can end with its issue still open and no open PR closing it, with the builder's last comment on the issue since the run started saying it waits on an open issue ("waits on #456", "waiting for #456"). Then the run is recorded with `"waits_on": [456]` and its trigger leaves `"acted"`. Only the `#N` refs in the rest of that sentence count, and only open issues, not PRs. Until those issues close, the trigger is held as `held: waits on #456 (the builder said so on #457)`, listed in `swarm inbox` and logged once. On the first check after they close, the build starts again with no new label. A builder that opened a PR, or whose last comment names no open issue it waits on, leaves the trigger done, as before.
 
 ### What it does on each trigger
 
@@ -365,6 +369,15 @@ These also count as done, because a run can stop for good reasons without a PR:
 - a PR, open or merged, already closes the issue.
 
 If the condition isn't met, the hook blocks the stop and gives a short reason naming what's missing, and the run continues. It allows the stop whenever `stop_hook_active` is set (a hook is already continuing the run), after 3 blocks in one run (counted in `~/.productswarm/launcher/<session id>.stop.json`), and whenever GitHub can't be read or anything else fails. It never fails closed: the run's budget (GOV-0012) is what bounds spend. What it blocked, and any read that failed, go to `~/.productswarm/launcher/stophook.log`.
+
+### New launcher code: it restarts itself
+
+`swarm watch` runs the launcher code that was in its checkout when it started (#550). On every check it fetches `origin/main`. If `launcher/` there differs from what it loaded, it says so once, for example `origin/main has 3 new commits under launcher/; restarting on them once nothing it started is still starting`. Then it waits until no run it started is still starting (window opened, no pid yet). After that, between checks, it:
+
+1. fast-forwards its checkout to `origin/main` (`git merge --ff-only`), which it does only if the checkout is on `main` and has no changes to tracked files;
+2. releases its lock and re-execs itself with the same arguments, so the new code is what runs from the next check on. What it has acted on is in `watch.json`, so the restart starts nothing twice.
+
+If the checkout is on another branch, has changes, or can't fast-forward, it says why once and carries on with the code it has. Pull and restart it by hand. `--dry-run` never restarts itself. Because it now fetches every check, each session it starts is created at the latest `origin/main` and uses the latest pinned hook copy, not the ones from when the loop started.
 
 ### What it never does
 

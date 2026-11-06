@@ -96,6 +96,7 @@ DENY = (
 )
 ISSUE_WORD_RE = re.compile(r"\bissue\s+#?(\d+)\b", re.IGNORECASE)   # heartbeat/hook.py's rule
 START_GRACE = 60      # seconds a session may take to write its pid file before it counts as failed
+MAX_CANON = 1024      # macOS's tty line limit: a longer line typed into a starting shell is cut (#550)
 STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
 
@@ -230,6 +231,8 @@ class Launcher:
     kept: list[Path] = field(default_factory=list)   # exited sessions' worktrees with work in them
     fetched: bool = False
     hook: str | None = None         # the pinned hook path, once refreshed in this run
+    claude_dir: Path = field(default_factory=lambda: Path(
+        os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser())   # transcripts (#550)
 
     @property
     def dir(self) -> Path:
@@ -245,6 +248,25 @@ class Launcher:
     def result_file(self, sid: str) -> Path:
         """Where a headless run's stdout goes: the banner, then its JSON result (#147)."""
         return self.dir / f"{sid}.result.json"
+
+    def window_file(self, sid: str) -> Path:
+        """The script a session's window runs: command(), kept out of the typed line (#550)."""
+        return self.dir / f"{sid}.window.sh"
+
+    def typed(self, s: Started) -> str:
+        """The line typed into a session's new window: run its window_file().
+
+        Terminal types the command into a shell that may still be starting, and a tty in
+        that state keeps only the first MAX_CANON bytes of a line. command() is longer, and
+        cut there it left the shell waiting on an open quote: no pid file, no result (#550).
+        This line is short. The session id after the path is unused by the script; it puts
+        the id in the process's command line, as state() needs, until the script exec's."""
+        return f"exec /bin/sh {shlex.quote(str(self.window_file(s.session_id)))} --session-id {s.session_id}"
+
+    def transcript(self, sid: str) -> Path | None:
+        """Claude Code's transcript of session sid, if it wrote one (#550)."""
+        found = sorted((self.claude_dir / "projects").glob(f"*/{sid}.jsonl"))
+        return found[0] if found else None
 
     def load(self) -> list[Started]:
         try:
@@ -348,6 +370,7 @@ class Launcher:
             for e in entries:
                 if e not in live:
                     self.pid_file(e.session_id).unlink(missing_ok=True)
+                    self.window_file(e.session_id).unlink(missing_ok=True)
                     (self.dir / f"{e.session_id}.stop.json").unlink(missing_ok=True)   # stophook.py
             found = self.orphans(entries)
             for e in found:
@@ -382,6 +405,12 @@ class Launcher:
         if not self.fetched:
             self.git_ok("-C", str(self.root), "fetch", "-q", "origin", "main")
             self.fetched = True
+
+    def refetch(self) -> None:
+        """Fetch origin/main now, and refresh the pinned hook copy on the next start: a
+        long-lived `swarm watch` calls this every check (#550), not once per process."""
+        self.fetched, self.hook = False, None
+        self.fetch_main()
 
     def prepare(self, s: Started) -> None:
         """Create the session's worktree at origin/main and write its hook settings."""
@@ -496,10 +525,13 @@ class Launcher:
             return False
         self.add(entry)   # before the window opens, so its pid file never has no entry (#272)
         try:
-            self.run(self.command(entry))
+            script = self.window_file(entry.session_id)
+            script.write_text(self.command(entry) + "\n")
+            self.run(self.typed(entry))
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             self.out(f"failed to start {entry.name}: {e}")
             self.remove(entry.session_id)
+            self.window_file(entry.session_id).unlink(missing_ok=True)
             self.git(["-C", str(self.root), "worktree", "remove", "--force",
                       str(self.worktree(entry.session_id))])   # new and unused: nothing to lose
             return False
@@ -668,7 +700,7 @@ def inbox(launcher: Launcher, repo: str, idle_minutes: int,
 def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None,
                runs: list[dict] | None = None, review_in_actions: bool = False) -> str:
     """The needs-you list, then a line if swarm watch leaves [review] to Actions (#216),
-    then runs `swarm watch` started that ended at cap (#149), then any triggers it is
+    then runs `swarm watch` started that ended at cap (#149) or never started (#550), then any triggers it is
     holding or skipping (#90), then each recorded run's cost (#149).
 
     held is watch.waiting(): (when swarm watch last checked, its waiting triggers); runs
@@ -677,15 +709,19 @@ def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None
     (GOV-0002, GOV-0003, GOV-0004)."""
     import watch
     checked, waiting = held or (None, [])
-    capped, recent = watch.runs_text(runs or [], now, g.ago) if runs else ([], [])
+    capped, recent, failed = watch.runs_text(runs or [], now, g.ago) if runs else ([], [], [])
     out = [f"{n}. {g.needs_line(i, now)}\n   {i['url']}" for n, i in enumerate(items, 1)]
-    if not items and not waiting and not capped:
+    if not items and not waiting and not capped and not failed:
         out.append(g.NEEDS_EMPTY)
     if review_in_actions:
         out.append(f"\n{REVIEW_IN_ACTIONS}")
     if capped:
         out.append("\nswarm watch runs that ended at cap (restart one if its work should go on):")
         out += capped
+    if failed:
+        out.append(f"\nswarm watch runs that failed: they never started, after {watch.MAX_RETRIES} "
+                   f"retries (#550; re-add the label to try again):")
+        out += failed
     if waiting:
         out.append(f"\nswarm watch is holding (last check {g.ago(checked, now)}):")
         out += [f"- [{w['kind']}] {w['ref']} {w['why']} · {w['reason']}" for w in waiting]
