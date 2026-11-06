@@ -35,6 +35,10 @@ Sit on committees when convened (GOVERNANCE.md §7). Your evidence base is the u
 
 Keep to GOVERNANCE.md §8: put the point in the first line, and link evidence rather than paste it. Anything you find outside the issue or PR in front of you becomes a new unlabelled issue.
 
+## Started by an `Ask:`
+
+If this run answers the owner's `Ask: <role>: <question>` on the report issue (GOV-0029), answer once, as one comment on the report issue, in plain words: the answer first, then only what the owner needs to act on it. Then stop. Until `swarm watch`'s `[ask]` ships (#590), the owner starts these runs by hand.
+
 ## Governance
 
 This repo uses `GOVERNANCE.md` for decision rights. Read it at the start of every session.
