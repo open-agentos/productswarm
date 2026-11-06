@@ -63,9 +63,9 @@ class HookCase(unittest.TestCase):
         (self.home / "launcher").mkdir()
         self.gh = FakeGitHub()
 
-    def run_as(self, role, issue_n=None, pr=None, by="watch"):
+    def run_as(self, role, issue_n=None, pr=None, by="watch", called_by=None):
         e = swarm.Started(name=f"{role}-x", role=role, model="m", session_id=SID, started=T0,
-                          issue=issue_n, pr=pr, by=by)
+                          issue=issue_n, pr=pr, by=by, called_by=called_by)
         (self.home / "launcher" / "sessions.json").write_text(json.dumps([e.__dict__]))
 
     def decide(self, active=False):
@@ -327,6 +327,20 @@ class OtherRolesTest(HookCase):
         self.run_as("builder", 9)
         self.gh.put("issues/9", issue(9, ("gov:question", "ready")))
         self.assertAllows()
+
+
+class CallInTest(HookCase):
+    def test_a_called_in_builder_needs_no_pr(self):
+        # #520: a call-in run posts one comment; the [build] condition doesn't apply.
+        self.run_as("builder", 7, called_by="the planner")
+        self.gh.put("issues/7", issue(7))
+        self.gh.put("issues/7/events", [labeled("ready")])
+        self.assertAllows()
+        self.assertEqual(self.gh.calls, [])
+
+    def test_the_same_builder_not_called_in_still_blocks(self):
+        self.builder_on()
+        self.assertBlocks("No PR closes #7")
 
 
 class GuardTest(HookCase):

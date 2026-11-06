@@ -142,6 +142,7 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respo
 | `[record]` A `gov:question` whose most recent `gov:ruled` was added by the owner and that needs a record (GOV-0007), with no open PR closing it | `docs` on the question |
 | `[answer]` A `gov:question` whose most recent `ready` was added by the owner, and again when the owner then adds `gov:ruled` (#495) | the role in its "Raised by" field, on the question. If the field starts with `owner` or the owner's login, `planner` (#455) |
 | `[respond]` An open, non-draft PR that `productswarm-builder[bot]` opened, whose latest `productswarm-reviewer[bot]` review at its current head is "changes requested", and whose **Authority** line isn't `fail`, for at most 2 rounds (GOV-0011) | `builder` on the PR, as `swarm launch builder --issue N --pr M` would, where #N is the one issue the PR closes |
+| `[call-in]` A comment on an issue whose most recent `ready` was added by the owner, posted since that label by a swarm App or the owner, with a line `Call in: <role>, <role>: <why>` (GOV-0023, #520). Off unless `call_ins = true` (see "Call-ins" below) | each named role on the issue, once per call, with a prompt that says who called it in and why, and that it posts one comment |
 
 `[respond]` is GOV-0011's bounded review loop. The builder's push starts a fresh `[review]`, and if the reviewer requests changes again, a fresh `[respond]`:
 
@@ -255,6 +256,25 @@ review_in_actions = true   # optional; default false
 - Changing the switch is a `ci-and-workflows` call for the owner (GOV-0019), not a `spend` one. It must be `true` or `false`; anything else is an error.
 - `swarm.toml` is read on every check, so the switch applies without a restart.
 
+### Call-ins
+
+GOV-0023 lets a swarm App or the owner bring other roles into a `ready` issue by commenting `Call in: <role>, <role>: <why>` (#520). A switch in `[watch]` turns it on:
+
+```toml
+[watch]
+call_ins = true   # optional; default false
+```
+
+- **The line.** Any line of the comment that starts `Call in:` (any case). The roles are the comma-separated names before the next colon; the why is the rest of that line, up to 300 characters. Only the first such line in a comment counts.
+- **Who.** The owner, or a login under `identities.agents` in `governance/jurisdictions.yml` (the list GOV-0024 trusts). Anyone else's call is skipped with a reason. A call posted before the owner's most recent `ready` on the issue doesn't count. `gov:question`s the owner labelled `ready` count too.
+- **Once per call.** Each named role is one trigger, keyed on the comment id and the role, so it starts once. A role naming itself, or a name with no prompt in `roles/`, is skipped with a reason.
+- **At most 2 calls per issue per UTC day**, by when the comment was posted. A call that names no role it could start doesn't count. Later calls that day are skipped with a reason.
+- **Limits.** A call-in run is a headless run like any other: it counts toward `max_live`, needs the role's `spend_cap_usd`, and gets the budget, turn ceiling and denies (GOV-0010, GOV-0012, GOV-0013).
+- **Beside the caller.** It waits only while a session of the **same role** is live on the issue; the caller (often a live builder) and other roles don't hold it.
+- **The run.** Its prompt says it was called in, by whom and why, that the call counts as asking it in (GOVERNANCE.md §8), and that it posts one comment and stops. The Stop hook puts no condition on it.
+- **Off or missing.** Each call is logged once as `skipped: call-ins are off …` and starts nothing. It isn't recorded in `watch.json`, so turning the switch on starts the calls still waiting on `ready` issues (within the daily limit).
+- It must be `true` or `false`; anything else is an error. `swarm.toml` is read on every check, so it applies without a restart. The owner commits `swarm.toml`.
+
 ### Overlapping builds
 
 Builders on issues from the same ruling usually change the same files, so their PRs conflict or one undoes the other. A `[build]` trigger is **held** while other work from the same GOV record is in flight. This is #136, which builds the owner's answer on #127. That answer is direction for #127, not a ruling.
@@ -279,8 +299,8 @@ The planner's task issues name their blockers on a line of the body: `**Waits on
 
 ### What it does on each trigger
 
-- **Once per trigger, across restarts too.** A trigger is identified by the PR and its head SHA (`[review]`, `[respond]`) or by the id of the owner's label event. What the loop has acted on is kept in `~/.productswarm/launcher/watch.json`, so restarting `swarm watch` starts nothing twice. A new push, or the owner adding the label again, is a new trigger.
-- **No session already on it.** A `[record]`, `[answer]`, `[build]` or `[respond]` trigger on an issue or question with a live session starts nothing, by the same rule `swarm launch` refuses on. It is **held** instead, with the session holding it (#488): `held: analyst-issue-480 is live on #480 (idle since 20:47 UTC)`. `swarm inbox` lists the hold, and the watch log and `--dry-run` print it once each time the holder's state changes (active, idle, blocked, starting, stale). Once that session stops, the trigger fires.
+- **Once per trigger, across restarts too.** A trigger is identified by the PR and its head SHA (`[review]`, `[respond]`) or by the id of the owner's label event (`[call-in]`: the comment id and the role). What the loop has acted on is kept in `~/.productswarm/launcher/watch.json`, so restarting `swarm watch` starts nothing twice. A new push, or the owner adding the label again, is a new trigger.
+- **No session already on it.** A `[record]`, `[answer]`, `[build]` or `[respond]` trigger on an issue or question with a live session starts nothing, by the same rule `swarm launch` refuses on (a `[call-in]` waits only for a session of its own role). It is **held** instead, with the session holding it (#488): `held: analyst-issue-480 is live on #480 (idle since 20:47 UTC)`. `swarm inbox` lists the hold, and the watch log and `--dry-run` print it once each time the holder's state changes (active, idle, blocked, starting, stale). Once that session stops, the trigger fires.
   - **Stale.** When the holder has been idle on the heartbeat for longer than `[watch] stale_minutes`, the reason says so and names the fix: `stale: analyst-issue-480 idle 10h; swarm stop analyst-issue-480 frees #480`. For a session `swarm` didn't start, it says to stop it where it runs. The loop still never stops a session and never starts a second one on the issue: stopping is the owner's act (#132, GOV-0008).
 - **Refusal checks again.** Just before each start, it runs `swarm launch`'s refusal checks on fresh GitHub data: the issue is open, the owner added the label most recently (`gov:ruled` for `[record]`, `ready` otherwise), and no live session is on it. If a check refuses, for example because someone started a session on the issue by hand, the loop logs the refusal and the trigger is done.
 - **Reviews.** One reviewer pass covers every review trigger present when it starts, because the pass reviews every open PR. While a reviewer that `swarm watch` started is live, review triggers wait: that pass may have listed the PRs before the latest push. Reviewers you start yourself (`swarm up`, `swarm launch`) don't hold reviews up: an idle one at its prompt is yours to steer, and GOV-0010 already leaves sessions you start out of the loop's counts. The loop does the polling. The reviewer still runs one pass and stops, as `roles/reviewer.md` says.
@@ -301,6 +321,7 @@ When the run is about to stop, the hook reads GitHub as the run's App (only read
 | builder on a PR (`[respond]`) | the reviewer's latest review at the PR's head isn't "changes requested" (a push moved the head, or there was nothing to respond to); or the run commented on the PR; or the PR is closed |
 | reviewer | every open, non-draft PR that existed when the run started has a reviewer review at its current head, or one posted since the run started |
 | docs on a `gov:ruled` question (`[record]`) | a PR, open or merged, closes the question |
+| a called-in role (`[call-in]`) | always: it posts one comment, not a PR (#520) |
 | anything else, e.g. an `[answer]` run | always |
 
 These also count as done, because a run can stop for good reasons without a PR:

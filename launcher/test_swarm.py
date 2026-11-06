@@ -610,6 +610,18 @@ class LaunchTest(Base):
         self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(swarm.opener("builder", 49)), ["49"])
         self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(swarm.opener("builder")), [])
         self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(swarm.opener("builder", 49, 70)), ["49"])
+        # A call-in's why naming another issue mustn't give the heartbeat two issues (#520).
+        called = swarm.opener("docs", 49, None, "the builder", "see issue #12 and Issue 13")
+        self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(called), ["49"])
+        self.assertIn("see #12 and #13", called)
+
+    def test_call_in_opener_says_who_why_and_one_comment(self):
+        o = swarm.opener("docs", 49, None, "the planner (productswarm-planner[bot])", "wording check")
+        self.assertIn("then answer a call-in on issue #49: the planner (productswarm-planner[bot]) "
+                      "called you in (GOV-0023) because: wording check.", o)
+        self.assertIn("post one comment on it", o)
+        self.assertIn("counts as asking you in", o)
+        self.assertNotIn("because", swarm.opener("docs", 49, None, "the owner"))
 
     def test_missing_closed_or_pr(self):
         self.assertIn("#49 doesn't exist", self.refused("missing"))

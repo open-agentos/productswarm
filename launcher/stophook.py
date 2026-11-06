@@ -27,6 +27,7 @@ through the session's `gh`) and checks the run's done-condition:
 | reviewer on one PR (Actions, #215)          | that PR, if still open and not a draft, has a   |
 |                                             | reviewer review at its head or one since start  |
 | docs on a gov:ruled question ([record])     | a PR, open or merged, closes the question       |
+| a called-in role ([call-in], GOV-0023)      | always: it posts one comment, not a PR (#520)   |
 | any other run (e.g. an [answer] run)        | always                                          |
 
 Also done, because a run can stop for good reasons without that (#125, point 2):
@@ -249,6 +250,8 @@ def missing_respond(g: GitHub, repo: str, e: swarm.Started, login: str) -> str |
 def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
     """What the run still has to do before it may stop, or None if it may stop."""
     login = app_login(e.role)
+    if e.called_by:
+        return None          # a call-in run (#520): one comment, whatever its role
     if e.role == "reviewer":
         what = missing_review(g, repo, e)
     elif e.role == "builder" and e.pr:

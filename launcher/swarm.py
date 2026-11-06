@@ -94,18 +94,29 @@ DENY = (
     "Bash(gh label *)",
     "Bash(gh api *labels*)", "Bash(gh api *merge*)",
 )
+ISSUE_WORD_RE = re.compile(r"\bissue\s+#?(\d+)\b", re.IGNORECASE)   # heartbeat/hook.py's rule
 START_GRACE = 60      # seconds a session may take to write its pid file before it counts as failed
 STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
 
-def opener(role: str, issue: int | None = None, pr: int | None = None) -> str:
+def opener(role: str, issue: int | None = None, pr: int | None = None,
+           called_by: str | None = None, call_why: str | None = None) -> str:
     """The prompt ops/swarm-session uses when given no args (it passes args on unchanged).
 
     With an issue, it names it: the heartbeat's `working_on` detection matches
     "issue #N" in a prompt, so the session's current issue is set with no hook change.
     With a PR too, the session responds to requested changes on it (GOV-0011). With only a
-    PR, it reviews that PR once (a reviewer run in Actions, #215)."""
-    if issue and pr:
+    PR, it reviews that PR once (a reviewer run in Actions, #215). With called_by, the
+    role was called in to the issue (GOV-0023, #520): the prompt says by whom and why, and
+    that it posts one comment."""
+    if issue and called_by:
+        # "issue #M" in the why would give the heartbeat two issues and so none: say "#M".
+        safe = ISSUE_WORD_RE.sub(r"#\1", call_why) if call_why else ""
+        why = f" because: {safe}" if safe else ""
+        then = (f"answer a call-in on issue #{issue}: {called_by} called you in (GOV-0023){why}. "
+                f"That call counts as asking you in (GOVERNANCE.md section 8). Read the issue, post "
+                f"one comment on it with your contribution, and stop")
+    elif issue and pr:
         then = f"respond to the requested changes on PR #{pr}, which closes issue #{issue}"
     elif pr:     # a reviewer on one PR: a run in GitHub Actions (#215)
         then = f"review PR #{pr} only, in one pass, and stop"
@@ -181,12 +192,15 @@ class Started:
     pr: int | None = None     # set by `swarm launch --pr`: respond on this PR (GOV-0011)
     budget_usd: float | None = None   # by="watch": --max-budget-usd, the role's spend_cap_usd (GOV-0012)
     max_turns: int | None = None      # by="watch": --max-turns, [watch] max_turns (GOV-0012)
+    called_by: str | None = None      # a call-in run (GOV-0023, #520): who called it in
+    call_why: str | None = None       # and why, from the `Call in:` line
 
     @classmethod
     def from_dict(cls, d: dict) -> "Started":
         return cls(**{k: d[k] for k in ("name", "role", "model", "session_id", "started")},
                    issue=d.get("issue"), by=d.get("by"), pr=d.get("pr"),
-                   budget_usd=d.get("budget_usd"), max_turns=d.get("max_turns"))
+                   budget_usd=d.get("budget_usd"), max_turns=d.get("max_turns"),
+                   called_by=d.get("called_by"), call_why=d.get("call_why"))
 
 
 def recovered(sid: str, cmd: str, started: float) -> Started:
@@ -422,7 +436,7 @@ class Launcher:
         wt = self.worktree(s.session_id)
         session = ["exec", shlex.quote(str(wt / "ops" / "swarm-session")), shlex.quote(s.role),
                    "--model", shlex.quote(s.model), "--session-id", s.session_id]
-        prompt = shlex.quote(opener(s.role, s.issue, s.pr))
+        prompt = shlex.quote(opener(s.role, s.issue, s.pr, s.called_by, s.call_why))
         if s.by == "watch":
             result = shlex.quote(str(self.result_file(s.session_id)))
             note = shlex.quote(f"swarm: headless run (claude -p); it ends when done or at its budget, "
@@ -736,15 +750,17 @@ def issue_refusals(n: int, issue: dict | None, events: list[dict], owner: str,
     return []
 
 
-def holders(n: int, model: dict, started: list[Started]) -> list[str]:
+def holders(n: int, model: dict, started: list[Started], role: str | None = None) -> list[str]:
     """Live sessions already on issue n: heartbeat sessions whose current issue is n, plus
-    launcher sessions started on n that have no heartbeat yet."""
+    launcher sessions started on n that have no heartbeat yet. With role, only that role's
+    (a call-in waits only for its own role, #520)."""
     names = {e.session_id: e.name for e in started}
     seen = {s["session_id"] for s in model["sessions"]}
     out = [f"{names.get(s['session_id'], s['role'])} ({s['status']}, session {s['session_id']})"
-           for s in model["sessions"] if s["status"] != "stopped" and s["issue"] == n]
+           for s in model["sessions"] if s["status"] != "stopped" and s["issue"] == n
+           and role in (None, s["role"])]
     out += [f"{e.name} (starting, session {e.session_id})"
-            for e in started if e.issue == n and e.session_id not in seen]
+            for e in started if e.issue == n and e.session_id not in seen and role in (None, e.role)]
     return out
 
 
