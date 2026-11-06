@@ -340,9 +340,6 @@ class DailyTest(Base):
                 self.assertEqual(m.main(["manifest.py", str(path)]), 0)
             self.assertIn(shown, out.getvalue().splitlines()[-1].split("\t"))
 
-    def test_repo_manifest_leaves_it_off(self):
-        self.assertIs(m.load_watch(m.DEFAULT_PATH).daily, False)
-
 
 class AsksTest(Base):
     """[watch] asks (#590, GOV-0029): off by default; asks = true needs report_issue."""
@@ -381,9 +378,6 @@ class AsksTest(Base):
                 self.assertEqual(m.main(["manifest.py", str(path)]), 0)
             self.assertIn(shown, out.getvalue().splitlines()[-1].split("\t"))
 
-    def test_repo_manifest_leaves_it_off(self):
-        self.assertIs(m.load_watch(m.DEFAULT_PATH).asks, False)
-
 
 class ResearchTest(Base):
     """[watch] research (#591, GOV-0029): off by default; it needs no report_issue."""
@@ -413,9 +407,6 @@ class ResearchTest(Base):
             with redirect_stdout(out), unittest.mock.patch.object(m, "ROOT", self.dir):
                 self.assertEqual(m.main(["manifest.py", str(path)]), 0)
             self.assertIn(shown, out.getvalue().splitlines()[-1].split("\t"))
-
-    def test_repo_manifest_leaves_it_off(self):
-        self.assertIs(m.load_watch(m.DEFAULT_PATH).research, False)
 
 
 class ActionsMaxReviewsTest(Base):

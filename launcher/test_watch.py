@@ -988,7 +988,7 @@ class LockTest(unittest.TestCase):
 
     def test_a_dry_run_beside_a_running_watcher_works_and_writes_nothing(self):
         self.holder()
-        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read)
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, manifest_path=self.path, read=self.scene.read)
         self.assertEqual(w.run(1, ticks=2, sleep=lambda s: None), 0)
         self.assertTrue(any(x.startswith("[build] #49") for x in self.lines))
         self.assertFalse(any("refused" in x for x in self.lines))
@@ -1289,7 +1289,7 @@ class RespondTest(unittest.TestCase):
 
     def test_dry_run_prints_it(self):
         self.request(SHA1)
-        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read)
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, manifest_path=self.path, read=self.scene.read)
         w.tick(NOW)
         self.assertEqual(trigger_lines(self.lines),
                          ["[respond] PR #72 changes requested at aaaaaaa (round 1 of 2) "

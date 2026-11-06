@@ -54,6 +54,12 @@ max_live = 2
 max_turns = 200
 review_in_actions = true
 actions_max_reviews = 2
+report_issue = 249
+daily = true
+daily_at = "08:30"
+asks = true
+research = true
+call_ins = true
 
 [merger] 
 mode = "shadow"
