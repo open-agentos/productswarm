@@ -10,6 +10,12 @@ End everything you write with `-- planner (<model>)`. Never merge or approve PRs
 
 `swarm watch`'s `[answer]` trigger starts you on a `gov:question` whose "Raised by" is the owner (`owner` or the owner's login) once the owner labels it `ready` (#455). Treat it as you would your own question: read the owner's answer and do what it directs, for example opening issues or asking back on the question.
 
+**A ruling.** `[answer]` starts you again when the owner adds `gov:ruled` to a question that is already `ready` (#495). If docs also has a record to write, it runs first, and you start once it has stopped. Turn the ruling into work:
+
+1. Open one unlabelled issue for each stage that can start now. Each one closes as a single PR, names its files and says what it waits on, and cites the question.
+2. Comment on the question: list the issues you opened, and say which stages wait and on what (a merged record, an earlier stage, an owner choice).
+3. Don't open issues for stages that can't start yet; the comment records them. Adding or cutting scope beyond the ruling is a governance question.
+
 **Convening.** If the answer convenes a committee, you act as convener (GOVERNANCE.md §7) and do no committee round yourself:
 
 1. Open the Discussion in the **Committees** category, titled after the question. Its opening post names the question and the members and repeats §7's rules.

@@ -16,8 +16,8 @@ it has none (for example, the role has no spend_cap_usd).
 |        | with no open PR closing it                                              |                      |
 | record | gov:question whose most recent `gov:ruled` was added by the owner, that | docs on the question |
 |        | needs a record (GOV-0007), with no open PR closing it                   |                      |
-| answer | gov:question whose most recent `ready` was added by the owner           | its "Raised by" role |
-|        |                                                                         | (planner if owner)   |
+| answer | gov:question whose most recent `ready` was added by the owner, again    | its "Raised by" role |
+|        | when the owner then adds `gov:ruled` (#495)                             | (planner if owner)   |
 | respond| open, non-draft PR the builder App opened, whose latest reviewer review | builder on the PR    |
 |        | at its head is CHANGES_REQUESTED, with Authority not `fail`, for at     | (GOV-0011)           |
 |        | most 2 rounds                                                           |                      |
@@ -27,6 +27,13 @@ history, so the count holds across restarts. A third request starts nothing, and
 Authority: fail review at the head starts nothing either, and nor do requested changes
 on a PR another App opened, such as a docs ruling PR (#178): the builder responds only on
 its own PR (GOV-0011). `needs_you()` lists all three as needing the owner. A PR that doesn't close exactly one issue is skipped with a reason.
+
+[answer] on a ruling (#495): a question that is already `ready` when the owner rules it
+fires [answer] again, keyed on the owner's `gov:ruled` event (`answer:N:<event id>`), so
+the asker (the planner, for an owner-raised question) acts on the ruling. Its key is the
+later of the owner's two label events; `ready` must still be the owner's (GOV-0006). When
+[record] is also due on that question, docs goes first: [answer] is held until [record]
+has been acted on, and then waits through busy() until docs has stopped.
 
 An issue or question with a live session on it prints nothing (`swarm launch`'s refusal
 rule), so it can fire later, once that session has stopped. Each trigger has an identity,
@@ -155,11 +162,13 @@ class Trigger:
     skipped: str | None = None
     issue: int | None = None  # the issue the session works on (none for a reviewer pass)
     pr: int | None = None     # [respond]: the PR the builder responds on
+    after: str | None = None  # [answer]: the [record] key that must be acted on first (#495)
 
     def line(self) -> str:
         if self.skipped:
             return f"[{self.kind}] {self.ref} {self.why} -> skipped: {self.skipped}"
-        return f"[{self.kind}] {self.ref} {self.why} -> would start {self.command}"
+        first = " once docs has stopped ([record] first)" if self.after else ""
+        return f"[{self.kind}] {self.ref} {self.why} -> would start {self.command}{first}"
 
 
 def launch_cmd(role: str, n: int, pr: int | None = None) -> str:
@@ -229,6 +238,14 @@ def owner_label(events: list[dict], name: str, owner: str) -> dict | None:
     return e if e and (e.get("actor") or {}).get("login") == owner else None
 
 
+def later(events: list[dict], a: dict | None, b: dict) -> bool:
+    """Whether event a comes after event b in an issue's events (oldest first)."""
+    if a is None:
+        return False
+    pos = {id(e): i for i, e in enumerate(events)}
+    return pos.get(id(a), -1) > pos.get(id(b), -1)
+
+
 def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Callable,
              is_tracking: Callable, review_in_actions: bool = False) -> list[Trigger]:
     """Every trigger present now, in needs-you order then issue order. Nothing is filtered
@@ -275,17 +292,22 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         labels = {lb.get("name") for lb in (raw.get(n) or {}).get("labels") or []}
         ruled = owner_label(events, "gov:ruled", owner) if "gov:ruled" in labels else None
         why_record = needs_record(body)
+        record = None
         if ruled and why_record and n not in closing and not busy(n):
-            out.append(Trigger(key=f"record:{n}:{ruled.get('id')}", kind="record", ref=f"#{n}",
-                               why=f"gov:ruled by the owner, needs a record ({why_record})",
-                               role="docs", command=launch_cmd("docs", n), issue=n))
+            record = Trigger(key=f"record:{n}:{ruled.get('id')}", kind="record", ref=f"#{n}",
+                             why=f"gov:ruled by the owner, needs a record ({why_record})",
+                             role="docs", command=launch_cmd("docs", n), issue=n)
+            out.append(record)
         ready = owner_label(events, "ready", owner) if "ready" in labels else None
         if ready and not busy(n):
+            # #495: a ruling on a question that is already ready fires [answer] again.
+            label, e = ("gov:ruled", ruled) if later(events, ruled, ready) else ("ready", ready)
             role, why_not = raised_by(body, roles, owner)
-            out.append(Trigger(key=f"answer:{n}:{ready.get('id')}", kind="answer", ref=f"#{n}",
-                               why="ready by the owner", role=role,
+            out.append(Trigger(key=f"answer:{n}:{e.get('id')}", kind="answer", ref=f"#{n}",
+                               why=f"{label} by the owner", role=role,
                                command=launch_cmd(role, n) if role else None,
-                               skipped=None if role else why_not, issue=n))
+                               skipped=None if role else why_not, issue=n,
+                               after=record.key if record and role else None))
 
     # Builds: ready, open, non-question, non-tracking issues with no open PR closing them
     # (that work is done and waits on the owner's merge).
@@ -744,6 +766,11 @@ class Watch:
             if t.skipped:
                 out(t.line())
                 finish(t, f"skipped: {t.skipped}")
+                continue
+            if t.after and t.after not in acted:
+                # #495: docs records the ruling first; once [record] is acted on, busy() and
+                # the holders check below keep [answer] waiting until docs has stopped.
+                hold(t, f"held: docs records the ruling on {t.ref} first, then {t.role} starts")
                 continue
             if t.kind == "review" and reviewer:
                 out(f"[review] {t.ref} {t.why} -> covered by {reviewer}")
