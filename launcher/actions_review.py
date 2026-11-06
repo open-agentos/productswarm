@@ -10,8 +10,7 @@ one `run` job per PR it listed. No PR event starts a run.
 PR events (GOV-0020). It runs in the workflow's first job, which holds no secrets, and
 reads PRs as data, never PR text as instructions. It reads the open PRs and keeps each
 that passes GOV-0017's per-PR rules (eligible() and judge()): open, not a draft, a swarm
-App that opens PRs (productswarm-planner, -builder or -docs) or the owner from
-governance/jurisdictions.yml as author (#206), head in this repo, not a fork, and head not
+App or the owner as author, head in this repo, not a fork, and head not
 yet reviewed by the reviewer App: watch.reviewed_heads(), the rule the local [review]
 trigger uses, so Actions and `swarm watch` agree (#209). `--pr N` (the workflow_dispatch
 input) considers only PR N, under the same rules. At most [watch] actions_max_reviews PRs
@@ -22,6 +21,13 @@ considered (numbers, SHAs, known logins and rule names; never PR text). It only 
 GitHub, with the job's default token, reads no secrets and writes nothing to GitHub.
 If it can't decide (GitHub unreadable, a bad swarm.toml) it writes any=false, prs=[] and
 exits 1.
+
+The swarm Apps it trusts as authors are every login under identities.agents in
+governance/jurisdictions.yml (#491, #506), read from the checkout of main the plan job runs
+(GOV-0020), so a PR head can't change them and a role added there is trusted with no code
+change. The owner is humans.owner from the same file (#206). If the file is missing or that
+block can't be read, plan fails closed: it trusts only the owner and says why in one line
+(the file's path and an exception name, never its text).
 
 `plan` also leaves out a head the reviewer workflow has already tried (#258), from the
 Actions run history rather than a local file, the rule `swarm watch` keeps in watch.json.
@@ -99,8 +105,10 @@ import watch  # noqa: E402
 sys.path.insert(0, str(swarm.ROOT / "heartbeat"))
 import install  # noqa: E402
 
-# The Apps whose PRs the Actions reviewer reviews (#206). The reviewer itself opens none.
-AUTHORS = {f"productswarm-{r}[bot]" for r in ("planner", "builder", "docs")}
+sys.path.insert(0, str(swarm.ROOT / "dashboard"))
+import authority  # noqa: E402  (jurisdictions.yml's reader, not a second parser)
+
+APP_RE = re.compile(r"productswarm-[a-z0-9-]+\[bot\]")   # a swarm App's login (#506)
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 # `plan`'s attempt history (#258). The `review` matrix job in .github/workflows/reviewer.yml
@@ -118,9 +126,30 @@ FIELDS = ("result", "subtype", "num_turns", "total_cost_usd")   # all the job lo
 DONE, AT_CAP, ERROR, REFUSED = 0, 3, 1, 2                       # run's exit codes
 
 
-def eligible(pr: dict, repo: str, owner: str) -> tuple[bool, int | None, str]:
+def trusted_authors(path: Path = swarm.JURISDICTIONS) -> tuple[frozenset[str], str | None]:
+    """(the swarm Apps whose PRs plan reviews, why none) from identities.agents in
+    jurisdictions.yml (#491, #506). Fails closed: if the file is missing, can't be parsed,
+    or the block isn't a non-empty mapping of swarm App logins, no App is trusted, and the
+    reason names only the file and an exception or rule, never the file's text."""
+    where = authority.JURISDICTIONS_PATH
+    try:
+        doc = authority.read(Path(path).read_text())
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        return frozenset(), f"can't read {where} ({e.__class__.__name__})"
+    ids = doc.get("identities")
+    agents = ids.get("agents") if isinstance(ids, dict) else None
+    if not isinstance(agents, dict) or not agents:
+        return frozenset(), f"{where} has no identities.agents mapping"
+    if not all(isinstance(v, str) and APP_RE.fullmatch(v) for v in agents.values()):
+        return frozenset(), f"{where}: identities.agents holds a value that isn't a swarm App login"
+    return frozenset(agents.values()), None
+
+
+def eligible(pr: dict, repo: str, owner: str, authors: frozenset[str] = frozenset()
+             ) -> tuple[bool, int | None, str]:
     """GOV-0017's rules for one PR that need no further GitHub read: open, not a draft, a
-    swarm App or the owner as author, head in this repo, a hex head SHA (#257)."""
+    swarm App in authors (trusted_authors()) or the owner as author, head in this repo, a
+    hex head SHA (#257). With no authors only the owner's PRs pass (fail closed, #506)."""
     n = pr.get("number")
     if not isinstance(n, int) or isinstance(n, bool):
         return False, None, "the PR has no number"
@@ -129,7 +158,7 @@ def eligible(pr: dict, repo: str, owner: str) -> tuple[bool, int | None, str]:
     if pr.get("draft"):
         return False, n, f"PR #{n} is a draft"
     author = (pr.get("user") or {}).get("login") or ""
-    if author not in AUTHORS and author != owner:
+    if author not in authors and author != owner:
         return False, n, f"PR #{n} was opened by someone other than a swarm App or the owner (#206)"
     head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
     if head_repo != repo:
@@ -146,12 +175,12 @@ def head_sha(pr: dict) -> str:
     return sha if isinstance(sha, str) and SHA_RE.fullmatch(sha) else ""
 
 
-def judge(pr: dict, repo: str, owner: str, get_reviews: Callable[[int], list[dict]]
-          ) -> tuple[bool, int | None, str]:
+def judge(pr: dict, repo: str, owner: str, get_reviews: Callable[[int], list[dict]],
+          authors: frozenset[str] = frozenset()) -> tuple[bool, int | None, str]:
     """(review it, pr number, why) for one PR: eligible(), then the head not yet reviewed
     by the reviewer App (watch.reviewed_heads(), the rule [review] uses). Reviews are read
     only for an eligible PR."""
-    ok, n, why = eligible(pr, repo, owner)
+    ok, n, why = eligible(pr, repo, owner, authors)
     if not ok:
         return False, n, why
     sha = head_sha(pr)
@@ -284,8 +313,8 @@ def utc(t: float) -> str:
 
 def make_plan(prs: list[dict], repo: str, owner: str, cap: int,
               get_reviews: Callable[[int], list[dict]],
-              hold: Callable[[int, str], str | None] = no_hold
-              ) -> tuple[list[dict], list[str]]:
+              hold: Callable[[int, str], str | None] = no_hold,
+              authors: frozenset[str] = frozenset()) -> tuple[list[dict], list[str]]:
     """([{"pr": N, "head": sha}, ...], one line per PR considered). Oldest PR (lowest
     number) first; at most cap PRs go in, the rest wait for the next sweep. Pure apart
     from get_reviews, so tests feed it canned PR lists."""
@@ -294,7 +323,7 @@ def make_plan(prs: list[dict], repo: str, owner: str, cap: int,
         return n if isinstance(n, int) and not isinstance(n, bool) else 0
     chosen, lines = [], []
     for pr in sorted((x for x in prs if isinstance(x, dict)), key=number):
-        ok, n, why = judge(pr, repo, owner, get_reviews)
+        ok, n, why = judge(pr, repo, owner, get_reviews, authors)
         if ok:
             sha = head_sha(pr)
             held = hold(n, sha)
@@ -336,11 +365,13 @@ def plan(env: dict | None = None, pr: int | None = None, owner: Callable[[], str
          list_runs: Callable[[str, str, float], list[dict]] | None = None,
          get_jobs: Callable[[str, int], list[dict]] | None = None,
          head_time: Callable[[str, str], float] | None = None,
+         authors: Callable[[], tuple[frozenset[str], str | None]] = trusted_authors,
          out: Callable[[str], None] = print) -> int:
     """List the open PRs the reviewer should review now (or only PR pr, for --pr). Reads
     with the job's default token, writes nothing to GitHub, reads no secrets. Exit 0 when
     it decided (even on an empty plan), 1 when it couldn't (then any=false, prs=[]).
-    hold defaults to a History of this workflow's runs (#258)."""
+    hold defaults to a History of this workflow's runs (#258). authors gives the trusted
+    swarm Apps (trusted_authors(), #506); when it gives none, only the owner's PRs pass."""
     env = os.environ if env is None else env
     g = swarm.dashboard()
     list_runs = list_runs or (lambda repo, wf, since: gh_list(
@@ -371,7 +402,11 @@ def plan(env: dict | None = None, pr: int | None = None, owner: Callable[[], str
                            lambda sha: head_time(repo, sha), retry_completed=pr is not None)
         if not isinstance(prs, list):
             raise ValueError("the PR list is not a list")
-        chosen, lines = make_plan(prs, repo, owner(), cap, lambda n: get_reviews(repo, n), hold)
+        apps, why_none = authors()
+        if why_none:
+            out(f"plan: trusting only the owner: {why_none} (#506)")
+        chosen, lines = make_plan(prs, repo, owner(), cap, lambda n: get_reviews(repo, n), hold,
+                                  apps)
     except (KeyError, OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
         write_plan(output, [])
         out(f"plan: can't decide ({e.__class__.__name__})")

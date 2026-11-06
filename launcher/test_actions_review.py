@@ -57,6 +57,91 @@ spend_cap_usd = 5
 """
 SHA3 = "c" * 40
 
+JURISDICTIONS = """# who decides
+version: 0
+
+identities:
+  humans:
+    owner: "@mattmcalister"
+  agents:
+    planner: "productswarm-planner[bot]"
+    builder: "productswarm-builder[bot]"
+    reviewer: "productswarm-reviewer[bot]"
+    docs: "productswarm-docs[bot]"
+    designer: "productswarm-designer[bot]"
+    analyst: "productswarm-analyst[bot]"{extra}
+
+domains:
+  default:
+    owner: humans.owner
+    decide: []
+"""
+APPS = [f"productswarm-{r}[bot]" for r in
+        ("planner", "builder", "reviewer", "docs", "designer", "analyst")]
+
+
+class TrustedAuthors(unittest.TestCase):
+    """trusted_authors() (#506): the swarm Apps come from identities.agents, fail closed."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "jurisdictions.yml"
+
+    def trusted(self, text):
+        self.path.write_text(text)
+        return actions_review.trusted_authors(self.path)
+
+    def test_all_six_apps(self):
+        self.assertEqual(self.trusted(JURISDICTIONS.format(extra="")), (frozenset(APPS), None))
+
+    def test_the_repo_file(self):
+        apps, why = actions_review.trusted_authors()
+        self.assertIsNone(why)
+        self.assertTrue(set(APPS) <= apps)
+
+    def test_added_role_is_trusted(self):
+        apps, why = self.trusted(JURISDICTIONS.format(extra='\n    tester: "productswarm-tester[bot]"'))
+        self.assertIsNone(why)
+        self.assertIn("productswarm-tester[bot]", apps)
+        self.assertTrue(actions_review.eligible(pr(author="productswarm-tester[bot]"), REPO, OWNER, apps)[0])
+
+    def test_unknown_app_refused(self):
+        apps, _ = self.trusted(JURISDICTIONS.format(extra=""))
+        for author in ("productswarm-ghost[bot]", "dependabot[bot]", "someone-else"):
+            ok, _, why = actions_review.eligible(pr(author=author), REPO, OWNER, apps)
+            self.assertFalse(ok, author)
+            self.assertIn("someone other than a swarm App or the owner", why)
+        for author in APPS + [OWNER]:
+            self.assertTrue(actions_review.eligible(pr(author=author), REPO, OWNER, apps)[0], author)
+
+    def test_missing_file(self):
+        apps, why = actions_review.trusted_authors(self.path)
+        self.assertEqual(apps, frozenset())
+        self.assertEqual(why, "can't read governance/jurisdictions.yml (FileNotFoundError)")
+
+    def test_unreadable_block(self):
+        cases = {
+            "parse error": (JURISDICTIONS.format(extra="\n    - productswarm-x[bot]"),
+                            "can't read governance/jurisdictions.yml (ValueError)"),
+            "no block": ("version: 0\nidentities:\n  humans:\n    owner: \"@mattmcalister\"\n",
+                         "governance/jurisdictions.yml has no identities.agents mapping"),
+            "empty block": ("identities:\n  agents:\n",
+                            "governance/jurisdictions.yml has no identities.agents mapping"),
+            "a list": ("identities:\n  agents: [productswarm-builder[bot]]\n",
+                       "governance/jurisdictions.yml has no identities.agents mapping"),
+            "not a login": (JURISDICTIONS.format(extra='\n    evil: "someone-else"'),
+                            "governance/jurisdictions.yml: identities.agents holds a value "
+                            "that isn't a swarm App login"),
+        }
+        for name, (text, reason) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.trusted(text), (frozenset(), reason))
+
+    def test_no_authors_trusts_only_the_owner(self):
+        self.assertFalse(actions_review.eligible(pr(), REPO, OWNER)[0])
+        self.assertTrue(actions_review.eligible(pr(author=OWNER), REPO, OWNER)[0])
+
 
 class Plan(unittest.TestCase):
     """`plan` (#257): canned PR lists only; no test calls GitHub."""
@@ -75,6 +160,8 @@ class Plan(unittest.TestCase):
         self.pushed = {}             # head SHA -> its commit date, epoch seconds
         self.reads = []
         self.lines = []
+        self.jurisdictions = self.dir / "jurisdictions.yml"
+        self.jurisdictions.write_text(JURISDICTIONS.format(extra=""))
 
     def cap(self, line):
         self.toml.write_text(PLAN_TOML.format(cap=line))
@@ -110,7 +197,8 @@ class Plan(unittest.TestCase):
 
         args = dict(owner=lambda: OWNER, list_prs=list_prs, get_pr=get_pr, get_reviews=get_reviews,
                     list_runs=list_runs, get_jobs=get_jobs, head_time=head_time,
-                    manifest_path=self.toml, out=self.lines.append)
+                    manifest_path=self.toml, out=self.lines.append,
+                    authors=lambda: actions_review.trusted_authors(self.jurisdictions))
         args.update(kw)
         code = actions_review.plan(e, pr=pr_arg, **args)
         outputs = dict(x.split("=", 1) for x in out.read_text().splitlines())
@@ -118,20 +206,38 @@ class Plan(unittest.TestCase):
 
     def test_mixed_authors(self):
         self.open_prs = [pr(71, author=OWNER, sha=SHA2), pr(70), pr(72, author="someone-else"),
-                         pr(73, author="productswarm-reviewer[bot]")]
+                         pr(73, author="productswarm-analyst[bot]", sha=SHA3),
+                         pr(74, author="productswarm-designer[bot]"),
+                         pr(75, author="productswarm-ghost[bot]")]
         self.cap("actions_max_reviews = 5")
         code, prs, any_ = self.run_plan()
         self.assertEqual((code, any_), (0, "true"))
-        self.assertEqual(prs, [{"pr": 70, "head": SHA1}, {"pr": 71, "head": SHA2}])
-        self.assertEqual(self.lines[:4], [
+        self.assertEqual(prs, [{"pr": 70, "head": SHA1}, {"pr": 71, "head": SHA2},
+                               {"pr": 73, "head": SHA3}, {"pr": 74, "head": SHA1}])
+        self.assertEqual(self.lines[:6], [
             "in: PR #70 by productswarm-builder[bot]: head aaaaaaa not reviewed by the reviewer",
             "in: PR #71 by mattmcalister: head bbbbbbb not reviewed by the reviewer",
             "out: PR #72 was opened by someone other than a swarm App or the owner (#206)",
-            "out: PR #73 was opened by someone other than a swarm App or the owner (#206)"])
-        self.assertEqual(self.lines[-1], "plan: 2 PR(s) to review")
+            "in: PR #73 by productswarm-analyst[bot]: head ccccccc not reviewed by the reviewer",
+            "in: PR #74 by productswarm-designer[bot]: head aaaaaaa not reviewed by the reviewer",
+            "out: PR #75 was opened by someone other than a swarm App or the owner (#206)"])
+        self.assertEqual(self.lines[-1], "plan: 4 PR(s) to review")
         # reviews read only for eligible PRs
         self.assertEqual([r for r in self.reads if r[0] == "reviews"],
-                         [("reviews", REPO, 70), ("reviews", REPO, 71)])
+                         [("reviews", REPO, n) for n in (70, 71, 73, 74)])
+
+    def test_unreadable_jurisdictions_trusts_only_the_owner(self):
+        self.jurisdictions.unlink()
+        self.open_prs = [pr(70), pr(71, author=OWNER, sha=SHA2)]
+        self.cap("actions_max_reviews = 5")
+        code, prs, any_ = self.run_plan()
+        self.assertEqual((code, any_), (0, "true"))
+        self.assertEqual(prs, [{"pr": 71, "head": SHA2}])
+        self.assertEqual(self.lines[:3], [
+            "plan: trusting only the owner: can't read governance/jurisdictions.yml "
+            "(FileNotFoundError) (#506)",
+            "out: PR #70 was opened by someone other than a swarm App or the owner (#206)",
+            "in: PR #71 by mattmcalister: head bbbbbbb not reviewed by the reviewer"])
 
     def test_every_swarm_app_that_opens_prs_is_in(self):
         self.open_prs = [pr(70 + i, author=f"productswarm-{role}[bot]")
