@@ -1,0 +1,77 @@
+# The merger (GOV-0022, GOV-0027, #592): on a schedule or a dispatch, from main, run
+# launcher/merger.py run. It comments "would merge" in shadow and merges in live, per
+# swarm.toml's [merger] mode. App and token rights: GOV-0028. No PR code runs here.
+# Committed by the owner: the Apps have no `workflows` permission (#32).
+name: Merger
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to consider (leave empty to sweep every open PR)
+        required: false
+        type: string
+      dry_run:
+        description: Print what it would post or merge, and write nothing
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: merger
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Merge
+        env:
+          APP_ID: ${{ secrets.MERGER_APP_ID }}
+          APP_KEY: ${{ secrets.MERGER_APP_KEY }}
+          PR_INPUT: ${{ inputs.pr }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          # Mint the merger App token as reviewer.yml does (openssl, curl and jq; no
+          # third-party action), limited to this repo and to GOV-0028's rights.
+          key="$RUNNER_TEMP/merger.pem"
+          (umask 077; printf '%s\n' "$APP_KEY" > "$key")
+          unset APP_KEY
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          now=$(date +%s)
+          header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+          payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$APP_ID" | b64url)
+          sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$key" -binary | b64url)
+          rm -f "$key"
+          jwt="$header.$payload.$sig"
+          echo "::add-mask::$jwt"
+          api() { curl -fsS -H "Authorization: Bearer $jwt" -H "Accept: application/vnd.github+json" "$@"; }
+          inst=$(api "https://api.github.com/repos/$GITHUB_REPOSITORY/installation" | jq -r .id)
+          resp=$(api -X POST "https://api.github.com/app/installations/$inst/access_tokens" \
+            -d "{\"repositories\":[\"${GITHUB_REPOSITORY#*/}\"],\"permissions\":{\"contents\":\"write\",\"pull_requests\":\"write\",\"checks\":\"read\",\"issues\":\"read\",\"metadata\":\"read\"}}")
+          GH_TOKEN=$(jq -r .token <<<"$resp")
+          echo "::add-mask::$GH_TOKEN"
+          unset jwt
+          granted=$(jq -c '.permissions // {}' <<<"$resp")
+          unset resp
+          echo "token permissions: $granted"
+          export GH_TOKEN
+          args=(run)
+          pr="${PR_INPUT#\#}"
+          if [ -n "$pr" ]; then
+            [[ "$pr" =~ ^[0-9]+$ ]] || { echo "merger: the pr input must be a PR number"; exit 1; }
+            args+=(--pr "$pr")
+          fi
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          python3 launcher/merger.py "${args[@]}"
