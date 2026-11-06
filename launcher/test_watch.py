@@ -294,6 +294,51 @@ class WatchTest(unittest.TestCase):
         self.assertIn("[answer] #88 ready by the owner -> would start "
                       "`launcher/swarm launch planner --issue 88`", trigger_lines(self.lines))
 
+    def rule(self, n=88, eid=30, **body):
+        """The owner adds `gov:ruled` to question n, which is already `ready` (#495)."""
+        q = [i for i in self.scene.issues if i["number"] == n][0]
+        q["labels"].append({"name": "gov:ruled"})
+        if body:
+            q["body"] = question_body(**body)
+        self.scene.events[n].append(ev("gov:ruled", eid=eid))
+
+    def test_a_ruling_on_a_ready_question_fires_answer_again(self):
+        # #495: #480 was ruled while ready, and nothing started.
+        self.scene.issues[3]["body"] = question_body(raised="owner")
+        self.w.tick(NOW)
+        self.rule()
+        (t,) = self.w.tick(NOW)
+        self.assertEqual((t.key, t.role, t.after), ("answer:88:30", "planner", None))
+        self.assertEqual(trigger_lines(self.lines)[-1], "[answer] #88 gov:ruled by the owner -> would "
+                         "start `launcher/swarm launch planner --issue 88`")
+        self.assertEqual(self.w.tick(NOW), [])            # printed once
+
+    def test_ruled_key_is_the_later_owner_label(self):
+        # Ruled first, `ready` added after: the ready event is the key, as before #495.
+        self.scene.issues[3]["labels"].append({"name": "gov:ruled"})
+        self.scene.events[88] = [ev("gov:ruled", eid=13), ev("ready", eid=14)]
+        (t,) = [t for t in self.w.tick(NOW) if t.kind == "answer"]
+        self.assertEqual((t.key, t.why), ("answer:88:14", "ready by the owner"))
+        # Someone else's gov:ruled doesn't count (GOV-0006); `ready` is still the key.
+        self.w.seen.clear()
+        self.scene.events[88] = [ev("ready", eid=14), ev("gov:ruled", "productswarm-planner[bot]", 15)]
+        (t,) = [t for t in self.w.tick(NOW) if t.kind == "answer"]
+        self.assertEqual(t.key, "answer:88:14")
+        # A ruling without the owner's `ready` starts no [answer].
+        self.w.seen.clear()
+        self.scene.issues[3]["labels"] = [{"name": "gov:question"}, {"name": "gov:ruled"}]
+        self.scene.events[88] = [ev("gov:ruled", eid=16)]
+        self.assertNotIn("answer", [t.kind for t in self.w.tick(NOW)])
+
+    def test_dry_run_says_docs_goes_before_the_planner(self):
+        self.w.tick(NOW)
+        self.rule(raised="owner", domain="governance")
+        self.assertEqual([(t.kind, t.after) for t in self.w.tick(NOW)],
+                         [("record", None), ("answer", "record:88:30")])
+        self.assertEqual(trigger_lines(self.lines)[-1], "[answer] #88 gov:ruled by the owner -> would "
+                         "start `launcher/swarm launch planner --issue 88` once docs has stopped "
+                         "([record] first)")
+
     def test_dry_run_starts_nothing_and_writes_nothing(self):
         state = self.l.state_file
         self.l.save([swarm.Started("gone-1", "docs", "m", "gone", 0)])   # exited: live() would prune it
@@ -542,6 +587,61 @@ class StartTest(unittest.TestCase):
         self.assertNotIn(49, [e.issue for e in self.l.load()])
         self.assertTrue(any("#49's `ready` label was added by productswarm-planner[bot]" in x
                             for x in self.lines), self.lines)
+
+    def test_a_ruling_on_a_ready_question_starts_the_planner_again(self):
+        # #495: the owner rules a question that is already ready; no record is needed.
+        self.scene.issues[3]["body"] = question_body(raised="owner")
+        self.watcher().tick(NOW)
+        self.exit("planner-issue-88")
+        self.scene.issues[3]["labels"].append({"name": "gov:ruled"})
+        self.scene.events[88].append(ev("gov:ruled", eid=30))
+        (t,) = self.watcher().tick(NOW)
+        self.assertEqual((t.key, t.ref), ("answer:88:30", "#88"))
+        self.assertEqual(sum("starting planner-issue-88" in x for x in self.lines), 2)
+
+    def test_docs_records_the_ruling_before_the_planner_starts(self):
+        # #495: [record] and [answer] on one question run one after the other, docs first.
+        self.scene.issues = [self.scene.issues[3]]
+        self.scene.issues[0]["labels"].append({"name": "gov:ruled"})
+        self.scene.issues[0]["body"] = question_body(raised="owner", domain="governance")
+        self.scene.events = {88: [ev("ready", eid=14), ev("gov:ruled", eid=30)]}
+        self.scene.prs, self.scene.reviewed = [], {}
+        self.manifest(ALL_CAPPED, max_live=1)
+        w = self.watcher()
+        self.assertEqual([t.kind for t in w.tick(NOW)], ["record"])
+        self.assertEqual([e.name for e in self.l.load()], ["docs-issue-88"])
+        self.assertEqual(w.tick(NOW), [])                         # docs live: busy()
+        self.assertNotIn("planner", [e.role for e in self.l.load()])
+        self.exit("docs-issue-88")
+        self.scene.prs = [pr(95, closes=(88,))]                   # docs opened the ruling PR
+        self.scene.reviewed = {95: {SHA1}}
+        self.assertEqual([t.kind for t in w.tick(NOW)], ["answer"])
+        self.assertEqual([e.name for e in self.l.load()], ["planner-issue-88"])
+
+    def test_answer_starts_after_docs_even_when_held_first(self):
+        # A ceiling held [answer] before [record] existed in the list; docs still goes first.
+        self.scene.issues = [self.scene.issues[3]]
+        self.scene.issues[0]["labels"].append({"name": "gov:ruled"})
+        self.scene.issues[0]["body"] = question_body(raised="owner", domain="governance")
+        self.scene.events = {88: [ev("ready", eid=14), ev("gov:ruled", eid=30)]}
+        self.scene.prs, self.scene.reviewed = [], {}
+        self.manifest(ALL_CAPPED, max_live=1)
+        self.l.start(swarm.Started("reviewer-watch", "reviewer", "m", "rev-sid", self.fake.t,
+                                   by="watch", budget_usd=5, max_turns=50), [])
+        w = self.watcher()
+        w.tick(NOW)                                               # the one slot is taken
+        self.assertIn("[answer] #88 gov:ruled by the owner -> held: docs records the ruling on #88 "
+                      "first, then planner starts", self.lines)
+        st = watch.load_state(self.l)                             # [answer] has waited longest
+        for x in st["waiting"]:
+            x["since"] = "2026-11-01T00:00:00+00:00" if x["kind"] == "answer" else x["since"]
+        watch.save_state(self.l, st)
+        self.exit("reviewer-watch")
+        self.assertEqual([t.kind for t in w.tick(NOW)], ["record"])
+        self.assertEqual([e.name for e in self.l.load()], ["docs-issue-88"])
+        self.exit("docs-issue-88")                                # docs stopped without a PR
+        self.assertEqual([t.kind for t in w.tick(NOW)], ["answer"])
+        self.assertEqual([e.name for e in self.l.load()], ["planner-issue-88"])
 
     def test_record_rechecks_gov_ruled_not_ready(self):
         self.watcher().tick(NOW)
