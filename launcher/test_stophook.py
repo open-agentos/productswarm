@@ -18,7 +18,7 @@ T0 = 1_800_000_000.0                       # when the run started
 BEFORE, AFTER = "2027-01-15T07:00:00Z", "2027-01-15T09:00:00Z"   # T0 is 08:00:00Z
 SID = "11111111-2222-3333-4444-555555555555"
 ME = {"builder": "productswarm-builder[bot]", "docs": "productswarm-docs[bot]",
-      "reviewer": "productswarm-reviewer[bot]"}
+      "reviewer": "productswarm-reviewer[bot]", "planner": "productswarm-planner[bot]"}
 
 
 def issue(n, labels=("ready",), state="open"):
@@ -102,6 +102,33 @@ class BuilderTest(HookCase):
 
     def test_ready_not_added_by_the_owner_is_done(self):
         self.builder_on(who="someone")
+        self.assertAllows()
+
+    def milestone_on(self, m="M1", plan=True, comments=()):
+        import base64
+        self.run_as("builder", 7)
+        it = issue(7, ())
+        it.update(user={"login": ME["planner"]}, body=f"**Milestone:** {m}\n**Waits on:** nothing.\n")
+        self.gh.put("issues/7", it)
+        self.gh.put("issues/7/events", [])
+        self.gh.put("issues/7/comments", list(comments))
+        if plan:
+            text = "## M1: Report\n\n- **Done test:** x\n\n## M2: Merges (done)\n"
+            self.gh.put("contents/PLAN.md", {"content": base64.b64encode(text.encode()).decode()})
+
+    def test_milestone_issue_without_ready_blocks_until_its_pr(self):
+        self.milestone_on()
+        self.assertBlocks("No PR closes #7")
+        self.gh.closes(7, 50)
+        self.assertAllows()
+
+    def test_milestone_issue_that_isnt_go_is_done(self):
+        self.milestone_on("M2")                     # marked done
+        self.assertAllows()
+        self.milestone_on(plan=False)               # no PLAN.md on main
+        self.gh.data.pop(f"repos/{R}/contents/PLAN.md", None)
+        self.assertAllows()
+        self.milestone_on(comments=[{"user": {"login": OWNER}, "body": "wait"}])   # veto
         self.assertAllows()
 
     def test_closed_issue_is_done(self):

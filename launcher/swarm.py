@@ -808,6 +808,119 @@ def issue_refusals(n: int, issue: dict | None, events: list[dict], owner: str,
     return []
 
 
+# GOV-0026: an issue under an open PLAN.md milestone is go without `ready` (#582).
+MILESTONE_RE = re.compile(r"^\s*\*\*Milestone:\*\*[ \t]*M(\d+)\b", re.MULTILINE | re.IGNORECASE)
+PLAN_HEADING_RE = re.compile(r"^##[ \t]+M(\d+)\b(.*)$", re.MULTILINE)
+# PLAN.md's format (#574) doesn't yet say how a milestone is marked done. Either of these
+# counts, so a milestone someone has tried to close fails closed: a heading with "(done)"
+# or "✅", or a `**Status:** done` line in the milestone's section.
+DONE_HEADING_RE = re.compile(r"\(done\b[^)]*\)|✅", re.IGNORECASE)
+DONE_STATUS_RE = re.compile(r"^\s*(?:[-*]\s*)?\*\*Status:\*\*[ \t]*done\b", re.MULTILINE | re.IGNORECASE)
+AGENTS_RE = re.compile(r"^([ \t]+)agents:[ \t]*\n((?:\1[ \t]+\S.*\n?)+)", re.MULTILINE)
+AGENT_LOGIN_RE = re.compile(r':[ \t]*"([^"]+)"')
+
+
+def agent_logins(path: Path = JURISDICTIONS) -> set[str]:
+    """identities.agents from jurisdictions.yml: every swarm App's login."""
+    m = AGENTS_RE.search(path.read_text())
+    if not m:
+        raise RuntimeError(f"can't find identities.agents in {path}")
+    return set(AGENT_LOGIN_RE.findall(m.group(2)))
+
+
+def milestone_of(body: str | None) -> int | None:
+    """n from the body's first `**Milestone:** M<n>` line, or None ("no milestone yet")."""
+    m = MILESTONE_RE.search(body or "")
+    return int(m.group(1)) if m else None
+
+
+def plan_milestones(plan: str) -> dict[int, bool]:
+    """Each `## M<n>` section of PLAN.md, and whether it is marked done."""
+    heads = list(PLAN_HEADING_RE.finditer(plan))
+    out = {}
+    for i, h in enumerate(heads):
+        section = plan[h.end():heads[i + 1].start() if i + 1 < len(heads) else len(plan)]
+        out[int(h.group(1))] = bool(DONE_HEADING_RE.search(h.group(2))
+                                    or DONE_STATUS_RE.search(section))
+    return out
+
+
+@dataclass
+class GoReader:
+    """What the milestone go needs beyond the issue and its events, read only when asked:
+    PLAN.md on main (None if it isn't there), an issue's state, and the issue's comments."""
+    plan: Callable[[], str | None]
+    state: Callable[[int], str | None]
+    comments: Callable[[], list[dict]]
+
+
+def milestone_refusal(n: int, issue: dict, owner: str, agents: set[str], r: GoReader) -> str | None:
+    """Why issue n isn't go by its milestone (GOV-0026), or None if it is."""
+    m = milestone_of(issue.get("body"))
+    if m is None:
+        return f"#{n} has no `**Milestone:** M<n>` line"
+    author = (issue.get("user") or {}).get("login")
+    if author != owner and author not in agents:
+        return (f"#{n} was opened by {author or 'nobody we can see'}, not a swarm App or "
+                f"@{owner}, so its milestone doesn't make it go")
+    plan = r.plan()
+    if plan is None:
+        return f"#{n}'s milestone M{m} can't count: PLAN.md isn't on main"
+    done = plan_milestones(plan)
+    if m not in done:
+        return f"#{n}'s milestone M{m} isn't in PLAN.md on main"
+    if done[m]:
+        return f"#{n}'s milestone M{m} is marked done in PLAN.md"
+    labels = {lb.get("name") for lb in issue.get("labels") or []}
+    if "hold" in labels:
+        return f"#{n} is labelled `hold`: the owner's veto"
+    import watch
+    still = [w for w in watch.waits_on(issue.get("body")) if r.state(w) != "closed"]
+    if still:
+        return f"#{n} waits on {', '.join(f'#{w}' for w in still)}, still open"
+    if any((c.get("user") or {}).get("login") == owner for c in r.comments()):
+        return (f"@{owner} commented on #{n}: that's a veto until @{owner} labels it `ready`")
+    return None
+
+
+def go_refusals(n: int, issue: dict | None, events: list[dict], owner: str,
+                agents: set[str], r: GoReader) -> list[str]:
+    """Reasons issue n isn't go for a [build], or [] if it is (GOV-0026).
+
+    Go is the owner's `ready` (GOV-0006), or, for an implementation issue, its milestone:
+    opened by a swarm App or the owner, `**Milestone:** M<n>` naming a milestone in PLAN.md
+    on main that isn't marked done, its `**Waits on:**` issues closed, and no veto (a `hold`
+    label or any owner comment; a closed issue is refused anyway). A gov:question is go
+    only by `ready`. When the issue names a milestone, the first reason is why that failed."""
+    refused = issue_refusals(n, issue, events, owner)
+    if not refused or issue is None or "pull_request" in issue or issue.get("state") != "open":
+        return refused
+    labels = {lb.get("name") for lb in issue.get("labels") or []}
+    if "gov:question" in labels or milestone_of(issue.get("body")) is None:
+        return refused
+    why = milestone_refusal(n, issue, owner, agents, r)
+    return [why, *refused] if why else []
+
+
+def gh_plan(repo: str) -> str | None:
+    """PLAN.md on main, or None if it isn't there."""
+    import base64
+    try:
+        d = dashboard().gh_json("api", f"repos/{repo}/contents/PLAN.md?ref=main")
+    except RuntimeError as e:
+        if "Not Found" in str(e) or "404" in str(e):
+            return None
+        raise
+    return base64.b64decode(d["content"]).decode()
+
+
+def gh_go_reader(repo: str, n: int) -> GoReader:
+    g = dashboard()
+    return GoReader(plan=lambda: gh_plan(repo),
+                    state=lambda w: (g.gh_json("api", f"repos/{repo}/issues/{w}") or {}).get("state"),
+                    comments=lambda: g.gh_items(f"repos/{repo}/issues/{n}/comments?per_page=100"))
+
+
 def holders(n: int, model: dict, started: list[Started], role: str | None = None) -> list[str]:
     """Live sessions already on issue n: heartbeat sessions whose current issue is n, plus
     launcher sessions started on n that have no heartbeat yet. With role, only that role's
@@ -845,9 +958,10 @@ def gh_issue(repo: str, n: int) -> tuple[dict | None, list[dict]]:
 def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, force: bool = False,
            dry_run: bool = False, idle_minutes: int = 15, pr: int | None = None,
            get_issue: Callable = gh_issue, get_heartbeat: Callable = heartbeat,
-           owner: Callable[[], str] = owner_login) -> int:
+           owner: Callable[[], str] = owner_login, agents: Callable[[], set[str]] = agent_logins,
+           get_reader: Callable[[str, int], GoReader] = gh_go_reader) -> int:
     issue, events = get_issue(repo, n)
-    refused = issue_refusals(n, issue, events, owner())
+    refused = go_refusals(n, issue, events, owner(), agents(), get_reader(repo, n))
     if refused:
         launcher.out(f"swarm launch: refused: {refused[0]}")
         return 1

@@ -623,7 +623,10 @@ class LaunchTest(Base):
                             dry_run=dry_run, pr=pr,
                             get_issue=lambda repo, num: (it if it != "missing" else None, events),
                             get_heartbeat=lambda repo, idle, now: {"sessions": list(sessions)},
-                            owner=lambda: OWNER)
+                            owner=lambda: OWNER, agents=lambda: AGENTS,
+                            get_reader=lambda repo, num: self.reader)
+
+    reader = None   # set by a test that reaches the milestone go
 
     def refused(self, *a, **kw):
         self.assertEqual(self.go(*a, **kw), 1)
@@ -686,6 +689,15 @@ class LaunchTest(Base):
         self.lines.clear()
         self.assertEqual(self.go(events=[labeled("ready", "someone-else"), labeled("bug", "x"),
                                          labeled("ready", OWNER)]), 0)
+
+    def test_milestone_issue_launches_without_ready(self):
+        self.reader = swarm.GoReader(plan=lambda: PLAN, state=lambda n: "closed",
+                                     comments=lambda: [])
+        self.assertEqual(self.go(milestone_issue(), events=[]), 0)
+        self.lines.clear()
+        self.fake.commands.clear()
+        msg = self.refused(milestone_issue("M2"), events=[])
+        self.assertIn("#49's milestone M2 is marked done in PLAN.md", msg)
 
     def test_force_does_not_override_issue_rules(self):
         self.refused(issue(labels=()), events=[], force=True)
@@ -774,6 +786,137 @@ class InboxTest(unittest.TestCase):
                 path.write_text(base % line)
                 self.assertIs(swarm.review_in_actions(path), want, line)
             self.assertIs(swarm.review_in_actions(Path(d) / "missing.toml"), False)
+
+
+AGENTS = {"productswarm-planner[bot]", "productswarm-builder[bot]"}
+PLAN = """# Plan: x
+
+## M1: Daily report runs without the owner
+
+- **Outcome:** a report.
+- **Done test:** 5 working days in a row.
+
+## M2: Merges under delegation
+
+- **Status:** done
+- **Done test:** over half.
+
+## M3: The desk shows the plan (done)
+
+## M4: Readiness review
+
+- **Done test:** the review is held.
+"""
+
+
+def milestone_issue(m="M1", author="productswarm-planner[bot]", labels=(), waits="nothing.",
+                    state="open"):
+    it = issue(labels=labels, state=state)
+    it["user"] = {"login": author}
+    it["body"] = f"Do it.\n\n**Milestone:** {m}\n\n**Files:** `x.py`\n**Waits on:** {waits}\n"
+    return it
+
+
+class GoTest(unittest.TestCase):
+    """GOV-0026 (#582): an issue under an open PLAN.md milestone is go without `ready`."""
+
+    def setUp(self):
+        self.plan, self.states, self.comments = PLAN, {}, []
+        self.reads = []
+
+    def reader(self):
+        def plan():
+            self.reads.append("plan")
+            return self.plan
+        return swarm.GoReader(plan=plan, state=lambda n: self.states.get(n, "open"),
+                              comments=lambda: self.comments)
+
+    def go(self, it, events=()):
+        return swarm.go_refusals(49, it, list(events), OWNER, AGENTS, self.reader())
+
+    def refusal(self, it, events=()):
+        out = self.go(it, events)
+        self.assertTrue(out, "expected a refusal")
+        return out[0]
+
+    def test_milestone_issue_is_go_without_ready(self):
+        self.assertEqual(self.go(milestone_issue()), [])
+        self.assertEqual(self.go(milestone_issue("M4", author=OWNER)), [])
+
+    def test_owners_ready_is_still_enough(self):
+        self.assertEqual(self.go(issue(), [labeled("ready", OWNER)]), [])
+        # ...and is read first: a milestone that would fail doesn't matter.
+        self.assertEqual(self.go(milestone_issue("M2", labels=("ready",)), [labeled("ready", OWNER)]), [])
+        self.assertEqual(self.reads, [])
+
+    def test_no_milestone_line_needs_ready_as_before(self):
+        it = issue(labels=())
+        it["body"] = "**Milestone:** no milestone yet (PLAN.md isn't on main).\n"
+        (only,) = self.go(it)
+        self.assertIn("isn't labelled `ready`", only)
+        self.assertEqual(self.reads, [])
+
+    def test_opened_by_someone_else(self):
+        msg = self.refusal(milestone_issue(author="stranger"))
+        self.assertIn("#49 was opened by stranger, not a swarm App or @mattmcalister", msg)
+
+    def test_milestone_not_in_plan(self):
+        self.assertIn("#49's milestone M7 isn't in PLAN.md on main", self.refusal(milestone_issue("M7")))
+
+    def test_no_plan_on_main(self):
+        self.plan = None
+        self.assertIn("PLAN.md isn't on main", self.refusal(milestone_issue()))
+
+    def test_milestone_marked_done(self):
+        self.assertIn("#49's milestone M2 is marked done in PLAN.md", self.refusal(milestone_issue("M2")))
+        self.assertIn("M3 is marked done", self.refusal(milestone_issue("M3")))
+
+    def test_waits_on_an_open_issue(self):
+        self.states = {456: "closed"}
+        self.assertEqual(self.go(milestone_issue(waits="#456.")), [])
+        msg = self.refusal(milestone_issue(waits="#456 and #457."))
+        self.assertIn("#49 waits on #457, still open", msg)
+
+    def test_hold_label_is_a_veto(self):
+        self.assertIn("labelled `hold`", self.refusal(milestone_issue(labels=("hold",))))
+
+    def test_any_owner_comment_is_a_veto(self):
+        self.comments = [{"user": {"login": "productswarm-builder[bot]"}, "body": "on it"}]
+        self.assertEqual(self.go(milestone_issue()), [])
+        self.comments.append({"user": {"login": OWNER}, "body": "looks good"})
+        self.assertIn("@mattmcalister commented on #49", self.refusal(milestone_issue()))
+
+    def test_closed_is_refused(self):
+        self.assertEqual(self.go(milestone_issue(state="closed")), ["#49 is closed"])
+
+    def test_ready_by_someone_else_falls_back_to_the_milestone(self):
+        it = milestone_issue(labels=("ready",))
+        self.assertEqual(self.go(it, [labeled("ready", "productswarm-planner[bot]")]), [])
+        self.plan = None
+        out = self.go(it, [labeled("ready", "productswarm-planner[bot]")])
+        self.assertIn("PLAN.md isn't on main", out[0])
+        self.assertIn("added by productswarm-planner[bot]", out[1])
+
+    def test_a_question_with_a_milestone_line_is_not_go(self):
+        (only,) = self.go(milestone_issue(labels=("gov:question",)))
+        self.assertIn("isn't labelled `ready`", only)
+        self.assertEqual(self.reads, [])
+
+    def test_milestone_line(self):
+        for body, want in [("**Milestone:** M2\n", 2), ("**milestone:** m12 (the desk)\n", 12),
+                           ("**Milestone:** no milestone yet\n", None), (None, None),
+                           ("See `**Milestone:** M1` in prose.\n", None)]:
+            self.assertEqual(swarm.milestone_of(body), want, body)
+
+    def test_plan_on_main_has_four_open_milestones(self):
+        text = (Path(__file__).resolve().parent.parent / "PLAN.md").read_text()
+        self.assertEqual(swarm.plan_milestones(text), {1: False, 2: False, 3: False, 4: False})
+
+    def test_agent_logins_from_jurisdictions(self):
+        logins = swarm.agent_logins()
+        self.assertIn("productswarm-builder[bot]", logins)
+        self.assertIn("productswarm-planner[bot]", logins)
+        self.assertNotIn(OWNER, logins)
 
 
 class LaunchHelpersTest(unittest.TestCase):
