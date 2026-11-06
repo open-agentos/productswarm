@@ -92,10 +92,17 @@ How each run ended (#149): when a run the loop started is no longer live, the lo
 its result file and records, against the trigger in watch.json's "runs", the session id,
 Claude Code's total_cost_usd (a client-side estimate that stays local: GOV-0002/3/4) and
 its ending: done, ended at cap (--max-budget-usd or --max-turns), error, or no result (no
-file or no JSON result, for example after `swarm stop`). The trigger stays done, so the
-loop never restarts it by itself; `swarm inbox` lists a run that ended at cap, with its
-ref and cost, so the owner can decide whether to restart it, and lists every recorded
-cost from the last RUNS_DAYS days. A kept worktree is tidy()'s job, as for any session.
+file or no JSON result, for example after `swarm stop`), or limited (#489, below). Unless
+it was limited, the trigger stays done, so the loop never restarts it by itself; `swarm
+inbox` lists a run that ended at cap, with its ref and cost, so the owner can decide
+whether to restart it, and lists every recorded cost from the last RUNS_DAYS days. A kept worktree is tidy()'s job, as for any session.
+
+A usage or rate limit (#489): a run whose result has api_error "usage_limit_reached" or
+api_error_status 429 ends "limited". Its trigger leaves "acted", as do the review
+triggers its reviewer pass covered, so they fire again with no label change. Because the
+limit is account-wide, every start is held, with the reason `held: usage limit (until
+HH:MM)`, until the reset time the result names ("resets 12pm (Europe/London)") or, if it
+names none the loop can read, LIMIT_HOLD after the run ended. The loop says so once.
 
 Each run it starts gets a Stop hook (stophook.py, #148) that keeps it going until its
 role's done-condition is met; see that module for the conditions and the guards.
@@ -126,6 +133,7 @@ import re
 import tempfile
 import time
 import uuid
+import zoneinfo
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -147,6 +155,9 @@ RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and
 # SDKResultMessage type in the Claude Code Agent SDK reference (#149). Any other subtype,
 # or "success" with is_error set, is an error.
 DONE, AT_CAP, ERROR, NO_RESULT = "done", "ended at cap", "error", "no result"
+LIMITED = "limited"           # a usage or rate limit: tried again after the hold (#489)
+LIMIT_HOLD = dt.timedelta(minutes=30)     # when the result names no reset time
+RESETS_RE = re.compile(r"\bresets (\d{1,2})(?::(\d{2}))?\s*([ap]m)\b(?:\s*\(([^)]+)\))?", re.I)
 CAPS = {"error_max_budget_usd": "budget (--max-budget-usd)",
         "error_max_turns": "turns (--max-turns)"}
 
@@ -484,6 +495,10 @@ def read_result(path: Path) -> dict:
     cost = float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
     sub = result.get("subtype")
     rec = {"cost_usd": cost, "subtype": sub if isinstance(sub, str) else None}
+    if result.get("api_error") == "usage_limit_reached" or result.get("api_error_status") == 429:
+        msg = result.get("result")
+        detail = msg if isinstance(msg, str) and msg else str(result.get("api_error") or "HTTP 429")
+        return {**rec, "ending": LIMITED, "detail": detail[:200]}
     if sub in CAPS:
         return {**rec, "ending": AT_CAP, "detail": CAPS[sub]}
     if sub == "success" and not result.get("is_error"):
@@ -491,6 +506,35 @@ def read_result(path: Path) -> dict:
     errors = result.get("errors")
     detail = "; ".join(str(e) for e in errors) if isinstance(errors, list) and errors else ""
     return {**rec, "ending": ERROR, "detail": (detail or f"subtype {sub}")[:200]}
+
+
+def limit_until(message: str | None, ended: dt.datetime) -> dt.datetime:
+    """When a limited run's hold ends (#489): the first time after `ended` that matches the
+    message's "resets 12pm (Europe/London)" (in that zone, or this machine's if it names
+    none), or LIMIT_HOLD after `ended` if there is no reset time it can read."""
+    m = RESETS_RE.search(message or "")
+    if m:
+        hour, minute = int(m[1]), int(m[2] or 0)
+        try:
+            zone = zoneinfo.ZoneInfo(m[4]) if m[4] else None
+        except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+            zone, m = None, None
+        if m and 1 <= hour <= 12 and minute < 60:
+            here = ended.astimezone(zone)
+            t = here.replace(hour=hour % 12 + 12 * (m[3].lower() == "pm"), minute=minute,
+                             second=0, microsecond=0)
+            if t <= here:
+                t += dt.timedelta(days=1)
+            return t.astimezone(dt.timezone.utc)
+    return ended + LIMIT_HOLD
+
+
+def limit_reason(runs: dict, now: dt.datetime) -> str | None:
+    """The hold every start waits on while a run is limited (#489), or None."""
+    until = [dt.datetime.fromisoformat(r["until"]) for r in runs.values()
+             if r.get("ending") == LIMITED and r.get("until")]
+    until = max((u for u in until if u > now), default=None)
+    return until and f"held: usage limit (until {until.astimezone().strftime('%H:%M')})"
 
 
 def usd(x: float | None) -> str:
@@ -742,7 +786,10 @@ class Watch:
         live = self.launcher.live()
         st = load_state(self.launcher)
         acted, before = st["acted"], {x["key"]: x for x in st["waiting"]}
-        runs = self.record_ended(st["runs"], live, now)
+        runs = self.record_ended(st["runs"], live, now, acted)
+        limited = limit_reason(runs, now)
+        if limited and not any(x.get("reason") == limited for x in st["waiting"]):
+            out(f"swarm watch: a run hit the account's usage limit; {limited}, for every start (#489)")
         todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
                                     limits.review_in_actions)
                 if t.key not in acted]
@@ -759,7 +806,7 @@ class Watch:
             since = before.get(t.key, {}).get("since", iso(now))
             held.append({"key": t.key, "kind": t.kind, "ref": t.ref, "why": t.why,
                          "reason": reason, "since": since})
-            if before.get(t.key, {}).get("reason") != reason:     # log each reason once
+            if reason != limited and before.get(t.key, {}).get("reason") != reason:   # each reason once
                 out(f"[{t.kind}] {t.ref} {t.why} -> {reason}")
 
         for t in todo:
@@ -797,6 +844,9 @@ class Watch:
                 hold(t, f"skipped: {t.role} has no spend_cap_usd in swarm.toml, and swarm watch "
                         f"starts only capped roles (GOV-0010)")
                 continue
+            if limited:
+                hold(t, limited)       # said once above: the limit is account-wide
+                continue
             busy_with = overlap(t.issue, w, live) if t.kind == "build" else None
             if busy_with:
                 hold(t, busy_with)
@@ -824,10 +874,12 @@ class Watch:
         save_state(self.launcher, {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs})
         return done
 
-    def record_ended(self, runs: dict, live: list, now: dt.datetime) -> dict:
+    def record_ended(self, runs: dict, live: list, now: dt.datetime, acted: dict) -> dict:
         """Record how each run this loop started ended, once it is no longer live (#149):
         read its result file and log one line. Records older than RUNS_DAYS are dropped.
-        Its trigger stays done in "acted", so the loop never starts it again by itself."""
+        Its trigger stays done in "acted", so the loop never starts it again by itself,
+        unless the run was limited (#489): then it records when the hold ends and takes the
+        trigger, and any review triggers its pass covered, out of "acted" to fire again."""
         alive = {e.session_id for e in live}
         since = iso(now - dt.timedelta(days=RUNS_DAYS))
         kept = {}
@@ -836,7 +888,13 @@ class Watch:
                 continue
             if not r.get("ending") and r["session_id"] not in alive:
                 r = {**r, **read_result(self.launcher.result_file(r["session_id"])), "ended": iso(now)}
-                self.launcher.out(f"{run_line(r)} -> recorded")
+                if r["ending"] == LIMITED:
+                    r["until"] = iso(limit_until(r["detail"], now))
+                    for k in [k for k, v in acted.items() if k == key or v == f"covered by {r['name']}"]:
+                        del acted[k]
+                    self.launcher.out(f"{run_line(r)} -> recorded; trying again after the hold")
+                else:
+                    self.launcher.out(f"{run_line(r)} -> recorded")
             kept[key] = r
         return kept
 

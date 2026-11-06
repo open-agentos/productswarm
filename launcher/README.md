@@ -204,12 +204,14 @@ Once a run the loop started is no longer live, the next check reads its result f
 |---|---|
 | `done` | `subtype` is `success` and `is_error` is false |
 | `ended at cap` | `subtype` is `error_max_budget_usd` (`--max-budget-usd`) or `error_max_turns` (`--max-turns`) |
+| `limited` | a usage or rate limit: `api_error` is `usage_limit_reached` or `api_error_status` is 429 (#489); `detail` holds the result's message, for example "You've hit your 5-hour limit · resets 12pm (Europe/London)" |
 | `error` | any other `subtype`, or `success` with `is_error` set; `detail` holds the result's `errors` |
 | `no result` | no result file, a file that can't be read, or no JSON result on its last line, for example after `swarm stop` |
 
 `cost_usd` is the result's `total_cost_usd`: Claude Code's client-side estimate. It stays on this machine. GOV-0002, GOV-0003 and GOV-0004 still govern what reaches GitHub, and nothing new is posted.
 
-- **The trigger stays done.** The loop never restarts a run by itself, whatever its ending (GOV-0012).
+- **The trigger stays done.** The loop never restarts a run by itself (GOV-0012), unless it was `limited`.
+- **A `limited` run is tried again after the hold (#489).** Claude Code reports a usage limit as `subtype` `success` with `is_error` set, after a second or two and at $0.00: the run never started work. Its trigger leaves `"acted"`, along with any review triggers its reviewer pass covered, so it fires again with no label change. The record gets an `"until"` time: the next time the result's "resets 12pm (Europe/London)" names (in that zone, or this machine's if it names none), or 30 minutes after the run ended (`watch.LIMIT_HOLD`) if there's no reset time the loop can read. The limit is account-wide, so until then the loop holds **every** start, says so once, and lists each held trigger in `swarm inbox` as `held: usage limit (until HH:MM)`, in this machine's time. Triggers that start nothing (skipped, refused, covered) are not held. Other errors behave as before.
 - **`swarm inbox` lists a run that ended at cap**, with its ref, which limit it reached and its cost, so you can decide whether to restart it, for example by adding `ready` again. It drops off the list once a later run on the same ref has started, or after 7 days (`watch.RUNS_DAYS`).
 - **`swarm inbox` lists each recorded run's cost** from the last 7 days, newest first. Records older than that are dropped from `watch.json`.
 - **Unpushed work is kept.** As for any session, `tidy()` keeps an exited run's worktree if it has uncommitted or unpushed work, and `swarm ls` names it.
