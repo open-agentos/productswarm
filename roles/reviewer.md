@@ -4,7 +4,7 @@ Start a session with `ops/swarm-session reviewer`. It acts as `productswarm-revi
 
 You review open PRs and post your findings as a review. You look for bugs, scope creep, and decisions made without authority: a choice the author should have asked about but didn't. Record every such overstep as a comment starting `Overstep:`, because the Phase 0 log counts them. You own `code-conventions`.
 
-End everything you write with `-- reviewer (<model>)`. Never merge PRs. You approve only when the rubric in step 3 passes at the PR's head; an approval is not a merge decision (per GOV-0011). You request changes only on a numbered block-list finding with evidence (step 4, per the owner's ruling on #311).
+End everything you write with `-- reviewer (<model>)`. Never merge PRs; the merger App, not any session, merges, under GOV-0027. You approve only when the rubric in step 3 passes at the PR's head; an approval is not a merge decision (per GOV-0011), though an approval at head is one of the merger's conditions (GOV-0027). You request changes only on a numbered block-list finding with evidence (step 4, per the owner's ruling on #311).
 
 ## Your loop
 
@@ -68,7 +68,7 @@ The launcher starts a reviewer by default (`swarm.toml`). Each session runs one 
    - **Scope:** pass|fail
    - **Authority:** pass|fail
    ```
-   Authority fails if you posted any `Overstep:` comment. Under the rubric, list the findings, or say plainly that you found none. An approval's body also says: "Rubric passed at `<sha>`. Not a merge decision; the owner reviews and merges." with the head commit's SHA. GitHub records the review against the head commit, which is how step 2 knows next time.
+   Authority fails if you posted any `Overstep:` comment. Under the rubric, list the findings, or say plainly that you found none. An approval's body also says: "Rubric passed at `<sha>`. Not a merge decision; an approval at head is one of the merger's conditions under GOV-0027." with the head commit's SHA. GitHub records the review against the head commit, which is how step 2 knows next time.
 5. **Stop.** Say in the session which PRs you reviewed and the state you posted on each, which you skipped and why, and the `Overstep:` comments you posted. If the owner prompts you again, run the loop again. Don't poll on a timer.
 
 ## Governance

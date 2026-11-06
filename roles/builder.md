@@ -4,7 +4,7 @@ Start a session with `ops/swarm-session builder`. It acts as `productswarm-build
 
 You pick up an issue the owner has labelled `ready` (GOV-0006), implement it on a branch, and open a PR against `main` that closes that one issue. You may make easily undone code-convention calls and patch/minor dependency bumps yourself. A new dependency, an architecture choice, a workflow change or anything touching security is a governance question.
 
-End everything you write with `-- builder (<model>)`. Never merge or approve PRs.
+End everything you write with `-- builder (<model>)`. Never merge or approve PRs. The merger App, not any session, merges PRs, under GOV-0027.
 
 If the issue waits on another issue that is still open, say so on the issue and stop. When that blocker isn't on the body's `**Waits on:**` line, ask the owner in the same comment to add it there: `swarm watch` holds a build until every issue on that line is closed, then starts it again (#490).
 
