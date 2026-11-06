@@ -55,7 +55,7 @@ It refuses, and says why, if:
    - every issue on its `**Waits on:**` line is closed (read as `swarm watch` reads it, #490);
    - the owner hasn't vetoed it: it has no `hold` label, and the owner hasn't commented on it. Any owner comment is a veto, whatever it says, until the owner labels the issue `ready` (the record says "a comment" without narrowing it, so this reads it strictly).
 
-A `gov:question` is go only by `ready`, even with a milestone line (GOV-0026 leaves GOV-0006's rule for questions unchanged). When #N has a milestone line and neither way passes, the refusal names the milestone condition that failed, for example `#N's milestone M2 is marked done in PLAN.md`. Without a milestone line it names the `ready` check, as before. `swarm watch`'s `[build]` trigger still starts only on `ready` issues; reading milestones there is the next issue.
+A `gov:question` is go only by `ready`, even with a milestone line (GOV-0026 leaves GOV-0006's rule for questions unchanged). When #N has a milestone line and neither way passes, the refusal names the milestone condition that failed, for example `#N's milestone M2 is marked done in PLAN.md`. Without a milestone line it names the `ready` check, as before. `swarm watch` starts `[build]` on an issue that is go either way (#583; see "Builds by milestone" under `swarm watch`).
 
 ## Spend cap (warn only)
 
@@ -180,11 +180,17 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respo
 | Trigger | Starts |
 |---|---|
 | `[review]` An open, non-draft PR whose current head `productswarm-reviewer[bot]` hasn't reviewed (the check in `roles/reviewer.md` step 2) | a reviewer pass: one reviewer session with its usual opener |
-| `[build]` An open issue whose most recent `ready` label was added by the owner (GOV-0006), with no open PR closing it | `builder` on #N, as `swarm launch builder --issue N` would |
+| `[build]` An open, non-question issue with no open PR closing it, that is go: its most recent `ready` label was added by the owner (GOV-0006), or it is go by its `PLAN.md` milestone (GOV-0026, #583) | `builder` on #N, as `swarm launch builder --issue N` would |
 | `[record]` A `gov:question` whose most recent `gov:ruled` was added by the owner and that needs a record (GOV-0007), with no open PR closing it | `docs` on the question |
 | `[answer]` A `gov:question` whose most recent `ready` was added by the owner, and again when the owner then adds `gov:ruled` (#495) | the role in its "Raised by" field, on the question. If the field starts with `owner` or the owner's login, `planner` (#455) |
 | `[respond]` An open, non-draft PR that `productswarm-builder[bot]` opened, whose latest `productswarm-reviewer[bot]` review at its current head is "changes requested", and whose **Authority** line isn't `fail`, for at most 2 rounds (GOV-0011) | `builder` on the PR, as `swarm launch builder --issue N --pr M` would, where #N is the one issue the PR closes |
 | `[call-in]` A comment on an issue whose most recent `ready` was added by the owner, posted since that label by a swarm App or the owner, with a line `Call in: <role>, <role>: <why>` (GOV-0023, #520). Off unless `call_ins = true` (see "Call-ins" below) | each named role on the issue, once per call, with a prompt that says who called it in and why, and that it posts one comment |
+
+**Builds by milestone** (#583, GOV-0026). The watcher reads `PLAN.md` from `main` once per check, and the events and comments of every open, non-question issue with a `**Milestone:** M<n>` line. An issue without the owner's `ready` gets a `[build]` when the milestone check under "Two ways an issue is go" passes on that reading: opened by the owner or a swarm App, `M<n>` in `PLAN.md` and not marked done, no `hold` label and no owner comment. Its `**Waits on:**` issues hold the build, as for a `ready` issue, rather than stopping it. So do a live session on the issue, an overlapping GOV record and the GOV-0010 and GOV-0012 limits, as for any `[build]`.
+
+- The owner's `ready` is read first: a `ready` issue builds as before, keyed on that label event, whatever its milestone.
+- The trigger reads `[build] #N go by milestone M<n> (GOV-0026)`. Its key is `build:N:M<n>`, plus the id of the latest event removing `hold` if there is one. A change of milestone, or a `hold` veto then its removal, is a new trigger, so it starts at most one new build. An owner comment stays a veto until the owner labels the issue `ready`, which is then a `ready` build.
+- Just before the start, the watcher runs `swarm launch`'s go check (`swarm.go_refusals`) on fresh GitHub data. A veto that landed since the check refuses the start. `[respond]` uses the same check on the issue its PR closes.
 
 `[respond]` is GOV-0011's bounded review loop. The builder's push starts a fresh `[review]`, and if the reviewer requests changes again, a fresh `[respond]`:
 
