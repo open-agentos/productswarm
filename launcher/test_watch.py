@@ -1390,6 +1390,21 @@ CANNED = {
 }
 
 
+def limited_json(message="You've hit your 5-hour limit · resets 1pm (Europe/London)", sid="run-sid"):
+    """The result of #410's run on 5 Nov (#489), trimmed: a 429 that Claude Code reports as
+    subtype success with is_error set, in 2 seconds at $0.00."""
+    return json.dumps({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1,
+                       "session_id": sid, "total_cost_usd": 0, "duration_ms": 1861,
+                       "terminal_reason": "api_error", "api_error_status": 429,
+                       "api_error_origin": "first_party", "api_error": "usage_limit_reached",
+                       "result": message}) + "\n"
+
+
+def hhmm(t: dt.datetime) -> str:
+    """How the loop shows a hold's end: this machine's local time."""
+    return t.astimezone().strftime("%H:%M")
+
+
 class ReadResultTest(unittest.TestCase):
     """watch.read_result() on canned result files, one per way a run can end."""
 
@@ -1441,9 +1456,47 @@ class ReadResultTest(unittest.TestCase):
         (self.dir / "d.result.json").mkdir()                     # a path that can't be read as a file
         self.assertEqual(watch.read_result(self.dir / "d.result.json")["ending"], "no result")
 
+    def test_a_usage_limit_is_limited_with_its_message(self):
+        r = self.read(BANNER + limited_json())
+        self.assertEqual(r, {"ending": "limited", "cost_usd": 0.0, "subtype": "success",
+                             "detail": "You've hit your 5-hour limit · resets 1pm (Europe/London)"})
+
+    def test_any_429_or_usage_limit_is_limited(self):
+        for extra in ({"api_error_status": 429}, {"api_error": "usage_limit_reached"}):
+            with self.subTest(extra=extra):
+                d = {"type": "result", "subtype": "success", "is_error": True, "total_cost_usd": 0, **extra}
+                r = self.read(json.dumps(d))
+                self.assertEqual(r["ending"], "limited")
+                self.assertTrue(r["detail"])
+
     def test_a_non_number_cost_is_no_cost(self):
         self.assertIsNone(self.read(result_json("success", "lots"))["cost_usd"])
         self.assertIsNone(self.read(result_json("success", True))["cost_usd"])
+
+
+class LimitUntilTest(unittest.TestCase):
+    """watch.limit_until(): when a limited run's hold ends (#489)."""
+
+    def test_the_next_reset_time_in_the_named_zone(self):
+        london = dt.timezone.utc                                 # GMT in November
+        self.assertEqual(watch.limit_until("resets 1pm (Europe/London)", NOW),
+                         dt.datetime(2026, 11, 3, 13, 0, tzinfo=london))
+        self.assertEqual(watch.limit_until("· resets 12:30am (America/New_York)", NOW),   # 07:00 there
+                         dt.datetime(2026, 11, 4, 5, 30, tzinfo=dt.timezone.utc))
+
+    def test_a_reset_time_already_past_today_is_tomorrow(self):
+        self.assertEqual(watch.limit_until("resets 12pm (Europe/London)", NOW),
+                         dt.datetime(2026, 11, 4, 12, 0, tzinfo=dt.timezone.utc))
+
+    def test_no_zone_is_this_machines(self):
+        got = watch.limit_until("resets 3pm", NOW).astimezone()
+        self.assertEqual((got.hour, got.minute), (15, 0))
+        self.assertTrue(NOW < got <= NOW + dt.timedelta(days=1))
+
+    def test_no_readable_reset_time_holds_thirty_minutes(self):
+        for msg in (None, "", "rate limited", "resets soon", "resets 13pm", "resets 1pm (Not/AZone)"):
+            with self.subTest(msg=msg):
+                self.assertEqual(watch.limit_until(msg, NOW), NOW + dt.timedelta(minutes=30))
 
 
 class RunRecordTest(unittest.TestCase):
@@ -1558,6 +1611,69 @@ class RunRecordTest(unittest.TestCase):
         watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=True, manifest_path=self.path,
                     read=self.scene.read).tick(NOW)
         self.assertEqual(self.state(), before)
+
+    def starts(self, needle):
+        """How many sessions the loop has started whose command contains `needle`."""
+        return sum(needle in c for c in self.fake.commands)
+
+    def test_a_limited_run_fires_again_after_the_reset_with_no_label_change(self):
+        self.watcher().tick(NOW)
+        self.end("builder-issue-49", BANNER + limited_json())
+        self.scene.issues.append(issue(50, ["ready"]))           # new work arrives while limited
+        self.scene.events[50] = [ev("ready", eid=15)]
+        later = NOW + dt.timedelta(minutes=5)
+        self.assertEqual(self.watcher().tick(later), [])
+        st = self.state()
+        self.assertNotIn("build:49:11", st["acted"])
+        self.assertEqual(st["runs"]["build:49:11"]["ending"], "limited")
+        self.assertEqual(st["runs"]["build:49:11"]["until"], "2026-11-03T13:00:00+00:00")
+        reason = f"held: usage limit (until {hhmm(NOW.replace(hour=13))})"
+        self.assertEqual({x["ref"]: x["reason"] for x in st["waiting"]}, {"#49": reason, "#50": reason})
+        self.assertIn("[build] #49 builder-issue-49 · limited (You've hit your 5-hour limit · resets 1pm "
+                      "(Europe/London)) · $0.00 (est.) -> recorded; trying again after the hold", self.lines)
+        self.watcher().tick(later + dt.timedelta(minutes=5))       # said once, across checks
+        self.assertEqual([x for x in self.lines if "usage limit" in x and "[build]" not in x],
+                         [f"swarm watch: a run hit the account's usage limit; {reason}, for every start (#489)"])
+        self.assertEqual(self.starts("work on issue #49."), 1)
+        self.assertEqual(self.starts("work on issue #50."), 0)
+        self.assertIn(reason, self.inbox(later))
+        done = self.watcher().tick(NOW.replace(hour=13, minute=1))
+        self.assertEqual([t.ref for t in done], ["#49", "#50"])      # held longest first
+        self.assertEqual((self.starts("work on issue #49."), self.starts("work on issue #50.")), (2, 1))
+        self.assertEqual(self.scene.events[49], [ev("ready", eid=11)])   # no label change
+
+    def test_no_reset_time_holds_thirty_minutes(self):
+        self.watcher().tick(NOW)
+        self.end("builder-issue-49", BANNER + limited_json("Rate limited"))
+        self.watcher().tick(NOW)
+        self.assertEqual(self.watcher().tick(NOW + dt.timedelta(minutes=29)), [])
+        self.assertEqual(self.state()["waiting"][0]["reason"],
+                         f"held: usage limit (until {hhmm(NOW + dt.timedelta(minutes=30))})")
+        self.assertEqual([t.ref for t in self.watcher().tick(NOW + dt.timedelta(minutes=30))], ["#49"])
+
+    def test_a_limited_reviewer_pass_fires_every_review_it_covered_again(self):
+        self.scene.prs.append(pr(72, SHA2))
+        self.scene.reviewed[72] = set()
+        self.watcher().tick(NOW)
+        self.assertIn("covered by reviewer-watch", self.state()["acted"].values())
+        self.end("reviewer-watch", BANNER + limited_json())
+        later = NOW.replace(hour=13, minute=1)
+        self.watcher().tick(NOW)
+        done = self.watcher().tick(later)
+        self.assertEqual([t.ref for t in done], ["PR #70", "PR #72"])
+        self.assertEqual(sum(e.role == "reviewer" for e in self.l.load()), 1)   # one pass covers both again
+        self.assertEqual(len(self.fake.commands), 5)
+
+    def test_an_ordinary_error_is_still_not_retried_or_held(self):
+        self.watcher().tick(NOW)
+        self.end("builder-issue-49", BANNER + CANNED["error"])
+        self.scene.issues.append(issue(50, ["ready"]))
+        self.scene.events[50] = [ev("ready", eid=15)]
+        self.assertEqual([t.ref for t in self.watcher().tick(NOW + dt.timedelta(minutes=5))], ["#50"])
+        self.assertTrue(self.state()["acted"]["build:49:11"].startswith("started "))
+        self.assertEqual(self.watcher().tick(NOW + dt.timedelta(hours=2)), [])
+        self.assertEqual(self.starts("work on issue #49."), 1)
+        self.assertFalse(any("usage limit" in x for x in self.lines))
 
     def test_old_state_without_runs_still_loads(self):
         (self.home / "launcher" / "watch.json").write_text(json.dumps({"checked": None, "acted": {}, "waiting": []}))
