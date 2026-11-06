@@ -44,6 +44,10 @@ max_turns = 200
 review_in_actions = true
 actions_max_reviews = 2
 
+[merger] 
+mode = "shadow"
+max_changed_lines = 500
+
 [[session]]
 role = "planner"
 count = 1
