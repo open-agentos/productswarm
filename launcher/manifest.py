@@ -24,6 +24,9 @@ frees it: a whole number of at least 1, optional, default 60. call_ins (#520, GO
 an optional true or false, default false: when true, `swarm watch` starts the roles a
 `Call in:` line names on a `ready` issue. load_watch() returns them, or None if the
 manifest has no [watch] table.
+
+An optional [merger] table (#589, GOV-0027) is allowed here but read only by merger.py,
+which treats a missing or bad one as `off`; this module doesn't check it.
 """
 from __future__ import annotations
 
@@ -181,8 +184,8 @@ def parse_valid(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "
     except tomllib.TOMLDecodeError as e:
         raise ManifestError(path, [f"not valid TOML: {e}"]) from None
 
-    problems = [f"unknown top-level key '{k}' (only [[session]] tables and [watch] are allowed)"
-                for k in sorted(set(data) - {"session", "watch"})]
+    problems = [f"unknown top-level key '{k}' (only [[session]] tables, [watch] and [merger] "
+                "are allowed)" for k in sorted(set(data) - {"session", "watch", "merger"})]
     watch_problems = _check_watch(data["watch"]) if "watch" in data else []
     problems += watch_problems
     entries = data.get("session")
