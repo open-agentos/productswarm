@@ -134,8 +134,11 @@ class LoadTest(Base):
         self.assertIn("file not found", str(cm.exception))
 
     def test_repo_manifest_is_valid(self):
+        # #487: every role in swarm.toml has a prompt, without pinning the list of roles.
         sessions = m.load()
-        self.assertEqual(sorted({s.role for s in sessions}), sorted(ROLES))
+        self.assertTrue(sessions)
+        for role in {s.role for s in sessions}:
+            self.assertTrue((m.ROOT / "roles" / f"{role}.md").is_file(), role)
 
     def test_repo_manifest_runs_a_reviewer_by_default(self):   # L6, #51
         self.assertGreaterEqual(sum(s.role == "reviewer" for s in m.load()), 1)
@@ -153,6 +156,55 @@ class LoadTest(Base):
         with redirect_stderr(err):
             self.assertEqual(m.main(["manifest.py", str(path)]), 1)
         self.assertIn("unknown role 'nobody'", err.getvalue())
+
+
+class LoadValidTest(Base):
+    """load_all() / parse_valid() (#487): skip a bad [[session]] entry, keep the rest."""
+    WATCH = "[watch]\ninterval_minutes = 5\nmax_live = 2\nmax_turns = 200\n"
+
+    def valid(self, text):
+        return m.parse_valid(text, Path("swarm.toml"), self.roles)
+
+    def test_bad_entry_beside_good_ones(self):
+        text = self.WATCH + session("builder", 2) + session("ghost") + session("docs", count=0) \
+            + session("reviewer") + session("builder")
+        sessions, limits, problems = self.valid(text)
+        self.assertEqual([s.name for s in sessions], ["builder-1", "builder-2", "reviewer-1"])
+        self.assertEqual(limits.max_live, 2)
+        self.assertEqual(problems, [
+            "session 2 (ghost): unknown role 'ghost' (no roles/ghost.md)",
+            "session 3 (docs): count must be at least 1, got 0",
+            "session 5 (builder): role 'builder' already listed in session 1; use count instead"])
+        with self.assertRaises(m.ManifestError) as cm:   # load() and parse_all() stay strict
+            self.parse(text)
+        self.assertEqual(cm.exception.problems, problems)
+
+    def test_good_manifest_has_no_problems(self):
+        self.assertEqual(self.valid(session())[2], [])
+
+    def test_bad_watch_table_raises(self):
+        text = "[watch]\ninterval_minutes = 5\nmax_live = 0\n" + session() + session("ghost")
+        with self.assertRaises(m.ManifestError) as cm:
+            self.valid(text)
+        self.assertEqual(cm.exception.problems, [
+            "watch: max_live must be a whole number of at least 1, got 0",
+            "session 2 (ghost): unknown role 'ghost' (no roles/ghost.md)"])
+
+    def test_bad_toml_raises(self):
+        with self.assertRaises(m.ManifestError):
+            self.valid("[[session]\n")
+
+    def test_load_all_and_load_watch_read_past_a_bad_entry(self):
+        path = self.dir / "swarm.toml"
+        path.write_text(self.WATCH + session("ghost") + session("docs"))
+        sessions, limits, problems = m.load_all(path, self.roles)
+        self.assertEqual([s.name for s in sessions], ["docs-1"])
+        self.assertEqual(problems, ["session 1 (ghost): unknown role 'ghost' (no roles/ghost.md)"])
+        self.assertEqual(m.load_watch(path, self.roles).max_turns, 200)
+        with self.assertRaises(m.ManifestError):
+            m.load(path, self.roles)
+        with self.assertRaises(m.ManifestError):
+            m.load_all(self.dir / "nope.toml", self.roles)
 
 
 class ReviewInActionsTest(Base):

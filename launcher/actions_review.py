@@ -425,7 +425,9 @@ def reviewer_entry(pr: int, manifest_path: Path | str, session_id: str, started:
     """The run as a launcher entry: the reviewer's model and spend_cap_usd, and [watch]
     max_turns, from swarm.toml. Raises ValueError (ManifestError is one) if either limit
     is missing: a run with no budget or turn ceiling never starts (GOV-0012)."""
-    sessions, limits = manifest.load_all(manifest_path)
+    sessions, limits, problems = manifest.load_all(manifest_path)
+    if problems:
+        raise manifest.ManifestError(Path(manifest_path), problems)
     rev = next((x for x in sessions if x.role == "reviewer"), None)
     if rev is None or rev.spend_cap_usd is None:
         raise ValueError(f"{manifest_path} sets no spend_cap_usd for the reviewer (GOV-0012)")

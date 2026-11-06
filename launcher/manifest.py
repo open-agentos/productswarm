@@ -6,7 +6,9 @@ Python stdlib only (tomllib, 3.11+). Format and location per the owner's answer 
 
 load() returns one Session per session to start: a [[session]] table with count = 2
 gives two Sessions, numbered 1 and 2 within the role. Every problem in the file is
-collected and raised together in one ManifestError.
+collected and raised together in one ManifestError. load_all(), for `swarm watch` (#487),
+instead returns the Sessions from the valid entries with the problems in the rest, so one
+bad entry doesn't stop every role; it still raises if the [watch] table is bad.
 
 An optional [watch] table holds the limits for `swarm watch` (v2, #90), per the owner's
 answer on #88, GOV-0010: interval_minutes and max_live, both required if the table is there.
@@ -150,7 +152,20 @@ def parse(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "roles"
 
 def parse_all(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "roles"
               ) -> tuple[list[Session], WatchLimits | None]:
-    """Validate manifest text: its sessions, and its [watch] limits or None. Raises ManifestError."""
+    """Validate manifest text: its sessions, and its [watch] limits or None. Raises
+    ManifestError on any problem, in a [[session]] entry or not."""
+    sessions, limits, problems = parse_valid(text, path, roles_dir)
+    if problems:
+        raise ManifestError(path, problems)
+    return sessions, limits
+
+
+def parse_valid(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "roles"
+                ) -> tuple[list[Session], WatchLimits | None, list[str]]:
+    """Manifest text as (sessions from the valid [[session]] entries, [watch] limits or None,
+    the problems with the rest) (#487): one bad entry doesn't stop the others. Raises
+    ManifestError only when nothing can be trusted: the text isn't TOML, or the [watch]
+    table is bad (GOV-0010, GOV-0012); its problems then list every other problem too."""
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
@@ -158,8 +173,8 @@ def parse_all(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "ro
 
     problems = [f"unknown top-level key '{k}' (only [[session]] tables and [watch] are allowed)"
                 for k in sorted(set(data) - {"session", "watch"})]
-    if "watch" in data:
-        problems += _check_watch(data["watch"])
+    watch_problems = _check_watch(data["watch"]) if "watch" in data else []
+    problems += watch_problems
     entries = data.get("session")
     if entries is None:
         problems.append("no [[session]] tables")
@@ -171,13 +186,17 @@ def parse_all(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "ro
         problems.append("no [[session]] tables")
 
     seen: dict[str, int] = {}
+    valid = []
     for i, entry in enumerate(entries, 1):
-        problems += _check_entry(i, entry, roles_dir, seen)
-    if problems:
+        bad = _check_entry(i, entry, roles_dir, seen)
+        problems += bad
+        if not bad:
+            valid.append(entry)
+    if watch_problems:
         raise ManifestError(path, problems)
 
     sessions = []
-    for entry in entries:
+    for entry in valid:
         cap = entry.get("spend_cap_usd")
         for n in range(1, entry["count"] + 1):
             sessions.append(Session(role=entry["role"], index=n, model=entry["model"].strip(),
@@ -186,38 +205,49 @@ def parse_all(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "ro
     limits = None if w is None else WatchLimits(float(w["interval_minutes"]), w["max_live"],
                                                 w.get("max_turns"), w.get("review_in_actions", False),
                                                 w.get("actions_max_reviews"))
-    return sessions, limits
+    return sessions, limits, problems
 
 
-def load(path: Path | str = DEFAULT_PATH, roles_dir: Path | str | None = None) -> list[Session]:
-    """Read and validate a manifest file. Roles are checked against roles/ next to the
-    repo root unless roles_dir is given. Raises ManifestError."""
-    return load_all(path, roles_dir)[0]
-
-
-def load_watch(path: Path | str = DEFAULT_PATH, roles_dir: Path | str | None = None) -> WatchLimits | None:
-    """The manifest's [watch] limits, or None if it has none. Raises ManifestError."""
-    return load_all(path, roles_dir)[1]
-
-
-def load_all(path: Path | str = DEFAULT_PATH, roles_dir: Path | str | None = None
-             ) -> tuple[list[Session], WatchLimits | None]:
-    """Read and validate a manifest file: (sessions, [watch] limits or None). Raises ManifestError."""
-    path = Path(path)
-    roles_dir = Path(roles_dir) if roles_dir is not None else ROOT / "roles"
+def _read(path: Path) -> str:
     try:
-        text = path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise ManifestError(path, ["file not found"]) from None
     except (OSError, UnicodeDecodeError) as e:
         raise ManifestError(path, [f"can't read it: {e}"]) from None
-    return parse_all(text, path, roles_dir)
+
+
+def _roles_dir(roles_dir: Path | str | None) -> Path:
+    return Path(roles_dir) if roles_dir is not None else ROOT / "roles"
+
+
+def load(path: Path | str = DEFAULT_PATH, roles_dir: Path | str | None = None) -> list[Session]:
+    """Read and validate a manifest file. Roles are checked against roles/ next to the
+    repo root unless roles_dir is given. Raises ManifestError on any problem."""
+    path = Path(path)
+    return parse_all(_read(path), path, _roles_dir(roles_dir))[0]
+
+
+def load_watch(path: Path | str = DEFAULT_PATH, roles_dir: Path | str | None = None) -> WatchLimits | None:
+    """The manifest's [watch] limits, or None if it has none. A bad [[session]] entry
+    doesn't stop it (#487). Raises ManifestError if the file can't be read, isn't TOML,
+    or its [watch] table is bad."""
+    return load_all(path, roles_dir)[1]
+
+
+def load_all(path: Path | str = DEFAULT_PATH, roles_dir: Path | str | None = None
+             ) -> tuple[list[Session], WatchLimits | None, list[str]]:
+    """Read a manifest file: (sessions from its valid entries, [watch] limits or None, the
+    problems with the rest), as parse_valid(). Raises ManifestError if the file can't be
+    read, isn't TOML, or its [watch] table is bad."""
+    path = Path(path)
+    return parse_valid(_read(path), path, _roles_dir(roles_dir))
 
 
 def main(argv: list[str]) -> int:
     path = Path(argv[1]) if len(argv) > 1 else DEFAULT_PATH
     try:
-        sessions, limits = load_all(path)
+        sessions, limits = parse_all(_read(path), path, ROOT / "roles")
     except ManifestError as e:
         print(f"swarm manifest: {e}", file=sys.stderr)
         return 1

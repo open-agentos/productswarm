@@ -231,6 +231,8 @@ max_turns = 200        # the turn ceiling for each headless run (#147, GOV-0012)
 - **Turn ceiling.** `max_turns` is the `--max-turns` for every headless run. The budget is the main bound; the ceiling only catches a run that is looping. Setting the number is the owner's call (a `spend` change, GOV-0010); 200 is the planner's suggestion. It must be a whole number of at least 1.
 - **Interval.** `interval_minutes` sets how often it checks. `--interval` works only with `--dry-run`, so the real interval can't be changed by a flag.
 - `swarm.toml` is read again on every check, so a new cap or limit applies without a restart. Without a `[watch]` table, or with one that has no `max_turns`, `swarm watch` refuses to start anything, but `--dry-run` still works (with no `[watch]` table, it checks every 5 minutes). `swarm up` and `swarm launch` don't need `max_turns`.
+- **A bad `[[session]]` entry is skipped (#487).** If one entry is invalid (say it names a role with no `roles/<role>.md` yet), the loop starts from the other entries and prints each problem on every check, prefixed `swarm.toml:`. A trigger for the skipped role waits as if the role weren't in `swarm.toml`. A bad `[watch]` table, or a file that isn't valid TOML, still starts nothing (GOV-0010, GOV-0012).
+- `roles/` is read again on every check too, so a role file added while `swarm watch` runs counts from the next check.
 
 ### Leaving reviews to Actions
 
@@ -323,7 +325,7 @@ python3 launcher/manifest.py            # or: python3 launcher/manifest.py path/
 
 It prints one line per session (`builder-1  claude-opus-5-5  no cap`). If the manifest is bad, it exits 1 and lists every problem it found.
 
-From Python, `manifest.load()` returns a list of `Session(role, index, model, spend_cap_usd)` or raises `ManifestError`.
+From Python, `manifest.load()` returns a list of `Session(role, index, model, spend_cap_usd)` or raises `ManifestError`. `manifest.load_all()`, which `swarm watch` uses, returns `(sessions, watch limits, problems)`: the sessions from the valid entries, and one problem per bad one (#487). It raises `ManifestError` only if the file can't be read, isn't TOML, or has a bad `[watch]` table.
 
 ## Tests
 

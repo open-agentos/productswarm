@@ -215,6 +215,20 @@ class WatchTest(unittest.TestCase):
         w.tick(NOW)
         self.assertIn("  (no headless command: swarm.toml's [watch] table has no max_turns)", self.lines)
 
+    def test_a_bad_entry_is_reported_every_tick_and_the_others_still_run(self):
+        # #487: one [[session]] naming a role with no roles/<role>.md used to stop everything.
+        path = write_manifest(self.home, ALL_CAPPED)
+        path.write_text(path.read_text() + '[[session]]\nrole = "ghost"\ncount = 1\nmodel = "m"\n')
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=path)
+        problem = "swarm.toml: session 5 (ghost): unknown role 'ghost' (no roles/ghost.md)"
+        self.assertEqual(self.kinds(w.tick(NOW)), [("review", "PR #70"), ("record", "#87"),
+                                                   ("answer", "#88"), ("build", "#49")])
+        self.assertEqual(self.lines[0], problem)
+        self.assertFalse(any("no headless command" in x for x in self.lines), self.lines)
+        self.lines.clear()
+        self.assertEqual(w.tick(NOW), [])
+        self.assertEqual(self.lines, [problem])
+
     def test_new_push_or_fresh_owner_label_is_a_new_trigger(self):
         self.w.tick(NOW)
         self.scene.reviewed[70] = {SHA1}
@@ -550,6 +564,41 @@ class StartTest(unittest.TestCase):
         self.assertEqual(w.run(5, ticks=2, sleep=lambda s: None), 0)
         self.assertEqual(self.fake.commands, [])
         self.assertEqual(sum("has no max_turns; starting nothing (GOV-0012)" in x for x in self.lines), 2)
+
+    def test_a_bad_entry_starts_the_other_roles(self):
+        # #487: the bad entry is skipped and reported; every other role still starts.
+        self.path.write_text(self.path.read_text()
+                             + '[[session]]\nrole = "ghost"\ncount = 1\nmodel = "m"\n')
+        done = self.watcher().tick(NOW)
+        self.assertEqual([(t.kind, t.ref) for t in done],
+                         [("review", "PR #70"), ("record", "#87"), ("answer", "#88"), ("build", "#49")])
+        self.assertEqual(len(self.fake.commands), 4)
+        self.assertIn("swarm.toml: session 5 (ghost): unknown role 'ghost' (no roles/ghost.md)",
+                      self.lines)
+
+    def test_a_bad_watch_table_still_starts_nothing(self):
+        # #487: only [[session]] entries are skipped; a bad [watch] stops every start (GOV-0010).
+        self.path.write_text(self.path.read_text().replace("max_live = 10", "max_live = 0"))
+        w = self.watcher()
+        self.assertEqual(w.run(5, ticks=2, sleep=lambda s: None), 0)
+        self.assertEqual(self.fake.commands, [])
+        self.assertEqual(sum("max_live must be a whole number of at least 1" in x
+                             and "trying again next tick" in x for x in self.lines), 2)
+
+    def test_a_role_file_added_while_watching_is_seen_next_tick(self):
+        # #487: roles/ is re-read every tick, so a watcher started before a role existed learns it.
+        roles = self.l.root / "roles"
+        roles.mkdir(parents=True)
+        for r in ROLES - {"planner"}:
+            (roles / f"{r}.md").write_text(f"# Role: {r}\n")
+        w = watch.Watch(self.l, REPO, OWNER, set(), dry_run=False, manifest_path=self.path,
+                        read=self.scene.read, get_issue=self.scene.get_issue,
+                        get_heartbeat=self.scene.heartbeat, roles_from=self.l.root)
+        self.assertNotIn("#88", [t.ref for t in w.tick(NOW)])
+        self.assertNotIn("planner-issue-88", [x[0] for x in self.started()])
+        (roles / "planner.md").write_text("# Role: planner\n")
+        self.assertEqual([t.ref for t in w.tick(NOW)], ["#88"])
+        self.assertIn(("planner-issue-88", "planner", "m-planner", 88, "watch"), self.started())
 
     def test_a_fresh_owner_label_starts_again(self):
         self.watcher().tick(NOW)
