@@ -680,6 +680,22 @@ class LaunchTest(Base):
         spec.loader.exec_module(h)
         self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(o), ["600"])
 
+    def test_research_opener_quotes_the_question_and_says_research_pr(self):
+        o = swarm.opener("analyst", 300, research="who ships issue #12's report?", research_comment=901)
+        self.assertEqual(o, "You are the analyst for productswarm. Read CLAUDE.md, PRODUCT.md and "
+                            "roles/analyst.md, then research the question posted on issue #300 "
+                            "(comment 901): \"who ships #12's report?\". swarm watch started this "
+                            "run from its [research] trigger (GOV-0029). Write the brief in "
+                            "research/<slug>.md as roles/analyst.md says, open a PR that closes "
+                            "#300, link it in one comment on #300, and stop. If you can't, say why "
+                            "in one comment on #300, and stop.")
+        hook = Path(__file__).resolve().parent.parent / "heartbeat" / "hook.py"
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hook", hook)
+        h = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(h)
+        self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(o), ["300"])     # one issue for the heartbeat
+
     def test_daily_opener_names_the_report_and_the_report_issue(self):
         o = swarm.opener("planner", 600, daily="the daily report")
         self.assertEqual(o, "You are the planner for productswarm. Read CLAUDE.md, PRODUCT.md and "

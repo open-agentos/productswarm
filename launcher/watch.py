@@ -29,6 +29,8 @@ it has none (for example, the role has no spend_cap_usd).
 |        | per day, with daily = true (GOV-0029, #588)                             | report issue         |
 | ask    | the owner's `Ask: <role>: <question>` comment on [watch] report_issue,  | that role on the     |
 |        | with asks = true (GOV-0029, #590)                                       | report issue, once   |
+| research| a `Research: <question>` comment by the owner or the planner App on an | analyst on that      |
+|        | open issue, with research = true (GOV-0029, #591)                       | issue, once          |
 
 [daily] (#588, GOV-0029): with `daily = true` in [watch], once each working day (Monday to
 Friday, in this machine's local time) at or after daily_at, it starts the planner on
@@ -54,6 +56,22 @@ a session of the same role is live on the report issue, and the report issue mus
 and be open. Its run is headless like any other (GOV-0010, GOV-0012, GOV-0013); its prompt
 quotes the question and says it answers in one comment there, and stophook.py lets it
 stop whenever it likes. With asks off (the default) the report issue's comments aren't read.
+
+[research] (#591, GOV-0029): with `research = true` in [watch], a comment on an open issue
+counts when a line of it starts `Research:` (any case); the question is the rest of that
+line, at most WHY_MAX characters. Only the first such line counts. It is keyed on the
+comment id, so it starts the analyst on that issue once. A line by anyone but the owner or
+the planner App, one with no question, one on a pull request or closed issue, one on the
+report issue (which stays open, so a research PR can't close it) or on a gov:question
+(which a research PR mustn't close) is skipped with a reason. As for [ask], only lines
+posted since the switch was turned on count (watch.json's `research_since`, dropped while
+it is off). The repo's comments are read in one list call, since research_since but at
+most RESEARCH_DAYS back, so a line held longer than that drops out. It waits only while
+an analyst session is live on the issue, which must exist and be open; it needs no label.
+Its run is headless like any other (GOV-0010, GOV-0012, GOV-0013); its prompt quotes the
+question and says the brief goes in research/ as a PR that closes the issue, and
+stophook.py holds it until such a PR exists or it has commented on the issue saying why
+it can't. With research off (the default) no comments are read for it.
 
 [call-in] (#520, GOV-0023): a comment counts as a call when a line of it starts `Call in:`
 (any case). The roles are the comma-separated names before the next colon; the why is the
@@ -234,6 +252,10 @@ DAILY = "daily"               # GOV-0029's daily report trigger (#588)
 ASK = "ask"                   # GOV-0029's owner Ask: trigger (#590)
 ASK_RE = re.compile(r"^[ \t]*Ask:[ \t]*([^:\n]*?)[ \t]*(?::[ \t]*([^\n]*?))?[ \t]*$",
                     re.IGNORECASE | re.MULTILINE)
+RESEARCH = "research"         # GOV-0029's Research: trigger (#591)
+RESEARCH_RE = re.compile(r"^[ \t]*Research:[ \t]*([^\n]*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+RESEARCH_DAYS = 7             # how far back [research] reads the repo's comments
+PLANNER_APP = "productswarm-planner[bot]"   # whose Research: lines count, with the owner's
 WORKDAYS = range(5)           # Monday to Friday, by date.weekday()
 RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and watch.json keeps it
 PUBLIC_FILE = "watch-public.json"   # watch.json's no-cost form, beside it (#456)
@@ -276,6 +298,7 @@ ENDINGS = {AT_CAP: "at_cap", ERROR: "error", NO_RESULT: "no_result", LIMITED: "l
 class Trigger:
     key: str                  # identity: a new key is a new trigger
     kind: str                 # review | build | record | answer | respond | call-in | daily | ask
+                              # | research
     ref: str                  # "PR #12" or "#49"
     why: str
     role: str | None = None
@@ -292,6 +315,8 @@ class Trigger:
     daily: str | None = None      # [daily]: what the planner writes, for its prompt (#588)
     ask: str | None = None        # [ask]: the owner's question, for its prompt (#590)
     ask_comment: int | None = None    # [ask]: the comment that asked it
+    research: str | None = None   # [research]: the question, for the analyst's prompt (#591)
+    research_comment: int | None = None   # [research]: the comment that asked it
 
     def line(self) -> str:
         if self.held:
@@ -389,6 +414,7 @@ class World:
     events: dict[int, list[dict]] = field(default_factory=dict)     # issue -> events, oldest first
     reviewed: dict[int, set[str]] = field(default_factory=dict)     # PR -> SHAs the reviewer reviewed
     comments: dict[int, list[dict]] = field(default_factory=dict)   # gov:ruled question -> comments (#501)
+    recent: list[dict] | None = None                 # the repo's recent comments, for [research] (#591)
     plan: str | None = None                          # PLAN.md on main, None if absent (#583)
 
 
@@ -452,7 +478,9 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
              one_way: frozenset[str] = frozenset(), apps: dict[str, str] | None = None,
              call_ins: bool = False, daily_at: dt.time | None = None,
              report_issue: int | None = None, tz: dt.tzinfo | None = None,
-             ask_issue: int | None = None, asks_since: dt.datetime | None = None) -> list[Trigger]:
+             ask_issue: int | None = None, asks_since: dt.datetime | None = None,
+             research_since: dt.datetime | None = None,
+             research_report: int | None = None) -> list[Trigger]:
     """Every trigger present now, in needs-you order then issue order. Nothing is filtered
     for novelty here; Watch does that. With review_in_actions, each [review] trigger is
     skipped as left to Actions (GOV-0019). A [record], [answer], [build] or [respond]
@@ -462,7 +490,9 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
     swarm App login to its role, for [call-in] (#520); with call_ins off, each [call-in]
     comes back skipped as off. With daily_at and report_issue, [daily] is due at daily_at
     in tz (default: this machine's local time) on working days (#588, GOV-0029). With
-    ask_issue, each owner `Ask:` comment on it posted since asks_since is an [ask] (#590)."""
+    ask_issue, each owner `Ask:` comment on it posted since asks_since is an [ask] (#590).
+    With research_since, each `Research:` line in w.recent is a [research] (#591); one on
+    research_report, the report issue, is skipped."""
     m, out = w.model, []
     items = needs_you(m)
     heads = {p["number"]: p.get("head") for p in m["prs"]}
@@ -579,6 +609,13 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         for t in asks(ask_issue, w.comments.get(ask_issue, []), owner, roles, asks_since):
             h = None if t.skipped else held_by(ask_issue, m, started, now, stale_minutes, t.role)
             out.append(replace(t, held=h[0], once=h[1]) if h else t)
+
+    # Research briefs (#591, GOV-0029): wait only for an analyst live on the issue.
+    if research_since:
+        open_issues = {i["number"]: i for i in w.issues if "pull_request" not in i}
+        for t in research(w.recent or [], open_issues, owner, research_report, research_since):
+            h = None if t.skipped else held_by(t.issue, m, started, now, stale_minutes, t.role)
+            out.append(replace(t, held=h[0], once=h[1]) if h else t)
     return out
 
 
@@ -689,6 +726,54 @@ def asks(n: int, comments: list[dict], owner: str, roles: set[str],
         r = names[0]
         out.append(Trigger(**base, role=r, command=f"{r} on #{n}, to answer the ask",
                            ask=question, ask_comment=cid))
+    return out
+
+
+def research_line(body: str | None) -> str | None:
+    """The question from a comment's first `Research: <question>` line ("" if it asks none),
+    or None if it has no such line (#591). One line, at most WHY_MAX characters."""
+    m = RESEARCH_RE.search(body or "")
+    return None if not m else " ".join(m.group(1).split())[:WHY_MAX]
+
+
+def comment_issue(c: dict) -> int | None:
+    """The issue (or PR) number a comment from the repo-wide comments list is on."""
+    tail = str(c.get("issue_url") or "").rsplit("/", 1)[-1]
+    return int(tail) if tail.isdigit() else None
+
+
+def research(comments: list[dict], issues: dict[int, dict], owner: str,
+             report_issue: int | None = None, since: dt.datetime | None = None) -> list[Trigger]:
+    """GOV-0029's [research] triggers (#591): one per comment with a `Research:` line, keyed
+    on the issue and comment id, starting the analyst on that issue, or a skipped one saying
+    why it doesn't count. issues maps each open issue (not PR) to its REST item."""
+    out = []
+    for c in sorted(comments, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)):
+        question = research_line(c.get("body"))
+        n = comment_issue(c)
+        if question is None or n is None:
+            continue
+        cid, login = c.get("id"), (c.get("user") or {}).get("login") or "unknown"
+        at = c.get("created_at")
+        posted = dt.datetime.fromisoformat(at.replace("Z", "+00:00")) if at else None
+        labels = {lb.get("name") for lb in (issues.get(n) or {}).get("labels") or []}
+        base = dict(key=f"{RESEARCH}:{n}:{cid}", kind=RESEARCH, ref=f"#{n}", issue=n,
+                    why=f"Research: by {login} (comment {cid})")
+        bad = (f"{login} is neither the owner nor the planner, and only their Research: lines "
+               f"count (GOV-0029)" if login not in (owner, PLANNER_APP)
+               else f"#{n} isn't an open issue" if n not in issues
+               else f"#{n} is the report issue, which stays open, so no research PR can close "
+                    f"it; post the line on an issue of its own (#591)" if n == report_issue
+               else f"#{n} is a gov:question, which a research PR mustn't close; post the line "
+                    f"on an issue of its own (#591)" if "gov:question" in labels
+               else "the line asks no question" if not question
+               else "posted before research was turned on in swarm.toml's [watch]"
+               if since and (posted is None or posted < since) else None)
+        if bad:
+            out.append(Trigger(**base, skipped=bad))
+            continue
+        out.append(Trigger(**base, role="analyst", command=f"analyst on #{n}, to write the brief",
+                           research=question, research_comment=cid))
     return out
 
 
@@ -927,24 +1012,33 @@ def state_path(launcher: "swarm.Launcher") -> Path:
 
 def load_state(launcher: "swarm.Launcher") -> dict:
     """{"checked": ISO time, "acted": {key: outcome}, "waiting": [trigger dicts],
-    "runs": {key: run record}, "asks_since": {report issue: ISO time}}. A run record (#149)
-    is {session_id, name, kind, ref, started}, plus {ending, detail, cost_usd, subtype,
-    ended} once the run has ended. asks_since (#590) is when the watcher first saw [watch]
-    asks on for that report issue; it is empty while asks is off."""
+    "runs": {key: run record}, "asks_since": {report issue: ISO time},
+    "research_since": ISO time or None}. A run record (#149) is {session_id, name, kind,
+    ref, started}, plus {ending, detail, cost_usd, subtype, ended} once the run has ended.
+    asks_since (#590) is when the watcher first saw [watch] asks on for that report issue;
+    it is empty while asks is off. research_since (#591) is the same for [watch] research."""
     try:
         data = json.loads(state_path(launcher).read_text())
     except FileNotFoundError:
-        return {"checked": None, "acted": {}, "waiting": [], "runs": {}, "asks_since": {}}
+        return {"checked": None, "acted": {}, "waiting": [], "runs": {}, "asks_since": {},
+                "research_since": None}
     except ValueError as e:
         raise RuntimeError(f"{state_path(launcher)} is not valid JSON: {e}") from None
     return {"checked": data.get("checked"), "acted": dict(data.get("acted") or {}),
             "waiting": list(data.get("waiting") or []), "runs": dict(data.get("runs") or {}),
-            "asks_since": dict(data.get("asks_since") or {})}
+            "asks_since": dict(data.get("asks_since") or {}),
+            "research_since": data.get("research_since")}
 
 
 def gh_comments(repo: str, n: int) -> list[dict]:
     """Every comment on issue n, oldest first: the report issue's, for [ask] (#590)."""
     return swarm.dashboard().gh_items(f"repos/{repo}/issues/{n}/comments?per_page=100")
+
+
+def gh_recent_comments(repo: str, since: dt.datetime) -> list[dict]:
+    """Every comment on the repo's issues and PRs updated since `since`, for [research] (#591)."""
+    at = since.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return swarm.dashboard().gh_items(f"repos/{repo}/issues/comments?since={at}&per_page=100")
 
 
 def read_result(path: Path) -> dict:
@@ -1411,6 +1505,7 @@ class Watch:
     said: set[str] = field(default_factory=set)   # code_check's lines, each said once
     tz: dt.tzinfo | None = None       # [daily]'s time zone (#588); None: this machine's
     get_comments: Callable[[str, int], list[dict]] = gh_comments    # the report issue's, for [ask] (#590)
+    get_recent: Callable[[str, dt.datetime], list[dict]] = gh_recent_comments   # for [research] (#591)
 
     def once(self, line: str) -> None:
         if line not in self.said:
@@ -1507,16 +1602,18 @@ class Watch:
         w = self.read(self.repo, self.idle_minutes, now)
         limits = self.limits()
         try:
-            kept = load_state(self.launcher)["asks_since"]
+            st = load_state(self.launcher)
         except RuntimeError:
-            kept = {}
-        ask_n, since = self.asks(w, limits, kept, now)
+            st = {"asks_since": {}, "research_since": None}
+        ask_n, since = self.asks(w, limits, st["asks_since"], now)
+        r_since = self.research(w, limits, st["research_since"], now)
         new = []
         for t in triggers(w, self.owner, self.launcher.running(), self.roles, g.needs_you,
                           g.is_tracking, bool(limits and limits.review_in_actions), now,
                           limits.stale_minutes if limits else DEFAULT_STALE, self.one_way(),
                           self.apps(), bool(limits and limits.call_ins), *self.daily(limits),
-                          ask_issue=ask_n, asks_since=since):
+                          ask_issue=ask_n, asks_since=since, research_since=r_since,
+                          research_report=limits.report_issue if limits else None):
             key = f"{t.key}|held|{t.once}" if t.held else t.key
             if key in self.seen:
                 continue
@@ -1555,6 +1652,18 @@ class Watch:
         since = kept.get(str(n))
         return n, dt.datetime.fromisoformat(since) if since else now
 
+    def research(self, w: World, limits: "manifest.WatchLimits | None", kept: str | None,
+                 now: dt.datetime) -> dt.datetime | None:
+        """[research] (#591): when research was first seen on, or None while it is off.
+        With it on, it reads the repo's comments since then (at most RESEARCH_DAYS back)
+        into w.recent, unless already read. kept is watch.json's research_since."""
+        if not (limits and limits.research):
+            return None
+        since = dt.datetime.fromisoformat(kept) if kept else now
+        if w.recent is None:
+            w.recent = self.get_recent(self.repo, max(since, now - dt.timedelta(days=RESEARCH_DAYS)))
+        return since
+
     def review_in_actions(self) -> bool:
         """For --dry-run: swarm.toml's [watch] review_in_actions, or False (see limits())."""
         limits = self.limits()
@@ -1583,7 +1692,8 @@ class Watch:
                              issue=t.issue, pr=t.pr, by="watch",
                              budget_usd=s.spend_cap_usd, max_turns=limits.max_turns,
                              called_by=t.called_by, call_why=t.call_why, daily=t.daily,
-                             ask=t.ask, ask_comment=t.ask_comment)
+                             ask=t.ask, ask_comment=t.ask_comment, research=t.research,
+                             research_comment=t.research_comment)
 
     def start_tick(self, now: dt.datetime) -> list[Trigger]:
         """Start a session for each new trigger, within the [watch] limits (GOV-0010)."""
@@ -1609,10 +1719,14 @@ class Watch:
         ask_n, since = self.asks(w, limits, st["asks_since"], now)
         # #590: kept while asks is on for this report issue; dropped as soon as it is off.
         asks_since = {str(ask_n): iso(since)} if ask_n else {}
+        r_since = self.research(w, limits, st["research_since"], now)
+        # #591: likewise, kept while research is on, dropped as soon as it is off.
+        research_since = iso(r_since) if r_since else None
         todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
                                     limits.review_in_actions, now, limits.stale_minutes,
                                     self.one_way(), self.apps(), limits.call_ins,
-                                    *self.daily(limits), ask_issue=ask_n, asks_since=since)
+                                    *self.daily(limits), ask_issue=ask_n, asks_since=since,
+                                    research_since=r_since, research_report=limits.report_issue)
                 if t.key not in acted]
         today = local_day(now, self.tz).strftime("%Y-%m-%d")
         for x in st["waiting"]:
@@ -1629,7 +1743,8 @@ class Watch:
             acted[t.key] = outcome
             done.append(t)
             save_state(self.launcher, {"checked": iso(now), "acted": acted, "waiting": st["waiting"],
-                                       "runs": runs, "asks_since": asks_since})
+                                       "runs": runs, "asks_since": asks_since,
+                                       "research_since": research_since})
 
         def hold(t: Trigger, reason: str, once: str | None = None, code: str = "other",
                  args: dict | None = None) -> None:
@@ -1730,7 +1845,7 @@ class Watch:
             else:
                 hold(t, "failed to start (see above); trying again next check", code="error")
         st = {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs,
-              "asks_since": asks_since}
+              "asks_since": asks_since, "research_since": research_since}
         save_state(self.launcher, st)
         pub = public_state(st, self.launcher.live(), now)
         save_state(self.launcher, pub, PUBLIC_FILE)
@@ -1845,8 +1960,9 @@ class Watch:
             # A pass already running may have listed PRs before this push: wait for it.
             return None, bool(reviewers(hb, live))
         issue, events = self.get_issue(self.repo, t.issue)
-        if t.kind in (DAILY, ASK):
-            # #588, #590: the report issue needs no label, only to exist and be open.
+        if t.kind in (DAILY, ASK, RESEARCH):
+            # #588, #590: the report issue needs no label, only to exist and be open; nor
+            # does a [research] line's issue (#591).
             refused = ([f"#{t.issue} doesn't exist"] if issue is None else
                        [f"#{t.issue} is a pull request, not an issue"] if "pull_request" in issue else
                        [f"#{t.issue} is closed"] if issue.get("state") != "open" else [])
@@ -1919,8 +2035,8 @@ class Watch:
 
 def own_role(t: Trigger) -> str | None:
     """The role whose live sessions hold t: only its own for a [call-in] (#520), [daily]
-    (#588) or [ask] (#590), else any."""
-    return t.role if t.kind in (CALL_IN, DAILY, ASK) else None
+    (#588), [ask] (#590) or [research] (#591), else any."""
+    return t.role if t.kind in (CALL_IN, DAILY, ASK, RESEARCH) else None
 
 
 def roles_in(root: Path) -> set[str]:

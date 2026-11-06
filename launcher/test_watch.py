@@ -1017,7 +1017,8 @@ class SaveStateTest(unittest.TestCase):
 
     def test_round_trips_and_leaves_no_temp_file(self):
         st = {"checked": "2026-11-04T00:00:00Z", "acted": {"k": "started"}, "waiting": [], "runs": {},
-              "asks_since": {"600": "2026-11-03T08:00:00+00:00"}}
+              "asks_since": {"600": "2026-11-03T08:00:00+00:00"},
+              "research_since": "2026-11-03T09:00:00+00:00"}
         watch.save_state(self.l, st)
         self.assertEqual(watch.load_state(self.l), st)
         self.assertEqual(list(self.l.dir.glob("*.tmp")) + list(self.l.dir.glob(".*.tmp")), [])
@@ -1061,7 +1062,7 @@ class ManifestWatchTest(unittest.TestCase):
         self.assertEqual(c.exception.problems, [
             "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live, max_turns, "
             "review_in_actions, actions_max_reviews, stale_minutes, call_ins, daily, daily_at, "
-            "report_issue, asks)",
+            "report_issue, asks, research)",
             "watch: interval_minutes must be a positive number, got 0",
             "watch: max_live must be a whole number of at least 1, got 1.5"])
         with self.assertRaises(manifest.ManifestError) as c:
@@ -2520,6 +2521,193 @@ class AskTest(unittest.TestCase):
         self.assertIsNone(watch.ask_line("Asks: docs: x"))
         self.assertIsNone(watch.ask_line("We could `Ask: docs: x` here"))
         self.assertEqual(len(watch.ask_line("Ask: docs: " + "x" * 999)[1]), watch.WHY_MAX)
+
+
+RESEARCH_ON = "research = true\n"
+ANALYST = '[[session]]\nrole = "analyst"\ncount = 1\nmodel = "m-analyst"\nspend_cap_usd = 10\n'
+
+
+def said(n, cid, body, who=OWNER, at=None):
+    """A comment on #n as the repo-wide comments list returns it (with its issue_url)."""
+    return {**call(cid, body, who=who, at=at), "issue_url": f"https://api.github.com/repos/{REPO}/issues/{n}"}
+
+
+class ResearchTest(unittest.TestCase):
+    """GOV-0029's [research] trigger (#591): a `Research: <question>` line from the owner or
+    the planner App on an open issue starts the analyst there once. #300 is an open,
+    unlabelled issue; #600 is the report issue."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        (self.home / "launcher").mkdir()
+        self.fake = Fake(self.home / "launcher")
+        self.lines = []
+        self.l = swarm.Launcher(self.home, run=self.fake.run, proc=self.fake.proc, kill=self.fake.kill,
+                                clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append,
+                                root=self.home / "repo", git=FakeGit(), claude_dir=self.home / "claude")
+        self.scene = Scene()
+        self.scene.issues += [issue(300, title="Which agent fleets ship a daily report?"),
+                              issue(600, title="Daily report")]
+        self.manifest(RESEARCH_ON + "report_issue = 600\n")
+        watch.save_state(self.l, {**watch.load_state(self.l), "research_since": ON_SINCE})
+        self.recent, self.fetched = [], []
+
+    def manifest(self, extra="", analyst=True):
+        self.path = write_manifest(self.home, ALL_CAPPED, 10, extra=extra)
+        if analyst:
+            self.path.write_text(self.path.read_text() + ANALYST)
+
+    def get_recent(self, repo, since):
+        self.fetched.append(since)
+        return list(self.recent)
+
+    def watcher(self, dry_run=False):
+        return watch.Watch(self.l, REPO, OWNER, ROLES | {"analyst"}, dry_run=dry_run,
+                           manifest_path=self.path, read=self.scene.read,
+                           get_issue=self.scene.get_issue, get_heartbeat=self.scene.heartbeat,
+                           get_recent=self.get_recent)
+
+    def tick(self, dry_run=False, now=NOW):
+        return [t for t in self.watcher(dry_run).tick(now) if t.kind == "research"]
+
+    def started(self):
+        return [(e.name, e.role, e.issue, e.research, e.research_comment)
+                for e in self.l.load() if e.research]
+
+    def research_lines(self):
+        return [x for x in self.lines if x.startswith("[research]")]
+
+    def test_an_owner_line_starts_the_analyst_once(self):
+        self.recent = [said(300, 901, "Context first.\nResearch: which tools ship a daily report, "
+                                      "as in issue #12?\nThanks")]
+        self.assertEqual([t.key for t in self.tick()], ["research:300:901"])
+        q = "which tools ship a daily report, as in issue #12?"
+        self.assertEqual(self.started(), [("analyst-issue-300", "analyst", 300, q, 901)])
+        cmd = [c for c in self.fake.commands if "roles/analyst.md" in c][-1]
+        argv = headless_argv(cmd)
+        prompt = argv[argv.index("-p") + 1]
+        self.assertIn("research the question posted on issue #300 (comment 901): \"which tools ship "
+                      "a daily report, as in #12?\"", prompt)
+        self.assertIn("Write the brief in research/<slug>.md as roles/analyst.md says, open a PR "
+                      "that closes #300", prompt)
+        # GOV-0012's budget and turns, GOV-0013's denies
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "10")
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "50")
+        self.assertIn("Bash(gh pr merge *)", argv)
+        self.assertIn("[research] #300 Research: by mattmcalister (comment 901) -> starting "
+                      "analyst-issue-300", self.lines)
+        n = len(self.fake.commands)
+        self.assertEqual(self.tick(), [])                 # keyed on the comment: once
+        StartTest.exit(self, "analyst-issue-300")
+        self.assertEqual(self.tick(), [])                 # and not again once it stops
+        self.assertEqual(len(self.fake.commands), n)
+
+    def test_a_planner_line_starts_the_analyst_once(self):
+        self.recent = [said(300, 902, "research: what do agent dashboards charge?", who=PLANNER_APP)]
+        self.assertEqual([t.key for t in self.tick()], ["research:300:902"])
+        self.assertEqual([x[3] for x in self.started()], ["what do agent dashboards charge?"])
+        self.assertEqual(self.tick(), [])
+
+    def test_another_app_or_user_starts_nothing(self):
+        self.recent = [said(300, 901, "Research: drive-by", who="stranger"),
+                       said(300, 902, "Research: as the builder", who=BUILDER_APP)]
+        self.assertEqual([(t.key, t.skipped) for t in self.tick()], [
+            ("research:300:901", "stranger is neither the owner nor the planner, and only their "
+                                 "Research: lines count (GOV-0029)"),
+            ("research:300:902", f"{BUILDER_APP} is neither the owner nor the planner, and only "
+                                 f"their Research: lines count (GOV-0029)")])
+        self.assertEqual(self.started(), [])
+        self.assertEqual(self.tick(), [])                 # logged once
+
+    def test_lines_that_dont_count_are_skipped(self):
+        self.scene.issues.append(issue(310, ["gov:question"]))
+        self.recent = [said(300, 901, "Research:"),
+                       said(600, 902, "Research: on the report issue"),
+                       said(310, 903, "Research: on a question"),
+                       said(70, 904, "Research: on a PR"),
+                       said(999, 905, "Research: on a closed issue")]
+        self.assertEqual([(t.key, t.skipped) for t in self.tick()], [
+            ("research:300:901", "the line asks no question"),
+            ("research:600:902", "#600 is the report issue, which stays open, so no research PR "
+                                 "can close it; post the line on an issue of its own (#591)"),
+            ("research:310:903", "#310 is a gov:question, which a research PR mustn't close; post "
+                                 "the line on an issue of its own (#591)"),
+            ("research:70:904", "#70 isn't an open issue"),
+            ("research:999:905", "#999 isn't an open issue")])
+        self.assertEqual(self.started(), [])
+
+    def test_the_switch_off_starts_nothing_and_reads_nothing(self):
+        self.manifest("report_issue = 600\n")             # no research: off by default
+        self.recent = [said(300, 901, "Research: x")]
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.tick(dry_run=True), [])
+        self.assertEqual((self.research_lines(), self.started(), self.fetched), ([], [], []))
+        self.assertIsNone(watch.load_state(self.l)["research_since"])   # dropped while off
+        self.manifest("research = false\n")
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.fetched, [])
+
+    def test_only_lines_since_it_was_turned_on_count(self):
+        self.manifest()
+        self.tick()                                       # off: research_since dropped
+        self.recent = [said(300, 901, "Research: asked while off", at=ts(30))]
+        self.manifest(RESEARCH_ON)
+        on = NOW - dt.timedelta(minutes=10)
+        (t,) = self.tick(now=on)                          # turned on: it was posted before
+        self.assertEqual(t.skipped, "posted before research was turned on in swarm.toml's [watch]")
+        self.assertEqual(watch.load_state(self.l)["research_since"], on.isoformat())
+        self.recent.append(said(300, 902, "Research: asked once on", at=ts(5)))
+        self.assertEqual([t.key for t in self.tick()], ["research:300:902"])   # later check keeps `on`
+        self.assertEqual([x[3] for x in self.started()], ["asked once on"])
+
+    def test_reads_at_most_research_days_back(self):
+        old = (NOW - dt.timedelta(days=30)).isoformat()
+        watch.save_state(self.l, {**watch.load_state(self.l), "research_since": old})
+        self.tick()
+        self.assertEqual(self.fetched, [NOW - dt.timedelta(days=watch.RESEARCH_DAYS)])
+        self.assertEqual(watch.load_state(self.l)["research_since"], old)    # kept as it was
+
+    def test_a_live_analyst_on_the_issue_holds_it_and_others_dont(self):
+        self.scene.issues.append(issue(301))
+        t_issue, t_comments = tracking(201, "analyst-sid", "analyst", 300)
+        self.scene.tracking.append(t_issue)
+        self.scene.comments[201] = t_comments
+        self.recent = [said(300, 901, "Research: one"), said(301, 902, "Research: two")]
+        self.assertEqual([t.key for t in self.tick()], ["research:301:902"])
+        (held,) = [x for x in watch.waiting(self.l)[1] if x["kind"] == "research"]
+        self.assertEqual(held["reason"], "held: analyst session analyst-sid is live on #300 (active)")
+        self.scene.tracking.pop()                        # the analyst stops
+        del self.scene.comments[201]
+        self.assertEqual([t.key for t in self.tick()], ["research:300:901"])
+
+    def test_a_live_builder_on_the_issue_doesnt_hold_it(self):
+        self.recent = [said(60, 901, "Research: on the busy issue")]   # a builder is live on #60
+        self.assertEqual([t.key for t in self.tick()], ["research:60:901"])
+
+    def test_runs_stay_inside_gov_0010(self):
+        self.manifest(RESEARCH_ON, analyst=False)
+        self.path.write_text(self.path.read_text() + ANALYST.replace("spend_cap_usd = 10\n", ""))
+        self.recent = [said(300, 901, "Research: x")]
+        self.tick()
+        (held,) = [x for x in watch.waiting(self.l)[1] if x["kind"] == "research"]
+        self.assertIn("analyst has no spend_cap_usd", held["reason"])
+
+    def test_dry_run_prints_it_with_the_headless_command(self):
+        self.recent = [said(300, 901, "Research: x?")]
+        self.assertEqual([t.key for t in self.tick(dry_run=True)], ["research:300:901"])
+        i = self.lines.index("[research] #300 Research: by mattmcalister (comment 901) -> would "
+                             "start analyst on #300, to write the brief")
+        argv = headless_argv(self.lines[i + 1].strip())
+        self.assertIn("research the question posted on issue #300 (comment 901)", argv[argv.index("-p") + 1])
+        self.assertEqual(self.l.load(), [])
+
+    def test_research_line(self):
+        self.assertEqual(watch.research_line("hi\n  RESEARCH:   why  this?: really \nbye"),
+                         "why this?: really")
+        self.assertEqual(watch.research_line("Research:"), "")
+        self.assertIsNone(watch.research_line("Researcher: x"))
+        self.assertIsNone(watch.research_line("We could `Research: x` here"))
+        self.assertEqual(len(watch.research_line("Research: " + "x" * 999)), watch.WHY_MAX)
 
 
 class RetryTest(unittest.TestCase):

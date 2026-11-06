@@ -31,6 +31,11 @@ through the session's `gh`) and checks the run's done-condition:
 | the planner's daily report ([daily])        | always: it posts on the report issue, not a PR; |
 |                                             | the run is bounded by its budget (#588)         |
 | a role answering an owner's Ask: ([ask])    | always: it posts one comment, not a PR (#590)   |
+| the analyst on a Research: line ([research]) | a PR it opened since the run started touches   |
+|                                             | research/ and names the issue as #N, or it      |
+|                                             | commented on the issue since the run started    |
+|                                             | (saying why it can't), or the issue is closed   |
+|                                             | (#591)                                          |
 | any other run (e.g. an [answer] run)        | always                                          |
 
 Also done, because a run can stop for good reasons without that (#125, point 2):
@@ -251,6 +256,29 @@ def missing_respond(g: GitHub, repo: str, e: swarm.Started, login: str) -> str |
             f"says, then stop.")
 
 
+def missing_research(g: GitHub, repo: str, e: swarm.Started, login: str) -> str | None:
+    """A [research] run (#591, GOV-0029): done once a PR the run's App opened since the run
+    started touches research/ and names the issue, or once the App commented on the issue
+    since then (to link the PR, or to say why it can't), or once the issue is closed."""
+    if (g.get(f"repos/{repo}/issues/{e.issue}") or {}).get("state") == "closed":
+        return None
+    path = f"repos/{repo}/issues/{e.issue}/comments?since={iso(e.started)}&per_page=100"
+    if any(mine(c, login) and since_start(c, e.started) for c in g.items(path)):
+        return None
+    # Only the newest PRs: one page, not the repo's whole history.
+    for p in g.get(f"repos/{repo}/pulls?state=all&sort=created&direction=desc&per_page=30") or []:
+        if not (mine(p, login) and since_start(p, e.started)
+                and names_run(f"{p.get('title') or ''}\n{p.get('body') or ''}", e)):
+            continue
+        files = g.items(f"repos/{repo}/pulls/{p['number']}/files?per_page=100")
+        if any(str(f.get("filename", "")).startswith("research/") for f in files):
+            return None
+    return (f"No PR of yours since this run started touches research/ and names #{e.issue}. "
+            f"Write the brief in research/, open a PR that closes #{e.issue}, link it in one "
+            f"comment on #{e.issue}, and stop. If you can't, say why in one comment on "
+            f"#{e.issue}, and stop.")
+
+
 def plan_on_main(g: GitHub, repo: str) -> str | None:
     """PLAN.md on main, or None if it isn't there."""
     import base64
@@ -274,7 +302,9 @@ def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
         return None          # a [daily] run (#588, GOV-0029): it posts, it doesn't open a PR
     if e.ask:
         return None          # an [ask] run (#590, GOV-0029): one comment, whatever its role
-    if e.role == "reviewer":
+    if e.research and e.issue:
+        what = missing_research(g, repo, e, login)
+    elif e.role == "reviewer":
         what = missing_review(g, repo, e)
     elif e.role == "builder" and e.pr:
         what = missing_respond(g, repo, e, login)
