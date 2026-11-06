@@ -158,6 +158,7 @@ import fcntl
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -976,6 +977,58 @@ def status_text(st: dict, live: list, now: dt.datetime, *, holder: int | None,
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------- the [watch] issue (#458)
+
+WATCH_MARKER = "<!-- productswarm-watch -->"   # the [watch] issue's body starts with this
+WATCH_TITLE = "[watch] swarm watch's state"
+WATCH_HELP = (f"no open issue you opened starts with {WATCH_MARKER}, so swarm watch's state "
+              f"isn't published; open it once with: gh issue create --repo {{repo}} "
+              f"--title \"{WATCH_TITLE}\" --body '{WATCH_MARKER}'")
+
+
+def watch_body(pub: dict) -> str:
+    """The [watch] issue's body: the marker line, then public_state() as a fenced json block.
+    Nothing else, so no text from another issue gets in."""
+    return (f"{WATCH_MARKER} swarm watch's state, written by `swarm watch` after a check that "
+            f"changed it (#458). Don't edit: the next change replaces it.\n\n"
+            f"```json\n{json.dumps(pub, indent=1)}\n```\n")
+
+
+def changes(pub: dict | None) -> dict | None:
+    """public_state() without `checked`, which moves on every tick: two ticks that hold the
+    same of this are the same state, and the second publishes nothing."""
+    return None if pub is None else {k: v for k, v in pub.items() if k != "checked"}
+
+
+def body_state(body: str | None) -> dict | None:
+    """The public state in a [watch] issue's body, or None if it has none it can read."""
+    m = re.search(r"```json\n(.*?)\n```", (body or "").replace("\r\n", "\n"), re.S)
+    try:
+        got = json.loads(m.group(1)) if m else None
+    except ValueError:
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def watch_issues(issues: list[dict]) -> list[dict]:
+    """Open issues (not PRs) whose body starts with WATCH_MARKER, as digest_issues() does."""
+    return [i for i in issues if i.get("state") == "open" and "pull_request" not in i
+            and (i.get("body") or "").lstrip().startswith(WATCH_MARKER)]
+
+
+def owner_issues(repo: str, owner: str) -> list[dict]:
+    """The open issues `owner` opened. A read only; raises RuntimeError."""
+    return swarm.dashboard().gh_items(f"repos/{repo}/issues?state=open&creator={owner}&per_page=100")
+
+
+def edit_body(repo: str, n: int, body: str) -> None:
+    """Replace issue n's body: one PATCH, nothing else. Raises RuntimeError if it fails."""
+    r = subprocess.run(["gh", "api", "-X", "PATCH", f"repos/{repo}/issues/{n}", "--input", "-"],
+                       input=json.dumps({"body": body}), capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(f"editing #{n} failed: {r.stderr.strip()[:300]}")
+
+
 def take_lock(launcher: "swarm.Launcher") -> tuple[int | None, str]:
     """The one-watcher lock (#273): (fd, "") if this process now holds it, or (None, pid)
     if another process does, with the pid it wrote ("" if not yet written). The lock lasts
@@ -1198,6 +1251,13 @@ class Watch:
             return False
         l.out("swarm watch: restarting on origin/main's launcher code (#550)")
         return True
+
+    # The [watch] issue (#458): `swarm watch` passes owner_issues and edit_body; None (tests,
+    # by default) publishes nothing. `published` is the state last published, or None.
+    list_issues: Callable[[str, str], list[dict]] | None = None
+    edit_issue: Callable[[str, int, str], None] | None = None
+    published: dict | None = None
+    told_missing: bool = False
 
     def tick(self, now: dt.datetime | None = None) -> list[Trigger]:
         """One check. Returns the triggers it acted on or printed for the first time."""
@@ -1431,8 +1491,40 @@ class Watch:
                 hold(t, "failed to start (see above); trying again next check", code="error")
         st = {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs}
         save_state(self.launcher, st)
-        save_state(self.launcher, public_state(st, self.launcher.live(), now), PUBLIC_FILE)
+        pub = public_state(st, self.launcher.live(), now)
+        save_state(self.launcher, pub, PUBLIC_FILE)
+        self.publish(pub)
         return done
+
+    def publish(self, pub: dict) -> None:
+        """Write pub into the [watch] issue if the state changed (#458), as the watcher's own
+        `gh` login (the owner's, per the owner's direction on #451). Its only write is one
+        PATCH of that issue's body: never a comment, label or new issue. A tick whose state
+        (less `checked`) matches the last one published reads and writes nothing; after a
+        restart the issue's own body is compared first. A missing issue or a failed read or
+        edit is printed, and the loop carries on: it never fails on a publish error."""
+        if self.list_issues is None or self.edit_issue is None or changes(pub) == self.published:
+            return
+        try:
+            found = watch_issues(self.list_issues(self.repo, self.owner))
+            if len(found) != 1:
+                if found:
+                    nums = ", ".join(f"#{i['number']}" for i in found)
+                    self.launcher.out(f"swarm watch: {len(found)} open issues start with "
+                                      f"{WATCH_MARKER} ({nums}); close all but one to publish")
+                elif not self.told_missing:
+                    self.launcher.out(f"swarm watch: {WATCH_HELP.format(repo=self.repo)}")
+                    self.told_missing = True
+                return
+            n = found[0]["number"]
+            if changes(body_state(found[0].get("body"))) != changes(pub):
+                self.edit_issue(self.repo, n, watch_body(pub))
+                self.launcher.out(f"swarm watch: published its state to #{n}")
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
+            self.launcher.out(f"swarm watch: publishing its state failed: {e}; trying again "
+                              f"next check")
+            return
+        self.published = changes(pub)
 
     def record_ended(self, runs: dict, live: list, now: dt.datetime, acted: dict,
                      w: World | None = None) -> dict:

@@ -2488,3 +2488,127 @@ class PublicStatePureTest(unittest.TestCase):
         self.assertEqual(pub["running"], [{"role": "builder", "kind": "build", "ref": "#1", "started": recent}])
         self.assertEqual(pub["failed"], [{"ref": "#3", "kind": "build", "ending": "limited", "ended": recent}])
         self.assertNotIn("cost", json.dumps(pub))
+
+
+class PublishTest(unittest.TestCase):
+    """#458: after a tick whose state changed, one PATCH of the [watch] issue's body."""
+
+    setUp = StartTest.setUp
+    manifest = StartTest.manifest
+
+    def watcher(self, issues=None, fail=None):
+        """A watcher whose GitHub is `issues` (the owner's open issues) and a list of edits."""
+        self.issues = issues if issues is not None else [self.watch_issue()]
+        self.edits, self.reads = [], 0
+
+        def list_issues(repo, owner):
+            self.reads += 1
+            self.assertEqual((repo, owner), (REPO, OWNER))
+            if fail == "read":
+                raise RuntimeError("gh api failed: HTTP 502")
+            return self.issues
+
+        def edit_issue(repo, n, body):
+            if fail == "edit":
+                raise RuntimeError(f"editing #{n} failed: HTTP 403")
+            self.edits.append((n, body))
+            for i in self.issues:
+                if i["number"] == n:
+                    i["body"] = body
+        w = StartTest.watcher(self)
+        w.list_issues, w.edit_issue = list_issues, edit_issue
+        return w
+
+    def watch_issue(self, n=300, body=watch.WATCH_MARKER):
+        return {**issue(n, body=body, title=watch.WATCH_TITLE)}
+
+    def published(self, k=-1):
+        return watch.body_state(self.edits[k][1])
+
+    def test_a_changed_tick_edits_the_issue_once_and_an_unchanged_one_reads_nothing(self):
+        w = self.watcher()
+        w.tick(NOW)
+        self.assertEqual([n for n, _ in self.edits], [300])
+        self.assertEqual(self.published(), json.loads((self.home / "launcher" / watch.PUBLIC_FILE).read_text()))
+        self.assertIn("published its state to #300", "\n".join(self.lines))
+        w.tick(NOW + dt.timedelta(minutes=5))          # same state, only `checked` moved
+        self.assertEqual((len(self.edits), self.reads), (1, 1))
+
+    def test_a_tick_that_changes_the_state_edits_again(self):
+        w = self.watcher()
+        w.tick(NOW)
+        self.scene.prs.clear()                         # PR #70 goes: a different state
+        for e in self.l.load():
+            self.fake.procs.pop(self.l.pid(e))         # and every run ends
+        w.tick(NOW + dt.timedelta(minutes=5))
+        self.assertEqual(len(self.edits), 2)
+        self.assertNotEqual(watch.changes(self.published(0)), watch.changes(self.published(1)))
+
+    def test_after_a_restart_an_issue_already_current_is_not_edited(self):
+        self.watcher().tick(NOW)
+        issues = self.issues
+        w = self.watcher(issues)                       # a new process: nothing in memory
+        w.tick(NOW + dt.timedelta(minutes=5))
+        self.assertEqual((self.edits, self.reads), ([], 1))
+
+    def test_the_body_is_the_marker_and_the_public_state_only(self):
+        self.manifest(ALL_CAPPED, max_live=2)
+        self.watcher().tick(NOW)
+        body = self.edits[0][1]
+        self.assertTrue(body.startswith(watch.WATCH_MARKER + " "))
+        self.assertEqual(body.count("```"), 2)
+        for word in ("cost_usd", "detail", "why", "$", "issue 49", "issue 60"):   # no titles either
+            self.assertNotIn(word, body)
+
+    def test_a_missing_issue_prints_the_command_once_and_carries_on(self):
+        w = self.watcher(issues=[issue(5, body="not it")])
+        done = w.tick(NOW)
+        self.assertTrue(done)                          # the tick still started its runs
+        w.tick(NOW + dt.timedelta(minutes=5))
+        told = [x for x in self.lines if "gh issue create" in x]
+        self.assertEqual(len(told), 1)
+        self.assertIn(f"--repo {REPO} --title \"{watch.WATCH_TITLE}\" --body '{watch.WATCH_MARKER}'", told[0])
+        self.assertEqual(self.edits, [])
+        self.issues.append(self.watch_issue())         # the owner opens it: the next tick publishes
+        w.tick(NOW + dt.timedelta(minutes=10))
+        self.assertEqual([n for n, _ in self.edits], [300])
+
+    def test_two_marked_issues_edit_neither(self):
+        w = self.watcher(issues=[self.watch_issue(300), self.watch_issue(301)])
+        w.tick(NOW)
+        self.assertEqual(self.edits, [])
+        self.assertIn("2 open issues start with", "\n".join(self.lines))
+
+    def test_a_failed_edit_or_read_is_printed_and_tried_again(self):
+        for fail in ("edit", "read"):
+            with self.subTest(fail):
+                w = self.watcher(fail=fail)
+                w.tick(NOW)                            # no exception: the loop carries on
+                self.assertIn("publishing its state failed", self.lines[-1])
+                self.assertIn("trying again next check", self.lines[-1])
+                self.assertEqual(self.edits, [])
+                self.assertIsNone(w.published)
+                self.assertTrue((self.home / "launcher" / watch.PUBLIC_FILE).exists())
+                ok = self.watcher(self.issues)          # GitHub is back: the next tick publishes
+                w.list_issues, w.edit_issue = ok.list_issues, ok.edit_issue
+                w.tick(NOW + dt.timedelta(minutes=5))
+                self.assertEqual(len(self.edits), 1)
+
+    def test_off_by_default_and_in_dry_run(self):
+        StartTest.watcher(self).tick(NOW)              # no list_issues/edit_issue: no GitHub writes
+        w = self.watcher()
+        w.dry_run = True
+        w.tick(NOW)
+        self.assertEqual((self.edits, self.reads), ([], 0))
+
+    def test_body_state_reads_back_what_watch_body_writes(self):
+        pub = {"checked": "t", "running": [], "held": [], "skipped": [], "failed": []}
+        self.assertEqual(watch.body_state(watch.watch_body(pub).replace("\n", "\r\n")), pub)
+        self.assertIsNone(watch.body_state(watch.WATCH_MARKER))
+        self.assertIsNone(watch.body_state("```json\n{bad\n```"))
+        self.assertEqual(watch.changes(pub), {"running": [], "held": [], "skipped": [], "failed": []})
+
+    def test_the_dashboard_uses_the_same_marker(self):
+        sys.path.insert(0, str(HERE.parent / "dashboard"))
+        import activity
+        self.assertEqual(activity.WATCH_MARKER, watch.WATCH_MARKER)
