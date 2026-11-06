@@ -38,7 +38,7 @@ v0–v3 solved "I can't see my sessions". The owner still directs the swarm one 
 
 | Habit | What it is | Who runs it | Needs |
 |---|---|---|---|
-| **Milestone plan** | `PLAN.md` holds the goal and its milestones. Each has an outcome, a hard date or "when ready", a done test and an owner role. The lead proposes changes as PRs; the owner approves them. The lead replans within the milestones. | Lead | `PLAN.md` (its own issue) |
+| **Milestone plan** | [`PLAN.md`](PLAN.md) holds the goal and its milestones. Each has an outcome, a hard date or "when ready", a done test and an owner role. The lead proposes changes as PRs; the owner approves them. The lead replans within the milestones. | Lead | [`PLAN.md`](PLAN.md) |
 | **Weekly check-in** | Each Monday, per milestone: moved, at risk or slipped; what changes; asks. A `PLAN.md` PR comes with any milestone change. | Lead | Q4 for the trigger; by hand until then |
 | **Daily report** | Comment-sized, on the pinned report issue: done against the milestones, next, risks and mitigations, what agents did under delegated authority, and asks (at most 5). It replaces the digest's content (#249). | Lead | Q4 for the trigger, Q5 for where it runs; by hand until then |
 | **Delegated authority** | Standing grants (what `jurisdictions.yml` and the rulings already allow, listed in one place) and approved asks (a role asks, the owner approves, and the approval lets that role act with the owner's authority). Every use shows in the daily report. | Any role asks; the lead batches | Q3. Until then, GOV-0006, GOV-0011 and GOV-0022 decide who gives "go" and who merges |
