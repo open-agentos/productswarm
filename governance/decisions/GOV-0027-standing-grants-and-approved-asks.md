@@ -43,7 +43,7 @@ Any miss leaves the PR for the owner, as under GOV-0022.
 - It amends GOV-0011 and CLAUDE.md's "Never merge a PR" for the merger App only. An approval still means only that the rubric passed at that head.
 - It replaces decision 1 of #572 (skip the week in shadow). Decision 2 of #572 (native auto-merge) is not decided here.
 - Does not apply when: the owner merges a PR by hand, which stays allowed. It doesn't let any Claude session merge.
-- Does not decide: which issues are "under an approved milestone" (that is #575's ruling, GOV-0026 once merged); the merger App's permissions; the size limit's value; whether agents may merge `GOVERNANCE.md`, `jurisdictions.yml` or workflows after owner approval (the "Later" row in #526).
+- Does not decide: which issues are "under an approved milestone" (that is GOV-0026); the merger App's permissions; the size limit's value; whether agents may merge `GOVERNANCE.md`, `jurisdictions.yml` or workflows after owner approval (the "Later" row in #526).
 
 ## Context
 
