@@ -13,7 +13,7 @@ name: Digest and dashboard nudge
 
 on:
   issues:
-    types: [opened, closed, reopened, labeled, unlabeled]
+    types: [opened, closed, reopened, labeled, unlabeled, edited]
   pull_request:
     types: [opened, closed, reopened, ready_for_review, synchronize]
   pull_request_review:
@@ -30,7 +30,7 @@ jobs:
   nudge:
     # Issue and Discussion events, or same-repo PRs. No secrets, no checkout, no environment.
     if: >-
-      github.event_name == 'issues' ||
+      (github.event_name == 'issues' && github.event.action != 'edited') ||
       github.event_name == 'discussion' ||
       github.event_name == 'discussion_comment' ||
       github.event.pull_request.head.repo.full_name == github.repository
@@ -53,3 +53,21 @@ jobs:
         run: |
           gh workflow run digest.yml --ref main
           gh workflow run dashboard.yml --ref main
+  watch:
+    # #458: swarm watch replaced the [watch] issue's body. Rebuild the dashboard only.
+    if: >-
+      github.event_name == 'issues' && github.event.action == 'edited' &&
+      startsWith(github.event.issue.title, '[watch]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    concurrency:
+      group: watch-nudge
+      cancel-in-progress: true
+    permissions:
+      actions: write   # gh workflow run
+    steps:
+      - name: Dispatch a dashboard rebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run dashboard.yml --ref main
