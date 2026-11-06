@@ -289,6 +289,36 @@ def ensure_tracking_issue(sid: str) -> dict:
         return state
 
 
+def mentions(state: dict, chunk: list[str]) -> tuple[list[str], list[int]]:
+    """Prose lines naming the issues in a chunk's `working_on` / `pr_opened` events,
+    and the issues whose `working_on` they name for the first time this session.
+
+    GitHub turns each `#N` into a "mentioned this" reference on issue N's timeline, so
+    the issue shows the session working on it (#453). `working_on` is named once per
+    issue per session (`state["mentioned"]`); readers ignore text outside the fence.
+    """
+    seen, new, out = set(state.get("mentioned") or []), [], []
+    for line in chunk:
+        ev = json.loads(line)
+        issue = ev.get("issue")
+        if not isinstance(issue, int):
+            continue
+        if ev.get("event") == "working_on" and issue not in seen:
+            seen.add(issue)
+            new.append(issue)
+            out.append(f"{state['role']} session working on #{issue}")
+        elif ev.get("event") == "pr_opened" and isinstance(ev.get("pr"), int):
+            out.append(f"{state['role']} opened PR #{ev['pr']} for #{issue}")
+    return list(dict.fromkeys(out)), new
+
+
+def mark_mentioned(sid: str, issues: list[int]) -> None:
+    with locked(sid):
+        state = load_state(sid)
+        state["mentioned"] = list(dict.fromkeys((state.get("mentioned") or []) + issues))
+        save_state(state)
+
+
 def flush(sid: str) -> None:
     """Post queued events to the tracking issue. One flusher per session at a time."""
     with locked(sid, "flush", blocking=False) as got:
@@ -306,9 +336,14 @@ def flush(sid: str) -> None:
             state = ensure_tracking_issue(sid)
             for i in range(0, len(lines), MAX_EVENTS_PER_COMMENT):
                 chunk = lines[i:i + MAX_EVENTS_PER_COMMENT]
-                body = "```jsonl\n" + "\n".join(chunk) + "\n```\n\n" + signature(state) + "\n"
+                said, new = mentions(load_state(sid), chunk)
+                prose = "".join(l + "\n" for l in said)
+                body = (prose + ("\n" if prose else "") + "```jsonl\n" + "\n".join(chunk) + "\n```\n\n"
+                        + signature(state) + "\n")
                 gh("issue", "comment", str(state["tracking_issue"]), "--repo", state["repo"],
                    "--body-file", "-", stdin=body)
+                if new:
+                    mark_mentioned(sid, new)
                 remaining = lines[i + len(chunk):]
                 sending.write_text("".join(l + "\n" for l in remaining))   # don't repost on retry
             sending.unlink()
