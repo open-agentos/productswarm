@@ -189,6 +189,7 @@ CALL_INS_OFF = ("call-ins are off: call_ins = true in swarm.toml's [watch] turns
                 "(GOV-0023)")
 NOT_RECORDED = (LEFT_TO_ACTIONS, CALL_INS_OFF)   # listed once, never kept in watch.json
 RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and watch.json keeps it
+PUBLIC_FILE = "watch-public.json"   # watch.json's no-cost form, beside it (#456)
 
 # How a headless run ended, from the `subtype` of its --output-format json result: the
 # SDKResultMessage type in the Claude Code Agent SDK reference (#149). Any other subtype,
@@ -199,6 +200,26 @@ LIMIT_HOLD = dt.timedelta(minutes=30)     # when the result names no reset time
 RESETS_RE = re.compile(r"\bresets (\d{1,2})(?::(\d{2}))?\s*([ap]m)\b(?:\s*\(([^)]+)\))?", re.I)
 CAPS = {"error_max_budget_usd": "budget (--max-budget-usd)",
         "error_max_turns": "turns (--max-turns)"}
+
+# Why a trigger waits, as a fixed code and its sentence (#456). watch-public.json carries
+# only these, never a reason's own text, which can quote an issue. A sentence's fields are
+# integers only. Codes in SKIPS list as skipped; the rest as held.
+REASONS = {
+    "limit": "held: {live} of {max} running",
+    "live": "held: a session is live on it",
+    "stale": "held: a session on it has gone quiet",
+    "waits_on": "held: waits on an open issue",
+    "overlap": "held: work from the same GOV record is in flight",
+    "usage_limit": "held: usage limit",
+    "record_first": "held: docs records the ruling first",
+    "error": "held: failed to start; trying again next check",
+    "raised_by": "skipped: \"Raised by\" names no role",
+    "no_role": "skipped: the role isn't in swarm.toml",
+    "no_cap": "skipped: the role has no spend_cap_usd in swarm.toml",
+    "other": "held",
+}
+SKIPS = {"raised_by", "no_role", "no_cap"}
+ENDINGS = {AT_CAP: "at_cap", ERROR: "error", NO_RESULT: "no_result", LIMITED: "limited"}  # failed
 
 
 @dataclass(frozen=True)
@@ -783,18 +804,67 @@ def run_line(r: dict) -> str:
     return f"[{r['kind']}] {r['ref']} {r['name']} · {ending} · {usd(r.get('cost_usd'))} (est.)"
 
 
-def save_state(launcher: "swarm.Launcher", st: dict) -> None:
-    """Write watch.json atomically through a temp file of its own, so two writers never
-    rename each other's (#296), as Launcher.save() does for sessions.json (#272)."""
+def save_state(launcher: "swarm.Launcher", st: dict, name: str = STATE_FILE) -> None:
+    """Write watch.json (or `name` beside it) atomically through a temp file of its own, so
+    two writers never rename each other's (#296), as Launcher.save() does for sessions.json
+    (#272)."""
     launcher.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, tmp = tempfile.mkstemp(dir=launcher.dir, prefix=".watch.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
             f.write(json.dumps(st, indent=1) + "\n")
-        os.replace(tmp, state_path(launcher))
+        os.replace(tmp, launcher.dir / name)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def held_code(reason: str) -> str:
+    """The code for a hold that triggers() set (#456): held_by()'s live or stale session, or
+    blocked()'s open Waits-on issues."""
+    if reason.startswith("stale:"):
+        return "stale"
+    return "waits_on" if reason.startswith("held: waits on ") else "live"
+
+
+def reason_text(code: str | None, args: dict | None = None) -> tuple[str, str]:
+    """(code, sentence) for a waiting entry; an unknown code, or a sentence whose fields
+    aren't all integers, is "other"."""
+    if code not in REASONS:
+        return "other", REASONS["other"]
+    args = args or {}
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in args.values()):
+        return "other", REASONS["other"]
+    try:
+        return code, REASONS[code].format(**args)
+    except (KeyError, IndexError, ValueError):
+        return "other", REASONS["other"]
+
+
+def public_state(st: dict, live: list, now: dt.datetime) -> dict:
+    """watch.json in a form fit to show (#456): what swarm watch is running, holding and
+    skipping, and which of its runs failed in the last RUNS_DAYS. Pure. Each field is picked
+    by name, and reasons are codes with REASONS' sentences, so no cost (GOV-0014), detail
+    or text copied from an issue gets in."""
+    alive = {e.session_id: e for e in live}
+    runs = list((st.get("runs") or {}).values())
+    running = sorted(({"role": alive[r["session_id"]].role, "kind": r["kind"], "ref": r["ref"],
+                       "started": r["started"]}
+                      for r in runs if not r.get("ending") and r.get("session_id") in alive),
+                     key=lambda x: x["started"])
+    held, skipped = [], []
+    for x in st.get("waiting") or []:
+        code, sentence = reason_text(x.get("code"), x.get("args"))
+        (skipped if code in SKIPS else held).append(
+            {"ref": x["ref"], "kind": x["kind"], "code": code, "reason": sentence, "since": x["since"]})
+    since = now - dt.timedelta(days=RUNS_DAYS)
+    failed = sorted(({"ref": r["ref"], "kind": r["kind"], "ending": ENDINGS[r["ending"]],
+                      "ended": r["ended"]}
+                     for r in runs if r.get("ending") in ENDINGS and r.get("ended")
+                     and dt.datetime.fromisoformat(r["ended"]) >= since),
+                    key=lambda x: x["ended"], reverse=True)
+    return {"checked": st.get("checked"), "running": running, "held": held, "skipped": skipped,
+            "failed": failed}
 
 
 def take_lock(launcher: "swarm.Launcher") -> tuple[int | None, str]:
@@ -1088,10 +1158,13 @@ class Watch:
             save_state(self.launcher, {"checked": iso(now), "acted": acted, "waiting": st["waiting"],
                                        "runs": runs})
 
-        def hold(t: Trigger, reason: str, once: str | None = None) -> None:
+        def hold(t: Trigger, reason: str, once: str | None = None, code: str = "other",
+                 args: dict | None = None) -> None:
             was = before.get(t.key, {})
             entry = {"key": t.key, "kind": t.kind, "ref": t.ref, "why": t.why,
-                     "reason": reason, "since": was.get("since", iso(now))}
+                     "reason": reason, "code": code, "since": was.get("since", iso(now))}
+            if args:
+                entry["args"] = args
             if once:
                 entry["once"] = once
             held.append(entry)
@@ -1109,11 +1182,11 @@ class Watch:
                 # #488: a live session is on the issue, or #490: a [build]'s Waits-on issues are
                 # still open. Listed in `swarm inbox` with why, never recorded in `acted`; it
                 # starts once that clears. The loop never stops a session (GOV-0008).
-                hold(t, t.held, t.once)
+                hold(t, t.held, t.once, held_code(t.held))
                 continue
             if t.kind == "answer" and t.skipped:
                 # Listed in `swarm inbox` until the owner closes the question or drops `ready` (#271).
-                hold(t, f"skipped: {t.skipped}")
+                hold(t, f"skipped: {t.skipped}", code="raised_by")
                 continue
             if t.skipped:
                 out(t.line())
@@ -1123,7 +1196,8 @@ class Watch:
                 # #495: docs records the ruling first; once [record] is acted on, the held
                 # check above and the holders check below keep [answer] waiting until docs
                 # has stopped.
-                hold(t, f"held: docs records the ruling on {t.ref} first, then {t.role} starts")
+                hold(t, f"held: docs records the ruling on {t.ref} first, then {t.role} starts",
+                     code="record_first")
                 continue
             if t.kind == "review" and reviewer:
                 out(f"[review] {t.ref} {t.why} -> covered by {reviewer}")
@@ -1133,26 +1207,27 @@ class Watch:
                 continue      # a session started this check is on it; it fires again once that stops
             if t.held:
                 # #490: not acted on, so it starts on the first check after its blockers close.
-                hold(t, t.held)
+                hold(t, t.held, code=held_code(t.held))
                 continue
             s = by_role.get(t.role)
             mine = sum(e.by == "watch" for e in live)
             if s is None:
-                hold(t, f"skipped: {t.role} isn't in swarm.toml")
+                hold(t, f"skipped: {t.role} isn't in swarm.toml", code="no_role")
                 continue
             if s.spend_cap_usd is None:
                 hold(t, f"skipped: {t.role} has no spend_cap_usd in swarm.toml, and swarm watch "
-                        f"starts only capped roles (GOV-0010)")
+                        f"starts only capped roles (GOV-0010)", code="no_cap")
                 continue
             if limited:
-                hold(t, limited)       # said once above: the limit is account-wide
+                hold(t, limited, code="usage_limit")   # said once above: the limit is account-wide
                 continue
             busy_with = overlap(t.issue, w, live) if t.kind == "build" else None
             if busy_with:
-                hold(t, busy_with)
+                hold(t, busy_with, code="overlap")
                 continue
             if mine >= limits.max_live:
-                hold(t, f"held: {mine} of {limits.max_live} sessions swarm watch started are live (GOV-0010)")
+                hold(t, f"held: {mine} of {limits.max_live} sessions swarm watch started are live (GOV-0010)",
+                     code="limit", args={"live": mine, "max": limits.max_live})
                 continue
             refused, wait = self.refusal(t, live, now)
             if wait:
@@ -1170,8 +1245,10 @@ class Watch:
                                "ref": t.ref, "started": iso(now)}
                 finish(t, f"started {entry.name}")
             else:
-                hold(t, "failed to start (see above); trying again next check")
-        save_state(self.launcher, {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs})
+                hold(t, "failed to start (see above); trying again next check", code="error")
+        st = {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs}
+        save_state(self.launcher, st)
+        save_state(self.launcher, public_state(st, self.launcher.live(), now), PUBLIC_FILE)
         return done
 
     def record_ended(self, runs: dict, live: list, now: dt.datetime, acted: dict) -> dict:

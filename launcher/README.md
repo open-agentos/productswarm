@@ -219,6 +219,39 @@ Once a run the loop started is no longer live, the next check reads its result f
 - **Unpushed work is kept.** As for any session, `tidy()` keeps an exited run's worktree if it has uncommitted or unpushed work, and `swarm ls` names it.
 - **The dashboard doesn't show these.** It is built and published by a GitHub Action, which can't read this machine's `watch.json`, and publishing the costs would send them to GitHub.
 
+### The public form: `watch-public.json`
+
+After every check (not `--dry-run`), `swarm watch` also writes `watch-public.json` beside `watch.json`, atomically in the same way (#456). It is `watch.public_state()`: what the loop is doing, in a form fit to show. Nothing publishes it yet; that is a later issue under #444.
+
+```json
+{"checked": "2026-11-03T12:00:00+00:00",
+ "running": [{"role": "builder", "kind": "build", "ref": "#49", "started": "…"}],
+ "held":    [{"ref": "#88", "kind": "answer", "code": "limit", "reason": "held: 2 of 2 running", "since": "…"}],
+ "skipped": [{"ref": "#49", "kind": "build", "code": "no_cap", "reason": "skipped: the role has no spend_cap_usd in swarm.toml", "since": "…"}],
+ "failed":  [{"ref": "#51", "kind": "build", "ending": "at_cap", "ended": "…"}]}
+```
+
+- **No cost** (GOV-0014): no `cost_usd`, `detail` or `why`. Every field is copied by name.
+- **Reasons are fixed codes** with a fixed sentence (`watch.REASONS`), never the reason's own text, which can quote an issue. The only values in a sentence are integers.
+
+| `code` | List | Sentence |
+|---|---|---|
+| `limit` | held | held: N of M running (`max_live`, GOV-0010) |
+| `live` | held | held: a session is live on it (#488) |
+| `stale` | held | held: a session on it has gone quiet (#488) |
+| `waits_on` | held | held: waits on an open issue (#490) |
+| `overlap` | held | held: work from the same GOV record is in flight (#127) |
+| `usage_limit` | held | held: usage limit (#489) |
+| `record_first` | held | held: docs records the ruling first (#495) |
+| `error` | held | held: failed to start; trying again next check |
+| `raised_by` | skipped | skipped: "Raised by" names no role |
+| `no_role` | skipped | skipped: the role isn't in swarm.toml |
+| `no_cap` | skipped | skipped: the role has no spend_cap_usd in swarm.toml |
+| `other` | held | held (an entry with no code, from an older `watch.json`) |
+
+- **`running`** is each run the loop started that is still live. **`failed`** is each run from the last 7 days (`watch.RUNS_DAYS`) that ended other than `done`, newest first, with `ending` as a code: `at_cap`, `error`, `limited` or `no_result`.
+- Triggers the loop acts on once and drops (refused, covered, skipped call-ins and reviews left to Actions) aren't listed, as in `swarm inbox`.
+
 ### Limits
 
 These are GOV-0010, the owner's answer on #88. They live in `swarm.toml`'s `[watch]` table, so changing them is a reviewed change and a `spend` decision:

@@ -2127,3 +2127,118 @@ class CallInTest(unittest.TestCase):
         self.assertEqual(apps[BUILDER_APP], "builder")
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(watch.swarm_apps(Path(d) / "nope.yml")[0], {})
+
+
+class PublicStateTest(unittest.TestCase):
+    """#456: watch-public.json, watch.json's no-cost form, beside it after every tick."""
+
+    setUp = StartTest.setUp
+    manifest, watcher = StartTest.manifest, StartTest.watcher
+    end = RunRecordTest.end
+    entry = RunRecordTest.entry
+    exit = StartTest.exit
+
+    def public(self):
+        return json.loads((self.home / "launcher" / watch.PUBLIC_FILE).read_text())
+
+    def assert_no_cost(self, data):
+        text = json.dumps(data)
+        for word in ("cost_usd", "detail", "why", "$"):
+            self.assertNotIn(word, text)
+
+    def test_a_tick_writes_the_five_lists_with_running_and_live_and_limit(self):
+        self.manifest(ALL_CAPPED, max_live=2)
+        self.watcher().tick(NOW)
+        pub = self.public()
+        self.assertEqual(sorted(pub), ["checked", "failed", "held", "running", "skipped"])
+        self.assertEqual(pub["checked"], NOW.isoformat())
+        self.assertEqual([(r["role"], r["kind"], r["ref"], r["started"]) for r in pub["running"]],
+                         [("reviewer", "review", "PR #70", NOW.isoformat()),
+                          ("docs", "record", "#87", NOW.isoformat())])
+        held = {x["ref"]: x for x in pub["held"]}
+        self.assertEqual(held["#88"], {"ref": "#88", "kind": "answer", "code": "limit",
+                                       "reason": "held: 2 of 2 running", "since": NOW.isoformat()})
+        self.assertEqual(held["#60"]["code"], "live")             # busy-sid is on #60 (#488)
+        self.assertEqual(pub["skipped"], [])
+        self.assertEqual(pub["failed"], [])
+        self.assert_no_cost(pub)
+
+    def test_a_role_without_a_cap_is_skipped_with_its_code(self):
+        self.manifest({r: 10 for r in ROLES if r != "builder"})
+        self.watcher().tick(NOW)
+        skipped = {x["ref"]: x for x in self.public()["skipped"]}
+        self.assertEqual(skipped["#49"]["code"], "no_cap")
+        self.assertEqual(skipped["#49"]["reason"], "skipped: the role has no spend_cap_usd in swarm.toml")
+
+    def test_failed_runs_carry_their_ending_but_no_cost_or_detail(self):
+        self.watcher().tick(NOW)
+        self.end("builder-issue-49", BANNER + CANNED["budget"])
+        self.end("docs-issue-87", BANNER + CANNED["success"])
+        self.end("planner-issue-88", BANNER + CANNED["error"])
+        later = NOW + dt.timedelta(minutes=5)
+        self.watcher().tick(later)
+        pub = self.public()
+        self.assertEqual(sorted((f["ref"], f["kind"], f["ending"], f["ended"]) for f in pub["failed"]),
+                         [("#49", "build", "at_cap", later.isoformat()),
+                          ("#88", "answer", "error", later.isoformat())])
+        self.assertEqual([r["role"] for r in pub["running"]], ["reviewer"])
+        self.assertIn("cost_usd", (self.home / "launcher" / "watch.json").read_text())
+        self.assert_no_cost(pub)
+
+    def test_dry_run_writes_nothing(self):
+        watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=self.path).tick(NOW)
+        self.assertFalse((self.home / "launcher" / watch.PUBLIC_FILE).exists())
+
+
+class PublicStatePureTest(unittest.TestCase):
+    """#456: watch.public_state() from a canned watch.json."""
+
+    def waiting(self, code, args=None, reason="text from #9: <script>", kind="build", ref="#9"):
+        x = {"key": f"k-{code}", "kind": kind, "ref": ref, "why": "why from an issue",
+             "reason": reason, "code": code, "since": NOW.isoformat()}
+        if args is not None:
+            x["args"] = args
+        return x
+
+    def test_every_code_has_its_sentence_and_list(self):
+        codes = [c for c in watch.REASONS if c != "limit"]
+        st = {"checked": NOW.isoformat(), "runs": {},
+              "waiting": [self.waiting(c) for c in codes] + [self.waiting("limit", {"live": 2, "max": 2})]}
+        pub = watch.public_state(st, [], NOW)
+        got = {x["code"]: x["reason"] for x in pub["held"] + pub["skipped"]}
+        self.assertEqual(set(got), set(watch.REASONS))
+        self.assertEqual(got["limit"], "held: 2 of 2 running")
+        self.assertEqual({x["code"] for x in pub["skipped"]}, {"raised_by", "no_role", "no_cap"})
+        self.assertNotIn("script", json.dumps(pub))
+        self.assertNotIn("why", json.dumps(pub))
+
+    def test_an_unknown_code_or_bad_args_is_other(self):
+        st = {"waiting": [self.waiting("made-up"), self.waiting("limit", {"live": "<b>", "max": 2}),
+                          self.waiting("limit", {}), {**self.waiting("live"), "code": None}], "runs": {}}
+        pub = watch.public_state(st, [], NOW)
+        self.assertEqual([(x["code"], x["reason"]) for x in pub["held"]], [("other", "held")] * 4)
+
+    def test_held_code_reads_the_holds_triggers_sets(self):
+        self.assertEqual(watch.held_code("held: docs-issue-87 is live on #87 (idle since 11:30 UTC)"), "live")
+        self.assertEqual(watch.held_code("stale: docs-issue-87 idle 10h; swarm stop docs-issue-87 frees #87"),
+                         "stale")
+        self.assertEqual(watch.held_code("held: waits on #12, #13"), "waits_on")
+
+    def test_running_needs_a_live_session_and_failed_keeps_runs_days(self):
+        old = (NOW - dt.timedelta(days=watch.RUNS_DAYS + 1)).isoformat()
+        recent = (NOW - dt.timedelta(hours=1)).isoformat()
+        run = {"name": "n", "kind": "build", "ref": "#1", "started": recent}
+        st = {"runs": {
+            "a": {**run, "session_id": "live-sid"},
+            "b": {**run, "session_id": "gone-sid", "ref": "#2"},
+            "c": {**run, "session_id": "s3", "ref": "#3", "ending": watch.LIMITED, "ended": recent,
+                  "detail": "You've hit your limit", "cost_usd": 4.5, "until": recent},
+            "d": {**run, "session_id": "s4", "ref": "#4", "ending": watch.NO_RESULT, "ended": old},
+            "e": {**run, "session_id": "s5", "ref": "#5", "ending": watch.DONE, "ended": recent,
+                  "cost_usd": 1.0},
+        }, "waiting": []}
+        live = [types.SimpleNamespace(session_id="live-sid", role="builder")]
+        pub = watch.public_state(st, live, NOW)
+        self.assertEqual(pub["running"], [{"role": "builder", "kind": "build", "ref": "#1", "started": recent}])
+        self.assertEqual(pub["failed"], [{"ref": "#3", "kind": "build", "ending": "limited", "ended": recent}])
+        self.assertNotIn("cost", json.dumps(pub))
