@@ -256,7 +256,7 @@ Once a run the loop started is no longer live, the next check reads its result f
 
 ### The public form: `watch-public.json`
 
-After every check (not `--dry-run`), `swarm watch` also writes `watch-public.json` beside `watch.json`, atomically in the same way (#456). It is `watch.public_state()`: what the loop is doing, in a form fit to show. Nothing publishes it yet; that is a later issue under #444.
+After every check (not `--dry-run`), `swarm watch` also writes `watch-public.json` beside `watch.json`, atomically in the same way (#456). It is `watch.public_state()`: what the loop is doing, in a form fit to show. `swarm watch` also publishes it to the `[watch]` issue (below).
 
 ```json
 {"checked": "2026-11-03T12:00:00+00:00",
@@ -286,6 +286,20 @@ After every check (not `--dry-run`), `swarm watch` also writes `watch-public.jso
 
 - **`running`** is each run the loop started that is still live. **`failed`** is each run from the last 7 days (`watch.RUNS_DAYS`) that ended other than `done`, newest first, with `ending` as a code: `at_cap`, `error`, `limited` or `no_result`.
 - Triggers the loop acts on once and drops (refused, covered, skipped call-ins and reviews left to Actions) aren't listed, as in `swarm inbox`.
+
+### Publishing it: the `[watch]` issue (#458)
+
+After a check whose state changed, `swarm watch` replaces the body of the one `[watch]` issue with a marker line and `watch-public.json` as a fenced `json` block, so the desk can show it.
+
+- **Who writes it:** the watcher's own `gh` login, which is yours (the owner's direction on #451, Option 1). Its only write is that one PATCH of the issue's body: never a comment, a label or a new issue.
+- **Only on change.** `checked` moves every tick, so it isn't compared: in the issue it is when the state last changed, not the last check. A tick whose state matches the last one published reads and writes nothing. A tick whose state changed reads your open issues once to find the issue, and edits it only if its body holds a different state, so a restart doesn't edit an issue that is already current. At most one read and one PATCH per check.
+- **Open it once.** The watcher looks for the open issue you opened whose body starts with `<!-- productswarm-watch -->` (`watch.WATCH_MARKER`), as `dashboard/digest.py` finds the digest. If there is none it prints, once, the command to open it, and carries on:
+
+  ```sh
+  gh issue create --repo OWNER/REPO --title "[watch] swarm watch's state" --body '<!-- productswarm-watch -->'
+  ```
+- **It never fails the loop.** A missing issue, two marked issues, or a failed read or edit is printed, and the next check tries again.
+- **Not you acting.** The dashboard's "owner last acted" (#402, `dashboard/activity.py`) skips edits of an issue whose body starts with the marker, since they are the watcher's, under your login.
 
 ### Limits
 

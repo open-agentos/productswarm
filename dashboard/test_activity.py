@@ -83,6 +83,30 @@ class OwnerFilterTest(unittest.TestCase):
                 self.assertEqual((o["text"], o["link"]), (text, link))
 
 
+class WatchIssueTest(unittest.TestCase):
+    """#458: swarm watch edits the [watch] issue as the owner's login; that isn't the owner acting."""
+
+    def watch_edit(self, minutes_ago, body=a.WATCH_MARKER + " state"):
+        return event("IssuesEvent", minutes_ago, OWNER, action="edited",
+                     issue={"number": 300, "title": "[watch] swarm watch's state", "body": body})
+
+    def test_edits_of_the_watch_issue_are_skipped(self):
+        o = acted([self.watch_edit(1), labeled(9, "ready", 30)])
+        self.assertEqual((o["text"], o["time"]), ("labelled #9 ready", NOW - dt.timedelta(minutes=30)))
+        self.assertEqual(acted([self.watch_edit(1)])["status"], "none")
+
+    def test_the_owners_other_edits_and_acts_on_it_still_count(self):
+        self.assertEqual(acted([self.watch_edit(1, body="my notes")])["kind"], "edited")
+        closed = event("IssuesEvent", 1, OWNER, action="closed",
+                       issue={"number": 300, "body": a.WATCH_MARKER})
+        self.assertEqual(acted([closed])["text"], "closed #300")
+
+    def test_fetch_reads_on_past_a_page_of_watch_edits(self):
+        edits = [self.watch_edit(i) for i in range(100)]
+        gh = mock.Mock(side_effect=[edits, [labeled(1, "ready", 200)]])
+        self.assertEqual(a.fetch(REPO, gh, OWNER)["pages"], 2)
+
+
 class NoActivityTest(unittest.TestCase):
     def test_no_owner_event_says_how_far_back_was_read(self):
         o = acted([event("IssuesEvent", 60, BOT, action="opened", issue={"number": 1}),

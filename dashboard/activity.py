@@ -30,6 +30,9 @@ from layout import esc
 PER_PAGE = 100
 MAX_PAGES = 3          # the events API keeps 300 events
 UNREADABLE = "can't read the repo's events"
+# The [watch] issue's marker (launcher/watch.py's WATCH_MARKER, #458). swarm watch edits that
+# issue's body as the owner's own `gh` login, so those edits are the watcher's, not the owner's.
+WATCH_MARKER = "<!-- productswarm-watch -->"
 
 # IssuesEvent actions, as the header says them.
 VERBS = {"labeled": "labelled", "unlabeled": "unlabelled", "opened": "opened", "closed": "closed",
@@ -49,7 +52,7 @@ def fetch(repo: str, gh_json, owner: str | None, since: dt.datetime | None = Non
                 raise ValueError("events: not a list")
             pages += 1
             events += [e for e in got if isinstance(e, dict)]
-            found = found or any(by(e, owner) for e in got)
+            found = found or any(by(e, owner) and not watcher_edit(e) for e in got)
             # The list is in id order, so its last event says how far back the page reaches.
             last = parse_ts((got[-1] if got and isinstance(got[-1], dict) else {}).get("created_at"))
             reached = since is None or last is None or last < since
@@ -58,6 +61,14 @@ def fetch(repo: str, gh_json, owner: str | None, since: dt.datetime | None = Non
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, TypeError):
         return {"events": None, "error": UNREADABLE}
     return {"events": events, "pages": pages}
+
+
+def watcher_edit(e: dict) -> bool:
+    """An edit of the [watch] issue (#458): swarm watch publishing its state, not the owner."""
+    p = e.get("payload") or {}
+    issue = p.get("issue") or {}
+    return (e.get("type") == "IssuesEvent" and p.get("action") == "edited"
+            and (issue.get("body") or "").lstrip().startswith(WATCH_MARKER))
 
 
 def by(e: dict, owner: str | None) -> bool:
@@ -122,7 +133,8 @@ def owner_last_acted(activity: dict | None, owner: str | None, repo: str,
     events = (activity or {}).get("events")
     if not owner or events is None:
         return {"status": "unknown"}
-    mine = [(t, e) for e in events if by(e, owner) and (t := parse_ts(e.get("created_at")))]
+    mine = [(t, e) for e in events
+            if by(e, owner) and not watcher_edit(e) and (t := parse_ts(e.get("created_at")))]
     if mine:
         t, e = max(mine, key=lambda x: x[0])
         d = describe(e, repo)

@@ -974,7 +974,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                 return 1
             w = watch.Watch(launcher, repo, owner_login(), watch.roles_in(launcher.root),
                             idle_minutes=args.idle_minutes, dry_run=args.dry_run,
-                            manifest_path=Path(args.manifest), roles_from=launcher.root)
+                            manifest_path=Path(args.manifest), roles_from=launcher.root,
+                            list_issues=watch.owner_issues, edit_issue=watch.edit_body)
             interval = args.interval or (limits.interval_minutes if limits else watch.DEFAULT_INTERVAL)
             return w.run(interval)
         return launcher.stop(args.session)
