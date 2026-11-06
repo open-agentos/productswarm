@@ -890,6 +890,92 @@ def public_state(st: dict, live: list, now: dt.datetime) -> dict:
             "failed": failed}
 
 
+# ---------------------------------------------------------------- swarm status (#457)
+
+STALE_CHECKS = 2              # `swarm status` calls `checked` stale after this many intervals
+
+
+def lock_holder(launcher: "swarm.Launcher") -> int | None:
+    """The pid of the swarm watch holding watch.lock, or None. Read-only: it never takes
+    the lock, even briefly, so it can't make a starting watcher exit (#273). The pid in
+    the file counts only while that process is still a `swarm watch`, so a pid reused by
+    another process after the watcher ended doesn't count."""
+    try:
+        pid = int((launcher.dir / LOCK_FILE).read_text().strip())
+    except (OSError, ValueError):
+        return None
+    cmd = launcher.proc(pid) or ""
+    return pid if re.search(r"\bswarm(\.py)?\s+watch\b", cmd) and "--dry-run" not in cmd else None
+
+
+def spool_cost(home: Path, sid: str) -> float | None:
+    """A running session's cost so far (#457): the dashboard's estimate (dashboard/spend.py)
+    from the token counts on the last event in its local heartbeat spool,
+    ~/.productswarm/events/<sid>.jsonl. Only the file's tail is read. None if there is no
+    spool, or its last event has no figure."""
+    swarm.dashboard()             # puts dashboard/ on sys.path
+    import spend
+    try:
+        with open(home / "events" / f"{sid}.jsonl", "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 8192))
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    for raw in reversed(lines):
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(ev, dict):
+            return spend.event_cost(ev)
+    return None
+
+
+def status_text(st: dict, live: list, now: dt.datetime, *, holder: int | None,
+                interval: float, cost_of: Callable[[str], float | None], ago: Callable) -> str:
+    """`swarm status` (#457): public_state() (#456) plus cost, one line per item, from local
+    files only. st is load_state(); live is the launcher's live sessions; holder is
+    lock_holder(); interval is [watch] interval_minutes; cost_of(session_id) is a running
+    session's cost so far. Costs are printed only: they never leave this machine
+    (GOV-0002, GOV-0003, GOV-0004, GOV-0014)."""
+    pub = public_state(st, live, now)
+    runs = list((st.get("runs") or {}).values())
+    sid = {(r["kind"], r["ref"], r["started"]): r.get("session_id") for r in runs}
+    spent = {(r["kind"], r["ref"], r.get("ended")): r.get("cost_usd") for r in runs}
+    checked = dt.datetime.fromisoformat(pub["checked"]) if pub["checked"] else None
+    when = lambda t: ago(dt.datetime.fromisoformat(t), now)
+
+    head = (f"swarm watch: running (pid {holder})" if holder
+            else "swarm watch: not running (nothing holds watch.lock)")
+    head += f" · last check {ago(checked, now)}"
+    if checked and now - checked > dt.timedelta(minutes=STALE_CHECKS * interval):
+        head += f" · stale: checks are every {interval:g} min"
+    out = [head]
+
+    def section(title: str, lines: list[str]) -> None:
+        out.append(f"\n{title} ({len(lines)}):" if lines else f"\n{title}: none")
+        out.extend(lines)
+
+    def took(start: str) -> str:
+        m = max(0, int((now - dt.datetime.fromisoformat(start)).total_seconds()) // 60)
+        return f"{m // 60}h {m % 60:02d}m" if m >= 60 else f"{m}m"
+
+    section("running", [f"- [{r['kind']}] {r['ref']} {r['role']} · {took(r['started'])} · "
+                        f"{usd(cost_of(sid.get((r['kind'], r['ref'], r['started'])) or ''))} so far (est.)"
+                        for r in pub["running"]])
+    section("held", [f"- [{x['kind']}] {x['ref']} · {x['reason']} · since {when(x['since'])}"
+                     for x in pub["held"]])
+    section("skipped", [f"- [{x['kind']}] {x['ref']} · {x['reason']} · since {when(x['since'])}"
+                        for x in pub["skipped"]])
+    section(f"failed in the last {RUNS_DAYS} days",
+            [f"- [{r['kind']}] {r['ref']} · {r['ending'].replace('_', ' ')} · ended {when(r['ended'])} · "
+             f"{usd(spent.get((r['kind'], r['ref'], r['ended'])))} (est.)" for r in pub["failed"]])
+    out.append("\nCosts are estimates and stay on this machine: a running session's is its heartbeat "
+               "tokens at list price (dashboard/spend.py); an ended run's is Claude Code's own.")
+    return "\n".join(out)
+
+
 def take_lock(launcher: "swarm.Launcher") -> tuple[int | None, str]:
     """The one-watcher lock (#273): (fd, "") if this process now holds it, or (None, pid)
     if another process does, with the pid it wrote ("" if not yet written). The lock lasts

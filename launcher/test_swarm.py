@@ -891,6 +891,103 @@ class RealShellTest(unittest.TestCase):
                                               "--output-format", "json"])
 
 
+class StatusTest(Base):
+    """#457: `swarm status`, swarm watch's state with cost, from local files only."""
+
+    NOW = dt.datetime(2026, 11, 6, 12, 0, tzinfo=dt.timezone.utc)
+
+    def write(self, st):
+        (self.home / "launcher" / "watch.json").write_text(json.dumps(st))
+
+    def text(self, st, live=(), holder=None, interval=5, costs=None):
+        import watch
+        g = swarm.dashboard()
+        return watch.status_text(st, list(live), self.NOW, holder=holder, interval=interval,
+                                 cost_of=lambda sid: (costs or {}).get(sid), ago=g.ago)
+
+    def at(self, **kw):
+        return (self.NOW - dt.timedelta(**kw)).isoformat()
+
+    def test_empty_state(self):
+        import watch
+        out = self.text(watch.load_state(self.l))
+        self.assertTrue(out.startswith("swarm watch: not running (nothing holds watch.lock) · last check never"))
+        for title in ("running", "held", "skipped", f"failed in the last {watch.RUNS_DAYS} days"):
+            self.assertIn(f"\n{title}: none", out)
+        self.assertNotIn("stale", out)
+
+    def test_held_and_skipped_triggers_with_their_reason(self):
+        w = lambda code, ref, args=None: {"key": ref, "kind": "build", "ref": ref, "why": "<secret why>",
+                                          "reason": "free text", "code": code, "args": args or {},
+                                          "since": self.at(hours=2)}
+        st = {"checked": self.at(minutes=1), "runs": {},
+              "waiting": [w("waits_on", "#9"), w("no_role", "#10")]}
+        out = self.text(st, holder=4242)
+        self.assertIn("swarm watch: running (pid 4242) · last check 1m ago", out)
+        self.assertIn(f"held (1):\n- [build] #9 · {watch_reason('waits_on')} · since 2h ago", out)
+        self.assertIn(f"skipped (1):\n- [build] #10 · {watch_reason('no_role')} · since 2h ago", out)
+        self.assertNotIn("secret", out)
+
+    def test_failed_run_with_cost_and_running_with_cost_so_far(self):
+        run = {"name": "builder-issue-1", "kind": "build", "ref": "#1", "started": self.at(hours=1, minutes=5)}
+        st = {"checked": self.at(minutes=2), "waiting": [], "runs": {
+            "a": {**run, "session_id": "live-sid"},
+            "b": {**run, "session_id": "s2", "ref": "#2", "ending": "ended at cap", "ended": self.at(hours=3),
+                  "cost_usd": 3.5},
+            "c": {**run, "session_id": "s3", "ref": "#3", "ending": "done", "ended": self.at(hours=1),
+                  "cost_usd": 1.0},
+        }}
+        live = [swarm.Started("builder-issue-1", "builder", M, "live-sid", 0, issue=1, by="watch")]
+        out = self.text(st, live, costs={"live-sid": 2.25})
+        self.assertIn("running (1):\n- [build] #1 builder · 1h 05m · $2.25 so far (est.)", out)
+        self.assertIn("failed in the last 7 days (1):\n- [build] #2 · at cap · ended 3h ago · $3.50 (est.)", out)
+        self.assertNotIn("#3", out)                      # done is not failed
+
+    def test_stale_checked(self):
+        st = {"checked": self.at(minutes=11), "runs": {}, "waiting": []}
+        self.assertIn("last check 11m ago · stale: checks are every 5 min", self.text(st))
+        self.assertNotIn("stale", self.text(st, interval=10))
+
+    def test_spool_cost_reads_the_last_event(self):
+        import watch
+        (self.home / "events").mkdir()
+        ev = {"model": M, "token_counts": {"input": 0, "cache_creation": 0, "cache_read": 0,
+                                           "output": 1_000_000}}
+        (self.home / "events" / "sid.jsonl").write_text(json.dumps({**ev, "model": "unknown"}) + "\n"
+                                                          + json.dumps(ev) + "\n")
+        self.assertEqual(watch.spool_cost(self.home, "sid"), 20.0)
+        self.assertIsNone(watch.spool_cost(self.home, "missing"))
+
+    def test_lock_holder_needs_a_live_swarm_watch(self):
+        import watch
+        lock = self.home / "launcher" / watch.LOCK_FILE
+        self.assertIsNone(watch.lock_holder(self.l))
+        lock.write_text("77\n")
+        self.fake.procs[77] = "python3 /r/launcher/swarm.py watch"
+        self.assertEqual(watch.lock_holder(self.l), 77)
+        self.fake.procs[77] = "vim notes.txt"            # the pid was reused
+        self.assertIsNone(watch.lock_holder(self.l))
+
+    def test_cli_makes_no_network_calls(self):
+        self.write({"checked": self.at(minutes=1), "acted": {}, "waiting": [], "runs": {}})
+        toml = self.home / "swarm.toml"
+        toml.write_text("")
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("no subprocess")):
+            self.assertEqual(swarm.main(["status", "--manifest", str(toml)], self.l), 0)
+        self.assertIn("swarm watch: not running", self.lines[-1])
+        self.assertIn("running: none", self.lines[-1])
+
+    def test_bad_watch_json_fails_cleanly(self):
+        (self.home / "launcher" / "watch.json").write_text("{")
+        self.assertEqual(swarm.main(["status"], self.l), 1)
+        self.assertIn("not valid JSON", self.lines[-1])
+
+
+def watch_reason(code):
+    import watch
+    return watch.REASONS[code]
+
+
 class SnapshotTest(unittest.TestCase):
     """swarm ls, inbox and every watch tick go through snapshot(); only the page reads the
     Actions API (#356, the review on #378)."""
