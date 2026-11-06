@@ -26,7 +26,10 @@ an optional true or false, default false: when true, `swarm watch` starts the ro
 false, default false: when true, `swarm watch` starts the planner on report_issue (a whole
 number of at least 1) once each working day at or after daily_at (local time, "HH:MM").
 daily = true without both of them is an error; either may be set while daily is off.
-load_watch() returns them, or None if the manifest has no [watch] table.
+asks (#590, GOV-0029) is an optional true or false, default false: when true, `swarm
+watch` starts the role an owner's `Ask: <role>: <question>` comment on report_issue names;
+asks = true without report_issue is an error. load_watch() returns them, or None if the
+manifest has no [watch] table.
 
 An optional [merger] table (#589, GOV-0027) is allowed here but read only by merger.py,
 which treats a missing or bad one as `off`; this module doesn't check it.
@@ -48,7 +51,7 @@ REQUIRED = ("role", "count", "model")
 OPTIONAL = ("spend_cap_usd",)
 WATCH_KEYS = ("interval_minutes", "max_live")     # required in [watch]
 WATCH_OPTIONAL = ("max_turns", "review_in_actions", "actions_max_reviews", "stale_minutes",
-                  "call_ins", "daily", "daily_at", "report_issue")   # watch refuses to start without max_turns
+                  "call_ins", "daily", "daily_at", "report_issue", "asks")   # watch refuses to start without max_turns
 
 
 class ManifestError(ValueError):
@@ -87,6 +90,7 @@ class WatchLimits:
     daily: bool = False         # start the planner's daily report (#588, GOV-0029)
     daily_at: dt.time | None = None     # local time it is due each working day
     report_issue: int | None = None     # the pinned report issue it runs on
+    asks: bool = False          # start the role an owner's `Ask:` names (#590, GOV-0029)
 
 
 def _is_number(v) -> bool:
@@ -161,7 +165,7 @@ def _check_watch(table) -> list[str]:
         v = table["stale_minutes"]
         if not isinstance(v, int) or isinstance(v, bool) or v < 1:
             problems.append(f"watch: stale_minutes must be a whole number of at least 1, got {v!r}")
-    for key in ("review_in_actions", "call_ins", "daily"):
+    for key in ("review_in_actions", "call_ins", "daily", "asks"):
         if key in table and not isinstance(table[key], bool):
             problems.append(f"watch: {key} must be true or false, got {table[key]!r}")
     if "daily_at" in table:
@@ -175,6 +179,8 @@ def _check_watch(table) -> list[str]:
     if table.get("daily") is True:
         problems += [f"watch: daily = true needs '{k}'" for k in ("daily_at", "report_issue")
                      if k not in table]
+    if table.get("asks") is True and "report_issue" not in table:
+        problems.append("watch: asks = true needs 'report_issue'")
     return problems
 
 
@@ -239,7 +245,8 @@ def parse_valid(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "
                                                 w.get("max_turns"), w.get("review_in_actions", False),
                                                 w.get("actions_max_reviews"), w.get("stale_minutes", 60),
                                                 w.get("call_ins", False), w.get("daily", False),
-                                                _time(w.get("daily_at")), w.get("report_issue"))
+                                                _time(w.get("daily_at")), w.get("report_issue"),
+                                                w.get("asks", False))
     return sessions, limits, problems
 
 
@@ -304,8 +311,9 @@ def main(argv: list[str]) -> int:
         calls = "call-ins on" if limits.call_ins else "call-ins off"
         daily = (f"[daily] on #{limits.report_issue} at {limits.daily_at:%H:%M}" if limits.daily
                  else "[daily] off")
+        asks = f"[ask] on #{limits.report_issue}" if limits.asks else "[ask] off"
         print(f"watch\tevery {limits.interval_minutes:g} min\tat most {limits.max_live} live\t{turns}"
-              f"\t{planned}\t{reviews}\t{calls}\t{daily}")
+              f"\t{planned}\t{reviews}\t{calls}\t{daily}\t{asks}")
     return 0
 
 
