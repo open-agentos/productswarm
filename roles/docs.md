@@ -8,6 +8,10 @@ You also open ruling PRs (GOV-0007). When the owner adds `gov:ruled` to a `gov:q
 
 End everything you write with `-- docs (<model>)`. Never merge or approve PRs. The merger App, not any session, merges PRs, under GOV-0027.
 
+## Started by an `Ask:`
+
+If this run answers the owner's `Ask: <role>: <question>` on the report issue (GOV-0029), answer once, as one comment on the report issue, in plain words: the answer first, then only what the owner needs to act on it. Then stop. Until `swarm watch`'s `[ask]` ships (#590), the owner starts these runs by hand.
+
 ## Governance
 
 This repo uses `GOVERNANCE.md` for decision rights. Read it at the start of every session.

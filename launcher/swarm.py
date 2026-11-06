@@ -104,7 +104,8 @@ STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
 def opener(role: str, issue: int | None = None, pr: int | None = None,
            called_by: str | None = None, call_why: str | None = None,
-           daily: str | None = None) -> str:
+           daily: str | None = None, ask: str | None = None,
+           ask_comment: int | None = None) -> str:
     """The prompt ops/swarm-session uses when given no args (it passes args on unchanged).
 
     With an issue, it names it: the heartbeat's `working_on` detection matches
@@ -114,8 +115,16 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     role was called in to the issue (GOV-0023, #520): the prompt says by whom and why, and
     that it posts one comment. With daily, a [daily] run (GOV-0029, #588): the planner posts
     `daily` ("the daily report", or on Mondays "the daily report and the Monday check-in")
-    on the report issue."""
-    if issue and daily:
+    on the report issue. With ask, an [ask] run (GOV-0029, #590): the role answers the
+    owner's question, from comment ask_comment on the report issue, in one comment there."""
+    if issue and ask:
+        # As for a call-in's why: "issue #M" in the question would give the heartbeat two issues.
+        safe = ISSUE_WORD_RE.sub(r"#\1", ask)
+        where = f" (comment {ask_comment})" if ask_comment else ""
+        then = (f"answer the owner's question on issue #{issue}{where}: \"{safe}\". swarm watch started "
+                f"this run from its [ask] trigger (GOV-0029). Answer in plain words in one comment "
+                f"on #{issue}, and stop")
+    elif issue and daily:
         then = (f"write {daily} on issue #{issue}, as roles/{role}.md says. swarm watch started "
                 f"this run from its [daily] trigger (GOV-0029); post on #{issue} and stop")
     elif issue and called_by:
@@ -204,6 +213,8 @@ class Started:
     called_by: str | None = None      # a call-in run (GOV-0023, #520): who called it in
     call_why: str | None = None       # and why, from the `Call in:` line
     daily: str | None = None          # a [daily] run (GOV-0029, #588): what it writes
+    ask: str | None = None            # an [ask] run (GOV-0029, #590): the owner's question
+    ask_comment: int | None = None    # and the id of the comment that asked it
 
     @classmethod
     def from_dict(cls, d: dict) -> "Started":
@@ -211,7 +222,7 @@ class Started:
                    issue=d.get("issue"), by=d.get("by"), pr=d.get("pr"),
                    budget_usd=d.get("budget_usd"), max_turns=d.get("max_turns"),
                    called_by=d.get("called_by"), call_why=d.get("call_why"),
-                   daily=d.get("daily"))
+                   daily=d.get("daily"), ask=d.get("ask"), ask_comment=d.get("ask_comment"))
 
 
 def recovered(sid: str, cmd: str, started: float) -> Started:
@@ -475,7 +486,8 @@ class Launcher:
         wt = self.worktree(s.session_id)
         session = ["exec", shlex.quote(str(wt / "ops" / "swarm-session")), shlex.quote(s.role),
                    "--model", shlex.quote(s.model), "--session-id", s.session_id]
-        prompt = shlex.quote(opener(s.role, s.issue, s.pr, s.called_by, s.call_why, s.daily))
+        prompt = shlex.quote(opener(s.role, s.issue, s.pr, s.called_by, s.call_why, s.daily,
+                                    s.ask, s.ask_comment))
         if s.by == "watch":
             result = shlex.quote(str(self.result_file(s.session_id)))
             note = shlex.quote(f"swarm: headless run (claude -p); it ends when done or at its budget, "

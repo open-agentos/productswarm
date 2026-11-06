@@ -63,9 +63,11 @@ class HookCase(unittest.TestCase):
         (self.home / "launcher").mkdir()
         self.gh = FakeGitHub()
 
-    def run_as(self, role, issue_n=None, pr=None, by="watch", called_by=None, daily=None):
+    def run_as(self, role, issue_n=None, pr=None, by="watch", called_by=None, daily=None,
+               ask=None, ask_comment=None):
         e = swarm.Started(name=f"{role}-x", role=role, model="m", session_id=SID, started=T0,
-                          issue=issue_n, pr=pr, by=by, called_by=called_by, daily=daily)
+                          issue=issue_n, pr=pr, by=by, called_by=called_by, daily=daily,
+                          ask=ask, ask_comment=ask_comment)
         (self.home / "launcher" / "sessions.json").write_text(json.dumps([e.__dict__]))
 
     def decide(self, active=False):
@@ -382,6 +384,21 @@ class DailyTest(HookCase):
     def test_the_entry_keeps_daily_across_a_save(self):
         self.run_as("planner", 600, daily="the daily report")
         self.assertEqual(stophook.entry_for(self.home, SID).daily, "the daily report")
+
+
+class AskTest(HookCase):
+    def test_an_ask_run_may_always_stop_whatever_its_role(self):
+        # #590: the asked role posts one comment on the report issue; no PR, no condition.
+        for role in ("builder", "reviewer", "planner"):
+            with self.subTest(role=role):
+                self.run_as(role, 600, ask="why is M1 late?", ask_comment=901)
+                self.assertAllows()
+                self.assertEqual(self.gh.calls, [])
+
+    def test_the_entry_keeps_the_ask_across_a_save(self):
+        self.run_as("builder", 600, ask="why is M1 late?", ask_comment=901)
+        e = stophook.entry_for(self.home, SID)
+        self.assertEqual((e.ask, e.ask_comment), ("why is M1 late?", 901))
 
 
 class GuardTest(HookCase):

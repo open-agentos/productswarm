@@ -30,6 +30,7 @@ through the session's `gh`) and checks the run's done-condition:
 | a called-in role ([call-in], GOV-0023)      | always: it posts one comment, not a PR (#520)   |
 | the planner's daily report ([daily])        | always: it posts on the report issue, not a PR; |
 |                                             | the run is bounded by its budget (#588)         |
+| a role answering an owner's Ask: ([ask])    | always: it posts one comment, not a PR (#590)   |
 | any other run (e.g. an [answer] run)        | always                                          |
 
 Also done, because a run can stop for good reasons without that (#125, point 2):
@@ -271,6 +272,8 @@ def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
         return None          # a call-in run (#520): one comment, whatever its role
     if e.daily:
         return None          # a [daily] run (#588, GOV-0029): it posts, it doesn't open a PR
+    if e.ask:
+        return None          # an [ask] run (#590, GOV-0029): one comment, whatever its role
     if e.role == "reviewer":
         what = missing_review(g, repo, e)
     elif e.role == "builder" and e.pr:
