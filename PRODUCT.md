@@ -1,148 +1,85 @@
 # Product brief: productswarm
 
-**Owner:** @mattmcalister · **Status:** v0 (swarm dashboard) done · v1 (local launcher) done · v2 (wake-up loop) done · v3 (evals, digest and Actions) in progress
+**Owner:** @mattmcalister · **Status:** goal set: the department that reports to you (#526) · Q2–Q5 rulings to come · v0–v3 shipped or in progress (History)
+
+This brief follows the owner's direction on #526 (Option 2). That question is `gov:ruled` with no merged record, so it is direction for #526 only, not precedent (GOV-0006). Every in-force record still holds, and GOV-0015 still sets v3's order. Where this brief describes something a later ruling must allow, it says which one.
 
 ## Problem
 
-Matt runs several agent sessions at once, each with a different role, working across GitHub. He can't see at a glance which sessions are running, what each one is doing, which are stuck, or what they cost. Everything he learns comes from reading issues, PRs and terminals one at a time.
+An owner can't run an AI team the way they run a department (setting direction, letting it work, and hearing back) without dispatching every step.
+
+v0–v3 solved "I can't see my sessions". The owner still directs the swarm one instruction at a time: about 40 labels and merges a day over the repo's first 6 days, and 85% of owner-opened issues were about process (#526 §7).
 
 ## Users
 
-Matt first. Later, anyone running a fleet on GitHub primitives.
+- **Now:** the owner, as the team's C-team.
+- **Next:** consultants delivering software with agent teams.
+- **Later:** their clients, who will want private reports. Design for that; don't build it yet.
 
-## v0: swarm dashboard
+## Goal
 
-### What we're building
+**An AI team run like a department.** A lead agent keeps a milestone plan with the owner. The swarm works that plan under authority the owner delegates, not with the owner approving each issue or merge. The lead reports daily and checks in against the plan weekly, with the owner as its C-team.
 
-Two parts that work together:
+**Done when:** productswarm runs itself that way for 10 working days in a row, with the owner acting only as the C-team (plan, report, asks, protected merges) and under 5 owner acts a day, down from about 40. It ends in a readiness review for the first outside project, the finance and scenario planner.
 
-1. **Session heartbeat.** A Claude Code hook that runs in every agent session. It records lightweight events: session started, working on issue N, opened PR N, blocked on a `gov:question`, stopped. Each event carries the role, the model and a rough cost if one is available.
-2. **Swarm dashboard.** A read-only page, regenerated on a schedule. It combines heartbeat events with GitHub state (issues, PRs, `gov:` questions) and shows:
-   - each session: its role, current issue, last activity and status (active, idle, blocked or stopped);
-   - open PRs and the issues they close;
-   - open `gov:question` issues, and which sessions are waiting on them;
-   - rough spend per session and per day.
+**After that:** the outside project (C in #526) is this goal's finish line. A consultant's kit (B) follows once a named peer asks for it.
 
-### Goals for v0
+### On track at day 30 (Dec 4) if
 
-- Within 10 seconds of opening the dashboard, Matt can tell what every session is doing and which ones need him.
-- Adding the heartbeat to a session is one step.
-- It's lightweight: little or no infrastructure beyond GitHub.
+- [ ] a daily report on every working day, with none started by the owner
+- [ ] owner acts under 5 a day, not counting plan approval and reading reports
+- [ ] more than half of merges made without the owner's click, and no unreviewed revert
+- [ ] every merged PR cites a milestone
+- [ ] the readiness review for the finance planner is scheduled, with its checklist in the plan
 
-### Non-goals for v0
+## Operating model
 
-- ~~Starting, stopping or steering sessions.~~ Superseded by GOV-0005: v1 builds the launcher (below).
-- Editing anything from the dashboard. It's read-only.
-- Multi-user access, auth or alerting.
+**One lead, the planner promoted, is the owner's direct report.** It owns the plan and the daily report, and it runs the other roles. Everything below goes through it except one-on-ones, which the owner can hold with any role. Its role prompt is #529.
 
-## v1: local launcher
-
-GOV-0005 makes v1 a lightweight launcher that runs on Matt's machine. It calls `ops/swarm-session` unchanged and reuses the heartbeat and the dashboard. It lives outside `ops/`.
-
-### What we're building
-
-| # | Issue | What | PR |
+| Habit | What it is | Who runs it | Needs |
 |---|---|---|---|
-| L1 | #47 | Swarm manifest: a committed file listing roles, how many of each, the model per role and an optional per-session spend cap | #64 |
-| L2 | #48 | `swarm up / ls / stop`: start every session in the manifest, list live sessions from heartbeat data, stop one | #65 |
-| L3 | #49 | Issue handoff: start a session on a given issue; refuse if a live session is already working on it | #70 |
-| L4 | #52 | Spend cap per session | #74 |
-| L5 | #50 | "Needs you" list: one ordered list of what's waiting on Matt (PRs to merge, open `gov:question`s, blocked or idle sessions), as `swarm inbox` and at the top of the dashboard | #71 |
-| L6 | #51 | The reviewer runs by default and reviews each open PR once | #72 |
+| **Milestone plan** | `PLAN.md` holds the goal and its milestones. Each has an outcome, a hard date or "when ready", a done test and an owner role. The lead proposes changes as PRs; the owner approves them. The lead replans within the milestones. | Lead | `PLAN.md` (its own issue) |
+| **Weekly check-in** | Each Monday, per milestone: moved, at risk or slipped; what changes; asks. A `PLAN.md` PR comes with any milestone change. | Lead | Q4 for the trigger; by hand until then |
+| **Daily report** | Comment-sized, on the pinned report issue: done against the milestones, next, risks and mitigations, what agents did under delegated authority, and asks (at most 5). It replaces the digest's content (#249). | Lead | Q4 for the trigger, Q5 for where it runs; by hand until then |
+| **Delegated authority** | Standing grants (what `jurisdictions.yml` and the rulings already allow, listed in one place) and approved asks (a role asks, the owner approves, and the approval lets that role act with the owner's authority). Every use shows in the daily report. | Any role asks; the lead batches | Q3. Until then, GOV-0006, GOV-0011 and GOV-0022 decide who gives "go" and who merges |
+| **One-on-ones** | `Ask: <role>: <question>` on the report issue starts that role once, and it answers in plain words. Extends GOV-0023's call-in. | Any role | Q4 |
+| **Call-ins** | `Call in: <roles>: <why>` on a milestone-linked issue; the roles answer once and the lead folds the outcome into the plan. | Lead convenes | Q4. GOV-0023 call-ins work today, on `ready` issues |
+| **Research** | `Research: <question>`, plus the briefs the plan asks for at each milestone. Findings go in `research/` and feed the plan. | Analyst | Q4 for the trigger |
+| **Plan alignment** | Every issue and PR names its milestone. | Lead keeps it; the reviewer checks it | Q2 |
 
-Order: L1 → L2 → L3, then L5 and L6, then L4.
+**Rulings still needed** (#526 §3). None of these is in force:
 
-### Goals for v1
+- **Q2:** an approved milestone in a merged `PLAN.md` replaces per-issue `ready`, and the lead opens and orders its issues. Amends GOV-0006. Until it merges, the owner labels issues `ready`.
+- **Q3:** the delegation model. Standing grants merge a reviewer-approved, tested PR that touches no protected path, shadow first. Approved asks let an agent merge a protected-path PR the owner approved at its head. Amends GOV-0022 and GOV-0011's "only the owner merges". Until it merges, merging stays with the owner, apart from GOV-0022's `merge:agent`.
+- **Q4:** triggers: `[daily]` for the daily report and the Monday check-in, `Ask:` and `Research:`, and call-ins on milestone-linked issues. Amends GOV-0009's trigger table and GOV-0023.
+- **Q5:** where the daily run happens when the owner's Mac is off: local `swarm watch`, or a scheduled Actions run. Asked only if Q4's local run misses days.
+- **Later:** whether agents may merge `GOVERNANCE.md` and `jurisdictions.yml` after the owner approves, whether the Apps may push workflows, and whether a reply by message or through the owner's AI assistant may approve. Only after Q3 has run cleanly.
 
-- Matt no longer starts and routes every session by hand: one command starts the swarm, and one hands a session its issue.
-- What needs Matt is one ordered list, not a scan of issues, PRs and terminals.
-- The reviewer is in the loop by default.
-- Still lightweight: local, with no new infrastructure.
+**What the owner keeps:** setting milestones, granting standing authority, approving asks, reading the report, and approving protected paths (`governance/`, `ops/`, workflows, `jurisdictions.yml`).
 
-### Non-goals for v1
+**Where it happens.** The owner looks at the desk (read-only: milestones, today's report, who is on what, grants in use) and acts on GitHub (the pinned report issue and PRs). Messaging and the owner's own AI assistant come later. Claude Code and the `swarm` terminal are the back room: agents run there, and the owner goes there only for repairs. Every read and act is a `swarm` command first; the desk, comments and any later interface are thin layers over those commands.
 
-Each of these needs its own `product-scope` question:
+**Week 1 proves the rituals by hand; week 2 automates the ones that worked.** Nothing new is built until its manual version has run at least twice (#526 §5).
 
-- other repos;
-- new roles;
-- cloud or unattended runs;
-- any workflow change;
-- editing anything from the dashboard.
+## Non-goals now
 
-### v1 design decisions
+- Governance as the product. Governance is infrastructure: it is how the lead knows what it may decide without the owner.
+- A second user before the readiness review.
+- SaaS.
+- New desk panels outside the plan.
 
-The owner answered each of these on its question:
+## History
 
-- #43 How launcher sessions run: one new Terminal window per session.
-- #44 Manifest format and location: `swarm.toml` at the repo root, read with stdlib `tomllib`.
-- #45 Default spend cap: none for v1; a session has a cap only if the manifest sets one.
-- #46 Whether the launcher may stop a session without the owner: no; for v1 the cap only warns (record GOV-0008).
+v0–v3 are the infrastructure the department goal stands on.
 
-## v2: wake-up loop
-
-GOV-0009 makes v2 a wake-up loop: `launcher/swarm watch`. It runs on Matt's machine in the foreground and stops with Ctrl-C. Every few minutes it reads the same GitHub and heartbeat state as `swarm inbox` and starts the right session for each new trigger. It only ever starts sessions. It reuses `needs_you()`, `swarm launch` and the launcher's refusal checks.
-
-### Triggers
-
-The loop acts only on labels the owner added (checked in the issue's events, per GOV-0006), on new PR heads and on the reviewer's requested changes. Each trigger counts once.
-
-| Trigger | Session it starts |
-|---|---|
-| `[review]` An open, non-draft PR whose head the reviewer hasn't reviewed | a reviewer pass |
-| `[build]` An issue whose latest `ready` the owner added, with no live session on it | `swarm launch builder --issue N` (or the issue's role) |
-| `[record]` A `gov:question` the owner labelled `gov:ruled` that needs a record and has no ruling PR | docs, on that question (GOV-0007) |
-| `[answer]` A `gov:question` the owner labelled `ready` | the role that asked it, on that question; the planner if the owner asked it (#455), which convenes any committee the answer calls for and leaves the rounds to the owner |
-| `[respond]` An open, non-draft PR whose latest reviewer review at its current head is "changes requested", with no `Overstep:` finding, for at most 2 rounds | the builder, on that PR (GOV-0011) |
-
-### What we're building
-
-| # | Issue | What | PR |
-|---|---|---|---|
-| W1 | #89 | `swarm watch --dry-run`: works out the triggers and prints the `swarm launch …` command it would run for each, but starts nothing | #94 |
-| W2 | #90 | `swarm watch` starts sessions, within GOV-0010's limits | #104 |
-| R1 | #111 | The reviewer uses review states as a stoplight (request changes / comment / approve), with rubric lines; approve means "rubric passed at this head", never a merge decision (GOV-0011) | #117 |
-| R2 | #112 | The builder responds to requested changes on its own PR (GOV-0011) | #116 |
-| R3 | #113 | The `[respond]` trigger, at most 2 rounds per PR, then the owner (GOV-0011) | #120 |
-| H1 | #147 | Loop-started runs are one-shot `claude -p` runs (GOV-0014) with auto permission mode and explicit denies (GOV-0013) and a hard per-run budget and turn ceiling (GOV-0012) | #153 |
-| H2 | #148 | A Stop hook keeps a loop-started run going until its role's done-condition is met (GOV-0014) | #152 |
-| H3 | #149 | The loop records each run's result and cost in `watch.json`, and `swarm inbox` lists runs that ended at cap (GOV-0012, GOV-0014) | #156 |
-| — | #132 | Only reviewers the loop started keep `[review]` triggers quiet; an idle owner-started reviewer doesn't hold reviews up | #143 |
-| — | #136 | A `[build]` is held while a live builder or open PR shares its GOV record (the owner's answer on #127) | #144 |
-
-Order: W1 → W2, then R1–R3, then H1–H3.
-
-### Goals for v2
-
-- An owner signal (`ready`, `gov:ruled` or a new PR push) starts the right session without Matt starting it by hand.
-- A reviewer's requested changes reach the builder without Matt relaying them, and the review loop is bounded so it ends with Matt.
-- Spend while nobody is watching stays bounded by limits Matt sets.
-- Still lightweight: local, with no new infrastructure.
-
-### Non-goals for v2
-
-Each of these needs its own `product-scope` question:
-
-- a cloud or GitHub Actions trigger;
-- re-prompting a session that is already running;
-- the loop stopping a session itself. A loop-started run ends at its budget or turn ceiling because Claude Code ends it (GOV-0012); sessions Matt starts stay warn-only (GOV-0008);
-- any trigger or action not in the table above. The loop never adds or removes labels, and never comments, approves or merges.
-
-### v2 design decisions
-
-GOV-0009 named three design questions. The owner has answered each, and later questions added more rulings:
-
-- #101 How a nudge reaches a session: a fresh session per trigger; the loop never re-prompts a running one. GOV-0014 then made each loop-started run one-shot, so there is no idle session to re-prompt.
-- #88 / GOV-0010 Interval, concurrency ceiling and cap rule: the interval is 5 minutes, and at most 2 loop-started sessions run at once. The loop starts only roles that have a `spend_cap_usd`, and says why it skipped any other. The numbers live in `swarm.toml`, and changing them is a `spend` change. Sessions Matt starts by hand don't count towards the ceiling.
-- #102 Whether the reviewer's "don't poll on a timer" rule changes: it doesn't. The loop does the polling, and a reviewer it starts runs one pass and stops.
-- #105 / GOV-0011 Bounded review loop: the reviewer uses request changes, comment and approve as a stoplight, and approve means only that the rubric passed at that head. The builder responds to requested changes on its own PR, and the loop starts it through `[respond]` for at most 2 rounds per PR. A third request, or an `Overstep:` finding, goes to the owner.
-- #125 / GOV-0014 How loop-started sessions run: each is a one-shot `claude -p` run that exits when its role is done, kept going by a Stop hook, with its result and cost recorded in `watch.json`. Sessions Matt starts stay interactive.
-- #126 / GOV-0012 Hard budget: a loop-started run gets `--max-budget-usd` from its role's `spend_cap_usd`, plus a `--max-turns` ceiling, and ends at either. Sessions Matt starts stay warn-only (GOV-0008).
-- #131 / GOV-0013 Headless permissions: loop-started runs use `--permission-mode auto`, plus `--disallowedTools` for `gh pr merge` and label edits.
-- #127 Overlapping builders: hold a `[build]` while a live builder or open PR shares its GOV record. This is the owner's direction on that question, not a ruling (GOV-0006).
+- **v0, swarm dashboard (done).** A heartbeat hook in every session records role, model, issue and rough cost (GOV-0002 to GOV-0004). The dashboard joins it with GitHub state to show each session, open PRs, `gov:question`s and spend.
+- **v1, local launcher (done, GOV-0005).** `swarm.toml` lists roles, models and spend caps. `swarm up / ls / stop / launch` start and hand off sessions; `swarm inbox` is the ordered needs-you list; the reviewer runs by default. Caps only warn (GOV-0008).
+- **v2, wake-up loop (done, GOV-0009).** `swarm watch` starts the right session on owner signals: `[review]`, `[build]`, `[record]`, `[answer]` and `[respond]`. Limits: GOV-0010 (interval, concurrency, caps), GOV-0011 and GOV-0021 (the bounded review loop), GOV-0012 (hard budget), GOV-0013 (headless permissions) and GOV-0014 (one-shot runs).
+- **v3, evals, digest and Actions (in progress, GOV-0015).** Its stages are below.
 
 ## v3: evals, digest and Actions
 
-GOV-0015 makes v3 three stages, in order: **B** quality evals, then **F** a phone-friendly "needs you" digest, then **C stage 1**, the reviewer running in GitHub Actions on events. C stage 2 (builders and docs in Actions) comes after these and is not planned.
+GOV-0015 makes v3 three stages, in order: **B** quality evals, then **F** a phone-friendly "needs you" digest, then **C stage 1**, the reviewer running in GitHub Actions. C stage 2 (builders and docs in Actions) comes after these and is not planned. #526 defers C stage 2, except the lead's daily run if Q5 calls for it, and repurposes the digest as the daily report. The desk's v3 progress panel reads these tables.
 
 ### Stage B: evals (done)
 
@@ -185,33 +122,4 @@ C1.5 to C1.9 are the reconciler (#255 stage 1, GOV-0020). Actions reviews now st
 
 Order: B → F → C stage 1. C stage 2 is not planned.
 
-### Non-goals for v3 now
-
-Each of these needs its own `product-scope` question:
-
-- C stage 2: builders and docs running in Actions;
-- the launchd local loop (option A of #167), which GOV-0015 leaves out of v3;
-- a kit for other repos (D) and other model providers (E), deferred as #167 describes.
-
-Workflow files stay the owner's: the swarm proposes them, and the owner commits them.
-
-### v3 design decisions
-
-C stage 1's sub-questions, raised when the stage came next (GOV-0015):
-
-- #205 / GOV-0016 Public job log: a reviewer run in Actions prints only `result`, `subtype`, `num_turns` and `total_cost_usd`; no transcript, no artifact.
-- #206 / GOV-0017 Trigger events and secrets: reviews only same-repo, non-draft PRs by a swarm App or the owner, and a no-secrets job gates the job with secrets. Never `pull_request_target`, `issue_comment` or `workflow_run` on untrusted input. Runs now start from `main`'s reconciler, not `pull_request` (#255, GOV-0020).
-- #207 / GOV-0018 Reviewer App key: it moves to secrets of a default-branch-only Actions environment, and the job mints a repo-only token with `pull_requests: write`, `contents: read` and `issues: read`.
-- #208 Model credential for reviewer runs in Actions: open. The owner's direction on that question, not a ruling (GOV-0006), is a Claude subscription token for now, with an API key as the goal.
-- #209 / GOV-0019 Workflow and coexistence with `swarm watch`: one concurrency group per PR, never on its own reviews or comments, and skips a reviewed head. A `swarm.toml` switch makes `swarm watch` leave `[review]` to Actions. Its `pull_request` trigger is replaced by the reconciler (#255, GOV-0020).
-- #255 / GOV-0020 Reconciler: runs with the reviewer's secrets start only from a reconciler on `main` that sweeps on a schedule (or a dispatch), reads repo state and reviews each PR GOV-0017's rules allow. PR events may only nudge it (#261). It amends GOV-0017's and GOV-0019's `pull_request` trigger; GOV-0018 is unchanged.
-
-## Open decisions
-
-The swarm decides these through `GOVERNANCE.md`, not up front. Expect questions on where heartbeat events are stored, how the page is built and hosted, who can see it, what the hook may capture, how cost is estimated, and the Action's schedule and permissions.
-
-## Working agreements
-
-- Every PR targets `main` and closes exactly one issue (`Closes #N`).
-- Sessions open PRs; only Matt merges.
-- New implementation issues are created unlabelled. Matt triages them and labels the ones to build `ready`; sessions take only `ready` issues (GOV-0006).
+v3's decisions are in GOV-0016 to GOV-0020 and GOV-0024 (the Actions reviewer's log, triggers, App key, workflow, reconciler and trusted authors). #208 (the model credential for Actions runs) is open; the owner's direction on it is a Claude subscription token for now. Workflow files stay the owner's: the swarm proposes them, and the owner commits them.
