@@ -25,6 +25,19 @@ it has none (for example, the role has no spend_cap_usd).
 | call-in| a `Call in: <role>, <role>: <why>` line in a comment on an issue whose  | each named role on   |
 |        | most recent `ready` was added by the owner, posted since that label, by | the issue, once per  |
 |        | a swarm App or the owner (GOV-0023, #520)                               | call                 |
+| daily  | a working day (Mon-Fri, local time) at or after [watch] daily_at, once  | planner on the       |
+|        | per day, with daily = true (GOV-0029, #588)                             | report issue         |
+
+[daily] (#588, GOV-0029): with `daily = true` in [watch], once each working day (Monday to
+Friday, in this machine's local time) at or after daily_at, it starts the planner on
+report_issue to write the daily report; on Mondays the prompt says the daily report and
+the Monday check-in. Its key is `daily:<report_issue>:<local date>`, so a missed poll
+fires late that day, not twice. It waits only while a planner session is live on the
+report issue. A day whose trigger never started (held all day, or swarm watch stopped
+mid-hold) is logged once the next day as missed and isn't caught up. Before the start
+the report issue must exist and be open; it needs no label. Its run is headless like any
+other (GOV-0010, GOV-0012, GOV-0013), and stophook.py lets it stop whenever it likes.
+With daily off (the default) there is no trigger. `swarm inbox` says when it is next due.
 
 [call-in] (#520, GOV-0023): a comment counts as a call when a line of it starts `Call in:`
 (any case). The roles are the comma-separated names before the next colon; the why is the
@@ -201,6 +214,8 @@ WHY_MAX = 300                 # characters of a call's why that go into the prom
 CALL_INS_OFF = ("call-ins are off: call_ins = true in swarm.toml's [watch] turns them on "
                 "(GOV-0023)")
 NOT_RECORDED = (LEFT_TO_ACTIONS, CALL_INS_OFF)   # listed once, never kept in watch.json
+DAILY = "daily"               # GOV-0029's daily report trigger (#588)
+WORKDAYS = range(5)           # Monday to Friday, by date.weekday()
 RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and watch.json keeps it
 PUBLIC_FILE = "watch-public.json"   # watch.json's no-cost form, beside it (#456)
 MAX_RETRIES = 2               # times a run that never started is started again (#550)
@@ -255,6 +270,7 @@ class Trigger:
     once: str | None = None   # what changes the held reason enough to log it again (#488)
     called_by: str | None = None  # [call-in]: who called the role in, for its prompt (#520)
     call_why: str | None = None   # [call-in]: the why from the `Call in:` line
+    daily: str | None = None      # [daily]: what the planner writes, for its prompt (#588)
 
     def line(self) -> str:
         if self.held:
@@ -413,7 +429,8 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
              is_tracking: Callable, review_in_actions: bool = False,
              now: dt.datetime | None = None, stale_minutes: int = DEFAULT_STALE,
              one_way: frozenset[str] = frozenset(), apps: dict[str, str] | None = None,
-             call_ins: bool = False) -> list[Trigger]:
+             call_ins: bool = False, daily_at: dt.time | None = None,
+             report_issue: int | None = None, tz: dt.tzinfo | None = None) -> list[Trigger]:
     """Every trigger present now, in needs-you order then issue order. Nothing is filtered
     for novelty here; Watch does that. With review_in_actions, each [review] trigger is
     skipped as left to Actions (GOV-0019). A [record], [answer], [build] or [respond]
@@ -421,7 +438,8 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
     it and whether that session is stale (#488); Watch starts nothing for it. A question in
     a domain in one_way needs a record whatever its body rates it (#519). apps maps each
     swarm App login to its role, for [call-in] (#520); with call_ins off, each [call-in]
-    comes back skipped as off."""
+    comes back skipped as off. With daily_at and report_issue, [daily] is due at daily_at
+    in tz (default: this machine's local time) on working days (#588, GOV-0029)."""
     m, out = w.model, []
     items = needs_you(m)
     heads = {p["number"]: p.get("head") for p in m["prs"]}
@@ -526,7 +544,67 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
             else:
                 h = held_by(n, m, started, now, stale_minutes, t.role)
                 out.append(replace(t, held=h[0], once=h[1]) if h else t)
+
+    # The daily report (#588, GOV-0029): waits only for a planner live on the report issue.
+    t = daily_trigger(now, daily_at, report_issue, tz) if daily_at and report_issue else None
+    if t:
+        h = held_by(report_issue, m, started, now, stale_minutes, t.role)
+        out.append(replace(t, held=h[0], once=h[1]) if h else t)
     return out
+
+
+def local_day(now: dt.datetime, tz: dt.tzinfo | None = None) -> dt.datetime:
+    """now in tz, or in this machine's local time zone."""
+    return now.astimezone(tz) if tz else now.astimezone()
+
+
+def daily_trigger(now: dt.datetime | None, daily_at: dt.time, report_issue: int,
+                  tz: dt.tzinfo | None = None) -> Trigger | None:
+    """[daily] (#588, GOV-0029): due on a working day at or after daily_at, local time.
+    Keyed on the local date, so it fires once a day however many checks see it."""
+    if now is None:
+        return None
+    local = local_day(now, tz)
+    if local.weekday() not in WORKDAYS or local.time() < daily_at:
+        return None
+    what = ("the daily report and the Monday check-in" if local.weekday() == 0
+            else "the daily report")
+    return Trigger(key=f"{DAILY}:{report_issue}:{local:%Y-%m-%d}", kind=DAILY,
+                   ref=f"#{report_issue}", why=f"{local:%a %Y-%m-%d}, due at {daily_at:%H:%M}",
+                   role="planner", command=f"planner on #{report_issue}, {what}",
+                   issue=report_issue, daily=what)
+
+
+def daily_key_day(key: str) -> str | None:
+    """The local date in a [daily] key, or None if it isn't one."""
+    parts = key.split(":")
+    return parts[2] if len(parts) == 3 and parts[0] == DAILY else None
+
+
+def next_daily(now: dt.datetime, daily_at: dt.time, report_issue: int, acted: dict,
+               tz: dt.tzinfo | None = None) -> str:
+    """When [daily] is next due, for `swarm inbox` (#588): "due now" if today's is due and
+    not yet acted on, else the next working day at daily_at."""
+    local = local_day(now, tz)
+    day = local.date()
+    if (local.weekday() in WORKDAYS and local.time() >= daily_at
+            and f"{DAILY}:{report_issue}:{day}" not in acted):
+        return "due now"
+    if local.weekday() not in WORKDAYS or local.time() >= daily_at:
+        day += dt.timedelta(days=1)
+    while day.weekday() not in WORKDAYS:
+        day += dt.timedelta(days=1)
+    return f"next due {day:%a %Y-%m-%d} at {daily_at:%H:%M}"
+
+
+def daily_text(limits: "manifest.WatchLimits | None", acted: dict, now: dt.datetime,
+               tz: dt.tzinfo | None = None) -> str | None:
+    """`swarm inbox`'s [daily] line (#588), or None while daily is off."""
+    if not (limits and limits.daily and limits.daily_at and limits.report_issue):
+        return None
+    when = next_daily(now, limits.daily_at, limits.report_issue, acted, tz)
+    return (f"swarm watch's [daily]: the planner writes the daily report on #{limits.report_issue} "
+            f"each working day at {limits.daily_at:%H:%M} local time (GOV-0029); {when}")
 
 
 def call_line(body: str | None) -> tuple[list[str], str] | None:
@@ -1250,6 +1328,7 @@ class Watch:
     loaded: str | None = None         # the launcher/ tree this process runs, for code_check (#550)
     restart: Callable[[], None] = reexec
     said: set[str] = field(default_factory=set)   # code_check's lines, each said once
+    tz: dt.tzinfo | None = None       # [daily]'s time zone (#588); None: this machine's
 
     def once(self, line: str) -> None:
         if line not in self.said:
@@ -1349,7 +1428,7 @@ class Watch:
         for t in triggers(w, self.owner, self.launcher.running(), self.roles, g.needs_you,
                           g.is_tracking, bool(limits and limits.review_in_actions), now,
                           limits.stale_minutes if limits else DEFAULT_STALE, self.one_way(),
-                          self.apps(), bool(limits and limits.call_ins)):
+                          self.apps(), bool(limits and limits.call_ins), *self.daily(limits)):
             key = f"{t.key}|held|{t.once}" if t.held else t.key
             if key in self.seen:
                 continue
@@ -1369,6 +1448,11 @@ class Watch:
             return manifest.load_watch(self.manifest_path)
         except manifest.ManifestError:
             return None
+
+    def daily(self, limits: "manifest.WatchLimits | None") -> tuple:
+        """triggers()'s daily_at, report_issue and tz: (None, None, tz) while [daily] is off."""
+        on = bool(limits and limits.daily)
+        return ((limits.daily_at, limits.report_issue) if on else (None, None)) + (self.tz,)
 
     def review_in_actions(self) -> bool:
         """For --dry-run: swarm.toml's [watch] review_in_actions, or False (see limits())."""
@@ -1397,7 +1481,7 @@ class Watch:
                              session_id=str(uuid.uuid4()), started=self.launcher.clock(),
                              issue=t.issue, pr=t.pr, by="watch",
                              budget_usd=s.spend_cap_usd, max_turns=limits.max_turns,
-                             called_by=t.called_by, call_why=t.call_why)
+                             called_by=t.called_by, call_why=t.call_why, daily=t.daily)
 
     def start_tick(self, now: dt.datetime) -> list[Trigger]:
         """Start a session for each new trigger, within the [watch] limits (GOV-0010)."""
@@ -1422,8 +1506,17 @@ class Watch:
             out(f"swarm watch: a run hit the account's usage limit; {limited}, for every start (#489)")
         todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
                                     limits.review_in_actions, now, limits.stale_minutes,
-                                    self.one_way(), self.apps(), limits.call_ins)
+                                    self.one_way(), self.apps(), limits.call_ins,
+                                    *self.daily(limits))
                 if t.key not in acted]
+        today = local_day(now, self.tz).strftime("%Y-%m-%d")
+        for x in st["waiting"]:
+            day = daily_key_day(x["key"])
+            if day and day != today and x["key"] not in acted:
+                # #588: a day ended without its [daily] run. Logged once (the entry leaves
+                # "waiting" on this check); not caught up.
+                out(f"[daily] {x['ref']} {day}: no daily report run that day ({x.get('reason')}); "
+                    f"not caught up (GOV-0029)")
         todo.sort(key=lambda t: before.get(t.key, {}).get("since", iso(now)))  # held longest first
         held, done, reviewer = [], [], None
 
@@ -1646,7 +1739,12 @@ class Watch:
             # A pass already running may have listed PRs before this push: wait for it.
             return None, bool(reviewers(hb, live))
         issue, events = self.get_issue(self.repo, t.issue)
-        if t.kind in ("build", "respond"):
+        if t.kind == DAILY:
+            # #588: the report issue needs no label, only to exist and be open.
+            refused = ([f"#{t.issue} doesn't exist"] if issue is None else
+                       [f"#{t.issue} is a pull request, not an issue"] if "pull_request" in issue else
+                       [f"#{t.issue} is closed"] if issue.get("state") != "open" else [])
+        elif t.kind in ("build", "respond"):
             # The owner's `ready`, or the issue's milestone (GOV-0026, #583), as `swarm launch`.
             refused = swarm.go_refusals(t.issue, issue, events, self.owner, set(self.apps()),
                                         self.get_reader(self.repo, t.issue))
@@ -1714,8 +1812,9 @@ class Watch:
 
 
 def own_role(t: Trigger) -> str | None:
-    """The role whose live sessions hold t: only its own for a [call-in] (#520), else any."""
-    return t.role if t.kind == CALL_IN else None
+    """The role whose live sessions hold t: only its own for a [call-in] (#520) or [daily]
+    (#588), else any."""
+    return t.role if t.kind in (CALL_IN, DAILY) else None
 
 
 def roles_in(root: Path) -> set[str]:

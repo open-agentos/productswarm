@@ -273,7 +273,75 @@ class CallInsTest(Base):
             out = io.StringIO()
             with redirect_stdout(out), unittest.mock.patch.object(m, "ROOT", self.dir):
                 self.assertEqual(m.main(["manifest.py", str(path)]), 0)
-            self.assertTrue(out.getvalue().splitlines()[-1].endswith(f"\t{shown}"))
+            self.assertIn(shown, out.getvalue().splitlines()[-1].split("\t"))
+
+
+class DailyTest(Base):
+    """[watch] daily, daily_at, report_issue (#588, GOV-0029): off by default; daily = true
+    needs the other two."""
+    WATCH = "[watch]\ninterval_minutes = 5\nmax_live = 2\nmax_turns = 200\n"
+    ON = 'daily = true\ndaily_at = "08:30"\nreport_issue = 600\n'
+
+    def limits(self, extra=""):
+        return m.parse_all(self.WATCH + extra + session(), Path("swarm.toml"), self.roles)[1]
+
+    def problems(self, extra):
+        with self.assertRaises(m.ManifestError) as cm:
+            self.limits(extra)
+        return cm.exception.problems
+
+    def test_off_by_default(self):
+        limits = self.limits()
+        self.assertIs(limits.daily, False)
+        self.assertIsNone(limits.daily_at)
+        self.assertIsNone(limits.report_issue)
+
+    def test_on(self):
+        limits = self.limits(self.ON)
+        self.assertIs(limits.daily, True)
+        self.assertEqual(limits.daily_at, m.dt.time(8, 30))
+        self.assertEqual(limits.report_issue, 600)
+
+    def test_on_without_report_issue_errors(self):
+        self.assertEqual(self.problems('daily = true\ndaily_at = "08:30"\n'),
+                         ["watch: daily = true needs 'report_issue'"])
+
+    def test_on_without_daily_at_errors(self):
+        self.assertEqual(self.problems("daily = true\nreport_issue = 600\n"),
+                         ["watch: daily = true needs 'daily_at'"])
+
+    def test_on_alone_names_both(self):
+        self.assertEqual(len(self.problems("daily = true\n")), 2)
+
+    def test_settings_allowed_while_off(self):
+        limits = self.limits('daily = false\ndaily_at = "08:30"\nreport_issue = 600\n')
+        self.assertIs(limits.daily, False)
+        self.assertEqual(limits.report_issue, 600)
+
+    def test_bad_values(self):
+        for extra, said in (('daily = "yes"\n', "daily must be true or false"),
+                            ('daily_at = "8:30"\n', "daily_at must be a local time"),
+                            ('daily_at = "24:00"\n', "daily_at must be a local time"),
+                            ("daily_at = 830\n", "daily_at must be a local time"),
+                            ("report_issue = 0\n", "report_issue must be an issue number"),
+                            ('report_issue = "600"\n', "report_issue must be an issue number"),
+                            ("report_issue = true\n", "report_issue must be an issue number")):
+            with self.subTest(extra=extra):
+                problems = self.problems(extra)
+                self.assertEqual(len(problems), 1)
+                self.assertIn(said, problems[0])
+
+    def test_cli_shows_it(self):
+        path = self.dir / "swarm.toml"
+        for extra, shown in ((self.ON, "[daily] on #600 at 08:30"), ("", "[daily] off")):
+            path.write_text(self.WATCH + extra + session())
+            out = io.StringIO()
+            with redirect_stdout(out), unittest.mock.patch.object(m, "ROOT", self.dir):
+                self.assertEqual(m.main(["manifest.py", str(path)]), 0)
+            self.assertIn(shown, out.getvalue().splitlines()[-1].split("\t"))
+
+    def test_repo_manifest_leaves_it_off(self):
+        self.assertIs(m.load_watch(m.DEFAULT_PATH).daily, False)
 
 
 class ActionsMaxReviewsTest(Base):

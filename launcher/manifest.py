@@ -22,8 +22,11 @@ plan lists nothing. stale_minutes (#488) is how long a session may sit idle on a
 before `swarm watch` calls the trigger it holds stale and names the `swarm stop` that
 frees it: a whole number of at least 1, optional, default 60. call_ins (#520, GOV-0023) is
 an optional true or false, default false: when true, `swarm watch` starts the roles a
-`Call in:` line names on a `ready` issue. load_watch() returns them, or None if the
-manifest has no [watch] table.
+`Call in:` line names on a `ready` issue. daily (#588, GOV-0029) is an optional true or
+false, default false: when true, `swarm watch` starts the planner on report_issue (a whole
+number of at least 1) once each working day at or after daily_at (local time, "HH:MM").
+daily = true without both of them is an error; either may be set while daily is off.
+load_watch() returns them, or None if the manifest has no [watch] table.
 
 An optional [merger] table (#589, GOV-0027) is allowed here but read only by merger.py,
 which treats a missing or bad one as `off`; this module doesn't check it.
@@ -31,6 +34,8 @@ which treats a missing or bad one as `off`; this module doesn't check it.
 from __future__ import annotations
 
 import sys
+import datetime as dt
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,11 +43,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PATH = ROOT / "swarm.toml"
 
+DAILY_AT_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 REQUIRED = ("role", "count", "model")
 OPTIONAL = ("spend_cap_usd",)
 WATCH_KEYS = ("interval_minutes", "max_live")     # required in [watch]
 WATCH_OPTIONAL = ("max_turns", "review_in_actions", "actions_max_reviews", "stale_minutes",
-                  "call_ins")   # watch refuses to start without max_turns
+                  "call_ins", "daily", "daily_at", "report_issue")   # watch refuses to start without max_turns
 
 
 class ManifestError(ValueError):
@@ -78,6 +84,9 @@ class WatchLimits:
     actions_max_reviews: int | None = None  # most PRs one Actions plan lists (#257); None: none
     stale_minutes: int = 60     # idle this long on an issue, a holder is called stale (#488)
     call_ins: bool = False      # start the roles a `Call in:` line names (#520, GOV-0023)
+    daily: bool = False         # start the planner's daily report (#588, GOV-0029)
+    daily_at: dt.time | None = None     # local time it is due each working day
+    report_issue: int | None = None     # the pinned report issue it runs on
 
 
 def _is_number(v) -> bool:
@@ -152,9 +161,20 @@ def _check_watch(table) -> list[str]:
         v = table["stale_minutes"]
         if not isinstance(v, int) or isinstance(v, bool) or v < 1:
             problems.append(f"watch: stale_minutes must be a whole number of at least 1, got {v!r}")
-    for key in ("review_in_actions", "call_ins"):
+    for key in ("review_in_actions", "call_ins", "daily"):
         if key in table and not isinstance(table[key], bool):
             problems.append(f"watch: {key} must be true or false, got {table[key]!r}")
+    if "daily_at" in table:
+        v = table["daily_at"]
+        if not isinstance(v, str) or not DAILY_AT_RE.match(v):
+            problems.append(f"watch: daily_at must be a local time as \"HH:MM\" (24-hour), got {v!r}")
+    if "report_issue" in table:
+        v = table["report_issue"]
+        if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+            problems.append(f"watch: report_issue must be an issue number, got {v!r}")
+    if table.get("daily") is True:
+        problems += [f"watch: daily = true needs '{k}'" for k in ("daily_at", "report_issue")
+                     if k not in table]
     return problems
 
 
@@ -218,8 +238,16 @@ def parse_valid(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "
     limits = None if w is None else WatchLimits(float(w["interval_minutes"]), w["max_live"],
                                                 w.get("max_turns"), w.get("review_in_actions", False),
                                                 w.get("actions_max_reviews"), w.get("stale_minutes", 60),
-                                                w.get("call_ins", False))
+                                                w.get("call_ins", False), w.get("daily", False),
+                                                _time(w.get("daily_at")), w.get("report_issue"))
     return sessions, limits, problems
+
+
+def _time(v: str | None) -> dt.time | None:
+    if v is None:
+        return None
+    h, m = DAILY_AT_RE.match(v).groups()
+    return dt.time(int(h), int(m))
 
 
 def _read(path: Path) -> str:
@@ -274,8 +302,10 @@ def main(argv: list[str]) -> int:
                    else f"at most {limits.actions_max_reviews} Actions reviews a sweep")
         reviews = "[review] left to Actions" if limits.review_in_actions else "[review] local"
         calls = "call-ins on" if limits.call_ins else "call-ins off"
+        daily = (f"[daily] on #{limits.report_issue} at {limits.daily_at:%H:%M}" if limits.daily
+                 else "[daily] off")
         print(f"watch\tevery {limits.interval_minutes:g} min\tat most {limits.max_live} live\t{turns}"
-              f"\t{planned}\t{reviews}\t{calls}")
+              f"\t{planned}\t{reviews}\t{calls}\t{daily}")
     return 0
 
 
