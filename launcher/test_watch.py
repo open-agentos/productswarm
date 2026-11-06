@@ -1289,7 +1289,7 @@ class RespondTest(unittest.TestCase):
 
     def test_dry_run_prints_it(self):
         self.request(SHA1)
-        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read)
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, manifest_path=self.path, read=self.scene.read)
         w.tick(NOW)
         self.assertEqual(trigger_lines(self.lines),
                          ["[respond] PR #72 changes requested at aaaaaaa (round 1 of 2) "
