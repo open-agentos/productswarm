@@ -344,6 +344,47 @@ class DailyTest(Base):
         self.assertIs(m.load_watch(m.DEFAULT_PATH).daily, False)
 
 
+class AsksTest(Base):
+    """[watch] asks (#590, GOV-0029): off by default; asks = true needs report_issue."""
+    WATCH = "[watch]\ninterval_minutes = 5\nmax_live = 2\nmax_turns = 200\n"
+
+    def limits(self, extra=""):
+        return m.parse_all(self.WATCH + extra + session(), Path("swarm.toml"), self.roles)[1]
+
+    def problems(self, extra):
+        with self.assertRaises(m.ManifestError) as cm:
+            self.limits(extra)
+        return cm.exception.problems
+
+    def test_off_by_default(self):
+        self.assertIs(self.limits().asks, False)
+
+    def test_on_with_the_report_issue(self):
+        limits = self.limits("asks = true\nreport_issue = 600\n")
+        self.assertIs(limits.asks, True)
+        self.assertEqual(limits.report_issue, 600)
+        self.assertIs(limits.daily, False)          # it doesn't need [daily]
+
+    def test_on_without_report_issue_errors(self):
+        self.assertEqual(self.problems("asks = true\n"), ["watch: asks = true needs 'report_issue'"])
+
+    def test_must_be_true_or_false(self):
+        self.assertEqual(self.problems('asks = "yes"\nreport_issue = 600\n'),
+                         ["watch: asks must be true or false, got 'yes'"])
+
+    def test_cli_shows_it(self):
+        path = self.dir / "swarm.toml"
+        for extra, shown in (("asks = true\nreport_issue = 600\n", "[ask] on #600"), ("", "[ask] off")):
+            path.write_text(self.WATCH + extra + session())
+            out = io.StringIO()
+            with redirect_stdout(out), unittest.mock.patch.object(m, "ROOT", self.dir):
+                self.assertEqual(m.main(["manifest.py", str(path)]), 0)
+            self.assertIn(shown, out.getvalue().splitlines()[-1].split("\t"))
+
+    def test_repo_manifest_leaves_it_off(self):
+        self.assertIs(m.load_watch(m.DEFAULT_PATH).asks, False)
+
+
 class ActionsMaxReviewsTest(Base):
     """[watch] actions_max_reviews (#257): optional, a whole number of at least 1."""
     WATCH = "[watch]\ninterval_minutes = 5\nmax_live = 2\nmax_turns = 200\n"

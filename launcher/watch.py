@@ -27,6 +27,8 @@ it has none (for example, the role has no spend_cap_usd).
 |        | a swarm App or the owner (GOV-0023, #520)                               | call                 |
 | daily  | a working day (Mon-Fri, local time) at or after [watch] daily_at, once  | planner on the       |
 |        | per day, with daily = true (GOV-0029, #588)                             | report issue         |
+| ask    | the owner's `Ask: <role>: <question>` comment on [watch] report_issue,  | that role on the     |
+|        | with asks = true (GOV-0029, #590)                                       | report issue, once   |
 
 [daily] (#588, GOV-0029): with `daily = true` in [watch], once each working day (Monday to
 Friday, in this machine's local time) at or after daily_at, it starts the planner on
@@ -38,6 +40,20 @@ mid-hold) is logged once the next day as missed and isn't caught up. Before the 
 the report issue must exist and be open; it needs no label. Its run is headless like any
 other (GOV-0010, GOV-0012, GOV-0013), and stophook.py lets it stop whenever it likes.
 With daily off (the default) there is no trigger. `swarm inbox` says when it is next due.
+
+[ask] (#590, GOV-0029): with `asks = true` in [watch], a comment on report_issue counts as
+an ask when a line of it starts `Ask:` (any case): one role, a colon, then the question,
+the rest of that line, at most WHY_MAX characters. Only the first such line counts. It is
+keyed on the comment id, so it starts once. A comment by anyone but the owner, a name with
+no prompt in roles/, a line naming more than one role, or a line with no question is
+skipped with a reason. Only asks posted since the switch was turned on count: watch.json
+keeps when this watcher first saw it on for that report issue (`asks_since`), and drops it
+on a check that finds it off, so an ask posted while it was off (or answered by hand
+before it was on) never starts; each is skipped once with that reason. It waits only while
+a session of the same role is live on the report issue, and the report issue must exist
+and be open. Its run is headless like any other (GOV-0010, GOV-0012, GOV-0013); its prompt
+quotes the question and says it answers in one comment there, and stophook.py lets it
+stop whenever it likes. With asks off (the default) the report issue's comments aren't read.
 
 [call-in] (#520, GOV-0023): a comment counts as a call when a line of it starts `Call in:`
 (any case). The roles are the comma-separated names before the next colon; the why is the
@@ -215,6 +231,9 @@ CALL_INS_OFF = ("call-ins are off: call_ins = true in swarm.toml's [watch] turns
                 "(GOV-0023)")
 NOT_RECORDED = (LEFT_TO_ACTIONS, CALL_INS_OFF)   # listed once, never kept in watch.json
 DAILY = "daily"               # GOV-0029's daily report trigger (#588)
+ASK = "ask"                   # GOV-0029's owner Ask: trigger (#590)
+ASK_RE = re.compile(r"^[ \t]*Ask:[ \t]*([^:\n]*?)[ \t]*(?::[ \t]*([^\n]*?))?[ \t]*$",
+                    re.IGNORECASE | re.MULTILINE)
 WORKDAYS = range(5)           # Monday to Friday, by date.weekday()
 RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and watch.json keeps it
 PUBLIC_FILE = "watch-public.json"   # watch.json's no-cost form, beside it (#456)
@@ -256,7 +275,7 @@ ENDINGS = {AT_CAP: "at_cap", ERROR: "error", NO_RESULT: "no_result", LIMITED: "l
 @dataclass(frozen=True)
 class Trigger:
     key: str                  # identity: a new key is a new trigger
-    kind: str                 # review | build | record | answer | respond | call-in
+    kind: str                 # review | build | record | answer | respond | call-in | daily | ask
     ref: str                  # "PR #12" or "#49"
     why: str
     role: str | None = None
@@ -271,6 +290,8 @@ class Trigger:
     called_by: str | None = None  # [call-in]: who called the role in, for its prompt (#520)
     call_why: str | None = None   # [call-in]: the why from the `Call in:` line
     daily: str | None = None      # [daily]: what the planner writes, for its prompt (#588)
+    ask: str | None = None        # [ask]: the owner's question, for its prompt (#590)
+    ask_comment: int | None = None    # [ask]: the comment that asked it
 
     def line(self) -> str:
         if self.held:
@@ -430,7 +451,8 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
              now: dt.datetime | None = None, stale_minutes: int = DEFAULT_STALE,
              one_way: frozenset[str] = frozenset(), apps: dict[str, str] | None = None,
              call_ins: bool = False, daily_at: dt.time | None = None,
-             report_issue: int | None = None, tz: dt.tzinfo | None = None) -> list[Trigger]:
+             report_issue: int | None = None, tz: dt.tzinfo | None = None,
+             ask_issue: int | None = None, asks_since: dt.datetime | None = None) -> list[Trigger]:
     """Every trigger present now, in needs-you order then issue order. Nothing is filtered
     for novelty here; Watch does that. With review_in_actions, each [review] trigger is
     skipped as left to Actions (GOV-0019). A [record], [answer], [build] or [respond]
@@ -439,7 +461,8 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
     a domain in one_way needs a record whatever its body rates it (#519). apps maps each
     swarm App login to its role, for [call-in] (#520); with call_ins off, each [call-in]
     comes back skipped as off. With daily_at and report_issue, [daily] is due at daily_at
-    in tz (default: this machine's local time) on working days (#588, GOV-0029)."""
+    in tz (default: this machine's local time) on working days (#588, GOV-0029). With
+    ask_issue, each owner `Ask:` comment on it posted since asks_since is an [ask] (#590)."""
     m, out = w.model, []
     items = needs_you(m)
     heads = {p["number"]: p.get("head") for p in m["prs"]}
@@ -550,6 +573,12 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
     if t:
         h = held_by(report_issue, m, started, now, stale_minutes, t.role)
         out.append(replace(t, held=h[0], once=h[1]) if h else t)
+
+    # Owner asks (#590, GOV-0029): wait only for a session of the asked role on the issue.
+    if ask_issue:
+        for t in asks(ask_issue, w.comments.get(ask_issue, []), owner, roles, asks_since):
+            h = None if t.skipped else held_by(ask_issue, m, started, now, stale_minutes, t.role)
+            out.append(replace(t, held=h[0], once=h[1]) if h else t)
     return out
 
 
@@ -617,6 +646,50 @@ def call_line(body: str | None) -> tuple[list[str], str] | None:
     names = [r.strip(" `*@").lower() for r in m.group(1).split(",")]
     why = " ".join((m.group(2) or "").split())
     return list(dict.fromkeys(r for r in names if r)), why[:WHY_MAX]
+
+
+def ask_line(body: str | None) -> tuple[list[str], str] | None:
+    """(the names, the question) from a comment's first `Ask: <role>: <question>` line, or
+    None if it has none (#590). Names are lower-cased, split on commas so a line naming two
+    roles can be told apart; the question is one line, at most WHY_MAX characters."""
+    m = ASK_RE.search(body or "")
+    if not m:
+        return None
+    names = [r.strip(" `*@").lower() for r in m.group(1).split(",")]
+    question = " ".join((m.group(2) or "").split())
+    return [r for r in names if r], question[:WHY_MAX]
+
+
+def asks(n: int, comments: list[dict], owner: str, roles: set[str],
+         since: dt.datetime | None = None) -> list[Trigger]:
+    """GOV-0029's [ask] triggers on report issue n (#590): one per `Ask:` comment, keyed on
+    the comment id, starting the named role, or a skipped one saying why it doesn't count.
+    A comment posted before since (when asks was turned on) is skipped too."""
+    out = []
+    for c in sorted(comments, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)):
+        parsed = ask_line(c.get("body"))
+        if not parsed:
+            continue
+        names, question = parsed
+        cid, login = c.get("id"), (c.get("user") or {}).get("login") or "unknown"
+        at = c.get("created_at")
+        base = dict(key=f"{ASK}:{n}:{cid}", kind=ASK, ref=f"#{n}", issue=n,
+                    why=f"ask by {login} (comment {cid})" + (f": {names[0]}" if len(names) == 1 else ""))
+        posted = dt.datetime.fromisoformat(at) if at else None
+        bad = (f"{login} isn't the owner, and only the owner's asks count (GOV-0029)" if login != owner
+               else "the line names no role" if not names
+               else f"the line names {len(names)} roles; an ask names one" if len(names) > 1
+               else f"{names[0]!r} isn't a role with a prompt in roles/" if names[0] not in roles
+               else "the line asks no question" if not question
+               else "posted before asks was turned on in swarm.toml's [watch]"
+               if since and (posted is None or posted < since) else None)
+        if bad:
+            out.append(Trigger(**base, skipped=bad))
+            continue
+        r = names[0]
+        out.append(Trigger(**base, role=r, command=f"{r} on #{n}, to answer the ask",
+                           ask=question, ask_comment=cid))
+    return out
 
 
 def calls(n: int, comments: list[dict], ready: dict, owner: str, apps: dict[str, str],
@@ -854,16 +927,24 @@ def state_path(launcher: "swarm.Launcher") -> Path:
 
 def load_state(launcher: "swarm.Launcher") -> dict:
     """{"checked": ISO time, "acted": {key: outcome}, "waiting": [trigger dicts],
-    "runs": {key: run record}}. A run record (#149) is {session_id, name, kind, ref,
-    started}, plus {ending, detail, cost_usd, subtype, ended} once the run has ended."""
+    "runs": {key: run record}, "asks_since": {report issue: ISO time}}. A run record (#149)
+    is {session_id, name, kind, ref, started}, plus {ending, detail, cost_usd, subtype,
+    ended} once the run has ended. asks_since (#590) is when the watcher first saw [watch]
+    asks on for that report issue; it is empty while asks is off."""
     try:
         data = json.loads(state_path(launcher).read_text())
     except FileNotFoundError:
-        return {"checked": None, "acted": {}, "waiting": [], "runs": {}}
+        return {"checked": None, "acted": {}, "waiting": [], "runs": {}, "asks_since": {}}
     except ValueError as e:
         raise RuntimeError(f"{state_path(launcher)} is not valid JSON: {e}") from None
     return {"checked": data.get("checked"), "acted": dict(data.get("acted") or {}),
-            "waiting": list(data.get("waiting") or []), "runs": dict(data.get("runs") or {})}
+            "waiting": list(data.get("waiting") or []), "runs": dict(data.get("runs") or {}),
+            "asks_since": dict(data.get("asks_since") or {})}
+
+
+def gh_comments(repo: str, n: int) -> list[dict]:
+    """Every comment on issue n, oldest first: the report issue's, for [ask] (#590)."""
+    return swarm.dashboard().gh_items(f"repos/{repo}/issues/{n}/comments?per_page=100")
 
 
 def read_result(path: Path) -> dict:
@@ -1329,6 +1410,7 @@ class Watch:
     restart: Callable[[], None] = reexec
     said: set[str] = field(default_factory=set)   # code_check's lines, each said once
     tz: dt.tzinfo | None = None       # [daily]'s time zone (#588); None: this machine's
+    get_comments: Callable[[str, int], list[dict]] = gh_comments    # the report issue's, for [ask] (#590)
 
     def once(self, line: str) -> None:
         if line not in self.said:
@@ -1424,11 +1506,17 @@ class Watch:
         g = swarm.dashboard()
         w = self.read(self.repo, self.idle_minutes, now)
         limits = self.limits()
+        try:
+            kept = load_state(self.launcher)["asks_since"]
+        except RuntimeError:
+            kept = {}
+        ask_n, since = self.asks(w, limits, kept, now)
         new = []
         for t in triggers(w, self.owner, self.launcher.running(), self.roles, g.needs_you,
                           g.is_tracking, bool(limits and limits.review_in_actions), now,
                           limits.stale_minutes if limits else DEFAULT_STALE, self.one_way(),
-                          self.apps(), bool(limits and limits.call_ins), *self.daily(limits)):
+                          self.apps(), bool(limits and limits.call_ins), *self.daily(limits),
+                          ask_issue=ask_n, asks_since=since):
             key = f"{t.key}|held|{t.once}" if t.held else t.key
             if key in self.seen:
                 continue
@@ -1453,6 +1541,19 @@ class Watch:
         """triggers()'s daily_at, report_issue and tz: (None, None, tz) while [daily] is off."""
         on = bool(limits and limits.daily)
         return ((limits.daily_at, limits.report_issue) if on else (None, None)) + (self.tz,)
+
+    def asks(self, w: World, limits: "manifest.WatchLimits | None", kept: dict,
+             now: dt.datetime) -> tuple[int | None, dt.datetime | None]:
+        """[ask] (#590): (the report issue, when asks was first seen on for it), or (None,
+        None) while asks is off. With asks on it reads the report issue's comments into w,
+        unless gather() already did. kept is watch.json's asks_since."""
+        n = limits.report_issue if limits and limits.asks else None
+        if not n:
+            return None, None
+        if n not in w.comments:
+            w.comments[n] = self.get_comments(self.repo, n)
+        since = kept.get(str(n))
+        return n, dt.datetime.fromisoformat(since) if since else now
 
     def review_in_actions(self) -> bool:
         """For --dry-run: swarm.toml's [watch] review_in_actions, or False (see limits())."""
@@ -1481,7 +1582,8 @@ class Watch:
                              session_id=str(uuid.uuid4()), started=self.launcher.clock(),
                              issue=t.issue, pr=t.pr, by="watch",
                              budget_usd=s.spend_cap_usd, max_turns=limits.max_turns,
-                             called_by=t.called_by, call_why=t.call_why, daily=t.daily)
+                             called_by=t.called_by, call_why=t.call_why, daily=t.daily,
+                             ask=t.ask, ask_comment=t.ask_comment)
 
     def start_tick(self, now: dt.datetime) -> list[Trigger]:
         """Start a session for each new trigger, within the [watch] limits (GOV-0010)."""
@@ -1504,10 +1606,13 @@ class Watch:
         limited = limit_reason(runs, now)
         if limited and not any(x.get("reason") == limited for x in st["waiting"]):
             out(f"swarm watch: a run hit the account's usage limit; {limited}, for every start (#489)")
+        ask_n, since = self.asks(w, limits, st["asks_since"], now)
+        # #590: kept while asks is on for this report issue; dropped as soon as it is off.
+        asks_since = {str(ask_n): iso(since)} if ask_n else {}
         todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
                                     limits.review_in_actions, now, limits.stale_minutes,
                                     self.one_way(), self.apps(), limits.call_ins,
-                                    *self.daily(limits))
+                                    *self.daily(limits), ask_issue=ask_n, asks_since=since)
                 if t.key not in acted]
         today = local_day(now, self.tz).strftime("%Y-%m-%d")
         for x in st["waiting"]:
@@ -1524,7 +1629,7 @@ class Watch:
             acted[t.key] = outcome
             done.append(t)
             save_state(self.launcher, {"checked": iso(now), "acted": acted, "waiting": st["waiting"],
-                                       "runs": runs})
+                                       "runs": runs, "asks_since": asks_since})
 
         def hold(t: Trigger, reason: str, once: str | None = None, code: str = "other",
                  args: dict | None = None) -> None:
@@ -1624,7 +1729,8 @@ class Watch:
                 finish(t, f"started {entry.name}")
             else:
                 hold(t, "failed to start (see above); trying again next check", code="error")
-        st = {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs}
+        st = {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs,
+              "asks_since": asks_since}
         save_state(self.launcher, st)
         pub = public_state(st, self.launcher.live(), now)
         save_state(self.launcher, pub, PUBLIC_FILE)
@@ -1739,8 +1845,8 @@ class Watch:
             # A pass already running may have listed PRs before this push: wait for it.
             return None, bool(reviewers(hb, live))
         issue, events = self.get_issue(self.repo, t.issue)
-        if t.kind == DAILY:
-            # #588: the report issue needs no label, only to exist and be open.
+        if t.kind in (DAILY, ASK):
+            # #588, #590: the report issue needs no label, only to exist and be open.
             refused = ([f"#{t.issue} doesn't exist"] if issue is None else
                        [f"#{t.issue} is a pull request, not an issue"] if "pull_request" in issue else
                        [f"#{t.issue} is closed"] if issue.get("state") != "open" else [])
@@ -1812,9 +1918,9 @@ class Watch:
 
 
 def own_role(t: Trigger) -> str | None:
-    """The role whose live sessions hold t: only its own for a [call-in] (#520) or [daily]
-    (#588), else any."""
-    return t.role if t.kind in (CALL_IN, DAILY) else None
+    """The role whose live sessions hold t: only its own for a [call-in] (#520), [daily]
+    (#588) or [ask] (#590), else any."""
+    return t.role if t.kind in (CALL_IN, DAILY, ASK) else None
 
 
 def roles_in(root: Path) -> set[str]:

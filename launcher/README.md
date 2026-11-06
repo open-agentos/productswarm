@@ -186,6 +186,7 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respo
 | `[respond]` An open, non-draft PR that `productswarm-builder[bot]` opened, whose latest `productswarm-reviewer[bot]` review at its current head is "changes requested", and whose **Authority** line isn't `fail`, for at most 2 rounds (GOV-0011) | `builder` on the PR, as `swarm launch builder --issue N --pr M` would, where #N is the one issue the PR closes |
 | `[call-in]` A comment on an issue whose most recent `ready` was added by the owner, posted since that label by a swarm App or the owner, with a line `Call in: <role>, <role>: <why>` (GOV-0023, #520). Off unless `call_ins = true` (see "Call-ins" below) | each named role on the issue, once per call, with a prompt that says who called it in and why, and that it posts one comment |
 | `[daily]` A working day (Monday to Friday, this machine's local time) at or after `daily_at`, once per day (GOV-0029, #588). Off unless `daily = true` (see "The daily report" below) | `planner` on the report issue, to write the daily report; on Mondays, the daily report and the Monday check-in |
+| `[ask]` The owner's comment on the report issue with a line `Ask: <role>: <question>` (GOV-0029, #590). Off unless `asks = true` (see "Owner asks" below) | the named role on the report issue, once per comment, with a prompt that quotes the question and says it answers in one comment there |
 
 **Builds by milestone** (#583, GOV-0026). The watcher reads `PLAN.md` from `main` once per check, and the events and comments of every open, non-question issue with a `**Milestone:** M<n>` line. An issue without the owner's `ready` gets a `[build]` when the milestone check under "Two ways an issue is go" passes on that reading: opened by the owner or a swarm App, `M<n>` in `PLAN.md` and not marked done, no `hold` label and no owner comment. Its `**Waits on:**` issues hold the build, as for a `ready` issue, rather than stopping it. So do a live session on the issue, an overlapping GOV record and the GOV-0010 and GOV-0012 limits, as for any `[build]`.
 
@@ -393,6 +394,25 @@ report_issue = 600    # the pinned report issue's number
 - **`swarm inbox`** says it's on and when it's next due: `swarm watch's [daily]: the planner writes the daily report on #600 each working day at 08:30 local time (GOV-0029); next due Wed 2026-11-04 at 08:30` (or `due now`).
 - **Off or missing.** No trigger at all. `daily = true` without both `daily_at` and `report_issue` is an error, so `swarm watch` starts nothing until it is fixed; the two may be set while `daily` is off. `swarm.toml` is read on every check, so a change applies without a restart. Turning it on is the owner's `spend` call.
 
+### Owner asks
+
+GOV-0029 lets the owner ask any role a question on the report issue and get one answer there, in plain words (#590). It extends GOV-0023's call-ins. A switch in `[watch]` turns it on, and it uses the daily report's `report_issue`:
+
+```toml
+[watch]
+asks = true           # optional; default false
+report_issue = 600    # the pinned report issue's number
+```
+
+- **The line.** Any line of a comment on the report issue that starts `Ask:` (any case): one role, a colon, then the question, the rest of that line, up to 300 characters. Only the first such line in a comment counts. For example `Ask: builder: why is #588's PR still open?`. Asking the planner is allowed.
+- **Who.** Only the owner's comments count. Anyone else's, a swarm App's included, is skipped with a reason, and so is a name with no prompt in `roles/`, a line naming two roles, or a line with no question. A comment on any other issue is never read for asks.
+- **Once per comment.** The trigger is keyed on the comment id (`ask:<report_issue>:<comment id>`), so it starts once, and never again after its run stops. Editing the comment doesn't start it again; post a new one.
+- **Since it was turned on.** `watch.json` keeps when this watcher first saw `asks` on for the report issue (`asks_since`) and drops it on any check that finds it off. Only asks posted since then count: an ask posted while it was off, or one already answered by hand before it was turned on, is skipped once as `posted before asks was turned on …` and never starts.
+- **Limits.** An ask run is a headless run like any other: it counts toward `max_live`, needs the role's `spend_cap_usd`, and gets the budget, turn ceiling and denies (GOV-0010, GOV-0012, GOV-0013). There is no daily limit on asks; those bound them.
+- **Holds.** It waits only while a session of the **asked role** is live on the report issue (a planner writing the daily report holds an ask to the planner, not one to the builder). Just before the start, the report issue must exist and be open; it needs no label. As with call-ins, a held ask, or one skipped because the role isn't in `swarm.toml` or has no `spend_cap_usd`, is listed in `swarm inbox`; an ask skipped for its line or its author is logged once.
+- **The run.** Its prompt quotes the question and the comment id, says `swarm watch` started it from `[ask]` (GOV-0029), and says to answer in plain words in one comment on the report issue and stop. The Stop hook puts no condition on it.
+- **Off or missing.** No trigger, and the report issue's comments aren't read. `asks = true` without `report_issue` is an error, so `swarm watch` starts nothing until it is fixed. `swarm.toml` is read on every check, so a change applies without a restart. Turning it on is the owner's `spend` call.
+
 ### Overlapping builds
 
 Builders on issues from the same ruling usually change the same files, so their PRs conflict or one undoes the other. A `[build]` trigger is **held** while other work from the same GOV record is in flight. This is #136, which builds the owner's answer on #127. That answer is direction for #127, not a ruling.
@@ -441,6 +461,7 @@ When the run is about to stop, the hook reads GitHub as the run's App (only read
 | docs on a `gov:ruled` question (`[record]`) | a PR, open or merged, closes the question |
 | a called-in role (`[call-in]`) | always: it posts one comment, not a PR (#520) |
 | the planner's daily report (`[daily]`) | always: it posts on the report issue, not a PR; its budget bounds it (#588) |
+| a role answering an owner's ask (`[ask]`) | always: it posts one comment on the report issue, not a PR (#590) |
 | anything else, e.g. an `[answer]` run | always |
 
 These also count as done, because a run can stop for good reasons without a PR:

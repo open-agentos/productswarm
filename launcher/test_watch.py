@@ -1016,7 +1016,8 @@ class SaveStateTest(unittest.TestCase):
                                 clock=time.time, out=lambda s: None, git=lambda a: (0, ""))
 
     def test_round_trips_and_leaves_no_temp_file(self):
-        st = {"checked": "2026-11-04T00:00:00Z", "acted": {"k": "started"}, "waiting": [], "runs": {}}
+        st = {"checked": "2026-11-04T00:00:00Z", "acted": {"k": "started"}, "waiting": [], "runs": {},
+              "asks_since": {"600": "2026-11-03T08:00:00+00:00"}}
         watch.save_state(self.l, st)
         self.assertEqual(watch.load_state(self.l), st)
         self.assertEqual(list(self.l.dir.glob("*.tmp")) + list(self.l.dir.glob(".*.tmp")), [])
@@ -1060,7 +1061,7 @@ class ManifestWatchTest(unittest.TestCase):
         self.assertEqual(c.exception.problems, [
             "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live, max_turns, "
             "review_in_actions, actions_max_reviews, stale_minutes, call_ins, daily, daily_at, "
-            "report_issue)",
+            "report_issue, asks)",
             "watch: interval_minutes must be a positive number, got 0",
             "watch: max_live must be a whole number of at least 1, got 1.5"])
         with self.assertRaises(manifest.ManifestError) as c:
@@ -2332,6 +2333,193 @@ class DailyTest(unittest.TestCase):
         self.assertIn(line, swarm.inbox_text([], NOW, G, daily=line))
         self.manifest()
         self.assertIsNone(watch.daily_text(swarm.manifest.load_watch(self.path), {}, TUE, UTC))
+
+
+ASKS_ON = "asks = true\nreport_issue = 600\n"
+ON_SINCE = (NOW - dt.timedelta(hours=1)).isoformat()      # asks turned on an hour before NOW
+
+
+class AskTest(unittest.TestCase):
+    """GOV-0029's [ask] trigger (#590): an owner's `Ask: <role>: <question>` comment on
+    report issue #600 starts that role there once. In the Scene, a builder is live on #60."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        (self.home / "launcher").mkdir()
+        self.fake = Fake(self.home / "launcher")
+        self.lines = []
+        self.l = swarm.Launcher(self.home, run=self.fake.run, proc=self.fake.proc, kill=self.fake.kill,
+                                clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append,
+                                root=self.home / "repo", git=FakeGit(), claude_dir=self.home / "claude")
+        self.scene = Scene()
+        self.scene.issues.append(issue(600, title="Daily report"))   # no label: it needs none
+        self.manifest(ASKS_ON)
+        watch.save_state(self.l, {**watch.load_state(self.l), "asks_since": {"600": ON_SINCE}})
+        self.fetched = []
+
+    def manifest(self, extra=""):
+        self.path = write_manifest(self.home, ALL_CAPPED, 10, extra=extra)
+
+    def get_comments(self, repo, n):
+        self.fetched.append(n)
+        return list(self.scene.comments.get(n, []))
+
+    def watcher(self, dry_run=False):
+        return watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=dry_run, manifest_path=self.path,
+                           read=self.scene.read, get_issue=self.scene.get_issue,
+                           get_heartbeat=self.scene.heartbeat, get_comments=self.get_comments)
+
+    def tick(self, dry_run=False, now=NOW):
+        return [t for t in self.watcher(dry_run).tick(now) if t.kind == "ask"]
+
+    def asked(self):
+        return [(e.name, e.role, e.issue, e.ask, e.ask_comment) for e in self.l.load() if e.ask]
+
+    def say(self, *comments, n=600):
+        self.scene.comments[n] = list(comments)
+
+    def ask_lines(self):
+        return [x for x in self.lines if x.startswith("[ask]")]
+
+    def test_an_owner_ask_starts_the_role_once(self):
+        self.say(call(901, "Quick one.\nAsk: Docs: is the README right about issue #588?\nThanks",
+                      who=OWNER))
+        self.assertEqual([t.key for t in self.tick()], ["ask:600:901"])
+        self.assertEqual(self.asked(), [("docs-issue-600", "docs", 600,
+                                         "is the README right about issue #588?", 901)])
+        cmd = [c for c in self.fake.commands if "roles/docs.md" in c][-1]
+        argv = headless_argv(cmd)
+        prompt = argv[argv.index("-p") + 1]
+        self.assertIn("answer the owner's question on issue #600 (comment 901): \"is the README right "
+                      "about #588?\"", prompt)
+        self.assertIn("Answer in plain words in one comment on #600, and stop", prompt)          # GOV-0012's budget and turns, GOV-0013's denies
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "10")
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "50")
+        self.assertIn("Bash(gh pr merge *)", argv)
+        self.assertIn("[ask] #600 ask by mattmcalister (comment 901): docs -> starting docs-issue-600",
+                      self.lines)
+        n = len(self.fake.commands)
+        self.assertEqual(self.tick(), [])                 # keyed on the comment: once
+        StartTest.exit(self, "docs-issue-600")
+        self.assertEqual(self.tick(), [])                 # and not again once it stops
+        self.assertEqual(len(self.fake.commands), n)
+
+    def test_asking_the_planner_is_allowed(self):
+        self.say(call(901, "ask: planner: what slipped this week?", who=OWNER))
+        self.assertEqual([t.key for t in self.tick()], ["ask:600:901"])
+        self.assertEqual([a[1] for a in self.asked()], ["planner"])
+
+    def test_a_non_owner_comment_is_skipped(self):
+        self.say(call(901, "Ask: docs: drive-by", who="stranger"),
+                 call(902, "Ask: docs: as the planner", who=PLANNER_APP))
+        done = self.tick()
+        self.assertEqual([(t.key, t.skipped) for t in done], [
+            ("ask:600:901", "stranger isn't the owner, and only the owner's asks count (GOV-0029)"),
+            ("ask:600:902", f"{PLANNER_APP} isn't the owner, and only the owner's asks count (GOV-0029)")])
+        self.assertIn("[ask] #600 ask by stranger (comment 901): docs -> skipped: stranger isn't the "
+                      "owner, and only the owner's asks count (GOV-0029)", self.lines)
+        self.assertEqual(self.asked(), [])
+        self.assertEqual(self.tick(), [])                 # logged once
+
+    def test_unknown_role_no_question_and_two_roles_are_skipped(self):
+        self.say(call(901, "Ask: designer: x", who=OWNER),
+                 call(902, "Ask: docs:", who=OWNER),
+                 call(903, "Ask: docs", who=OWNER),
+                 call(904, "Ask: docs, planner: both?", who=OWNER),
+                 call(905, "Ask: : no role", who=OWNER))
+        self.assertEqual([(t.key, t.skipped) for t in self.tick()], [
+            ("ask:600:901", "'designer' isn't a role with a prompt in roles/"),
+            ("ask:600:902", "the line asks no question"),
+            ("ask:600:903", "the line asks no question"),
+            ("ask:600:904", "the line names 2 roles; an ask names one"),
+            ("ask:600:905", "the line names no role")])
+        self.assertEqual(self.asked(), [])
+
+    def test_a_comment_on_another_issue_starts_nothing(self):
+        self.say(call(901, "Ask: docs: wrong place?", who=OWNER), n=60)
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.ask_lines(), [])
+
+    def test_the_switch_off_starts_nothing_and_reads_nothing(self):
+        self.manifest()                                   # no asks: off by default
+        self.say(call(901, "Ask: docs: x", who=OWNER))
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.tick(dry_run=True), [])
+        self.assertEqual(self.ask_lines(), [])
+        self.assertEqual(self.asked(), [])
+        self.assertEqual(watch.load_state(self.l)["asks_since"], {})     # dropped while off
+        self.manifest("asks = false\nreport_issue = 600\n")
+        self.assertEqual(self.tick(), [])
+        self.assertNotIn(600, self.fetched)
+
+    def test_only_asks_since_it_was_turned_on_count(self):
+        self.manifest()
+        self.tick()                                       # off: asks_since dropped
+        self.say(call(901, "Ask: docs: asked while off", who=OWNER, at=ts(30)))
+        self.manifest(ASKS_ON)
+        on = NOW - dt.timedelta(minutes=10)
+        (t,) = self.tick(now=on)                          # turned on: it was posted before
+        self.assertEqual(t.skipped, "posted before asks was turned on in swarm.toml's [watch]")
+        self.assertEqual(watch.load_state(self.l)["asks_since"], {"600": on.isoformat()})
+        self.say(call(901, "Ask: docs: asked while off", who=OWNER, at=ts(30)),
+                 call(902, "Ask: docs: asked once on", who=OWNER, at=ts(5)))
+        self.assertEqual([t.key for t in self.tick()], ["ask:600:902"])   # a later check keeps `on`
+        self.assertEqual([a[3] for a in self.asked()], ["asked once on"])
+
+    def test_a_live_session_of_the_asked_role_holds_it_and_others_dont(self):
+        self.scene.prs.append(pr(72, SHA2, closes=(60,)))  # no [build] on #60 to take the slot
+        t_issue, t_comments = tracking(201, "docs-sid", "docs", 600)
+        self.scene.tracking.append(t_issue)
+        self.scene.comments[201] = t_comments
+        self.say(call(901, "Ask: docs: one", who=OWNER), call(902, "Ask: planner: two", who=OWNER))
+        self.assertEqual([t.key for t in self.tick()], ["ask:600:902"])
+        (held,) = [x for x in watch.waiting(self.l)[1] if x["kind"] == "ask"]
+        self.assertEqual(held["reason"], "held: docs session docs-sid is live on #600 (active)")
+        self.scene.tracking.pop()                        # docs stops
+        del self.scene.comments[201]
+        self.assertEqual([t.key for t in self.tick()], ["ask:600:901"])
+
+    def test_a_closed_report_issue_is_refused(self):
+        self.scene.issues[-1]["state"] = "closed"
+        self.say(call(901, "Ask: docs: x", who=OWNER))
+        self.tick()
+        self.assertIn("[ask] #600 ask by mattmcalister (comment 901): docs -> refused: #600 is closed",
+                      self.lines)
+        self.assertEqual(self.asked(), [])
+
+    def test_runs_stay_inside_gov_0010(self):
+        self.path = write_manifest(self.home, {r: 10 for r in ROLES if r != "docs"}, 10, extra=ASKS_ON)
+        self.say(call(901, "Ask: docs: x", who=OWNER))
+        self.tick()
+        (held,) = [x for x in watch.waiting(self.l)[1] if x["kind"] == "ask"]
+        self.assertIn("docs has no spend_cap_usd", held["reason"])
+
+    def test_reads_the_report_issues_comments(self):
+        self.say(call(901, "Ask: docs: x", who=OWNER))
+        w = watch.World(model=self.scene.read(REPO, 15, NOW).model, issues=[])
+        n, since = self.watcher().asks(w, swarm.manifest.load_watch(self.path),
+                                       {"600": ON_SINCE}, NOW)
+        self.assertEqual((n, since.isoformat(), self.fetched), (600, ON_SINCE, [600]))
+        self.assertEqual([c["id"] for c in w.comments[600]], [901])
+
+    def test_dry_run_prints_it_with_the_headless_command(self):
+        self.say(call(901, "Ask: docs: x?", who=OWNER))
+        self.assertEqual([t.key for t in self.tick(dry_run=True)], ["ask:600:901"])
+        i = self.lines.index("[ask] #600 ask by mattmcalister (comment 901): docs -> would start "
+                             "docs on #600, to answer the ask")
+        argv = headless_argv(self.lines[i + 1].strip())
+        self.assertIn("answer the owner's question on issue #600 (comment 901)", argv[argv.index("-p") + 1])
+        self.assertEqual(self.l.load(), [])
+
+    def test_ask_line(self):
+        self.assertEqual(watch.ask_line("hi\n  ASK: `Docs` :  why  this?: really \nbye"),
+                         (["docs"], "why this?: really"))
+        self.assertEqual(watch.ask_line("Ask: docs"), (["docs"], ""))
+        self.assertEqual(watch.ask_line("Ask: docs, planner: x"), (["docs", "planner"], "x"))
+        self.assertIsNone(watch.ask_line("Task: docs: x"))
+        self.assertIsNone(watch.ask_line("Asks: docs: x"))
+        self.assertIsNone(watch.ask_line("We could `Ask: docs: x` here"))
+        self.assertEqual(len(watch.ask_line("Ask: docs: " + "x" * 999)[1]), watch.WHY_MAX)
 
 
 class RetryTest(unittest.TestCase):

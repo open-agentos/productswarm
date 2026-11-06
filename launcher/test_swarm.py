@@ -665,6 +665,21 @@ class LaunchTest(Base):
         self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(swarm.opener("planner", 600,
                                                                    daily="the daily report")), ["600"])
 
+    def test_ask_opener_quotes_the_question_and_says_one_comment(self):
+        o = swarm.opener("builder", 600, ask="why is issue #12 still open?", ask_comment=901)
+        self.assertEqual(o, "You are the builder for productswarm. Read CLAUDE.md, PRODUCT.md and "
+                            "roles/builder.md, then answer the owner's question on issue #600 "
+                            "(comment 901): \"why is #12 still open?\". swarm watch started this run "
+                            "from its [ask] trigger (GOV-0029). Answer in plain words in one comment "
+                            "on #600, and stop.")
+        # "issue #12" in the question mustn't give the heartbeat two issues (#590).
+        hook = Path(__file__).resolve().parent.parent / "heartbeat" / "hook.py"
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hook", hook)
+        h = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(h)
+        self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(o), ["600"])
+
     def test_daily_opener_names_the_report_and_the_report_issue(self):
         o = swarm.opener("planner", 600, daily="the daily report")
         self.assertEqual(o, "You are the planner for productswarm. Read CLAUDE.md, PRODUCT.md and "
