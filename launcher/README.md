@@ -266,6 +266,16 @@ Builders on issues from the same ruling usually change the same files, so their 
 - `[respond]` is never held: a builder responding on its own PR is the same work (GOV-0011). `[review]`, `[record]` and `[answer]` are never held either.
 - `--dry-run` doesn't show these holds, as it doesn't show the ceiling's.
 
+### Builds that wait on other issues
+
+The planner's task issues name their blockers on a line of the body: `**Waits on:** #456` (or `**Waits on:** nothing.`). A `[build]` trigger is **held** while any issue on that line is still open (#490), so a builder isn't started only to find its blocker open and stop.
+
+- **The line** is the first line of the body that starts `**Waits on:**`. Only the `#N` refs in its first sentence count: `**Waits on:** #456. Then #480 can go.` waits on #456 alone. A line that starts `nothing`, one with no `#N`, or no line at all means the build waits on nothing, so `**Waits on:** nothing. Do this before #480 …` waits on nothing. Refs elsewhere in the body don't count.
+- **Open** means an open issue in that check's reading of GitHub. A closed issue, or a number that isn't an open issue, doesn't hold the build.
+- `swarm inbox` lists the hold as `held: waits on #456`, naming only the issues still open. It is logged once per reason, in `--dry-run` too.
+- The hold never goes into `acted` in `watch.json`, so the build starts on the first check after every listed issue is closed, with no need to take `ready` off and put it back.
+- A blocker the builder finds that isn't on the line still ends its run, as before. The builder's comment asks you to add it to the line, and you add `ready` again once you have.
+
 ### What it does on each trigger
 
 - **Once per trigger, across restarts too.** A trigger is identified by the PR and its head SHA (`[review]`, `[respond]`) or by the id of the owner's label event. What the loop has acted on is kept in `~/.productswarm/launcher/watch.json`, so restarting `swarm watch` starts nothing twice. A new push, or the owner adding the label again, is a new trigger.
