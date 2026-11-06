@@ -91,7 +91,7 @@ The loop acts only on labels the owner added (checked in the issue's events, per
 | `[review]` An open, non-draft PR whose head the reviewer hasn't reviewed | a reviewer pass |
 | `[build]` An issue whose latest `ready` the owner added, with no live session on it | `swarm launch builder --issue N` (or the issue's role) |
 | `[record]` A `gov:question` the owner labelled `gov:ruled` that needs a record and has no ruling PR | docs, on that question (GOV-0007) |
-| `[answer]` A `gov:question` the owner labelled `ready` | the role that asked it, on that question |
+| `[answer]` A `gov:question` the owner labelled `ready` | the role that asked it, on that question; the planner if the owner asked it (#455), which convenes any committee the answer calls for and leaves the rounds to the owner |
 | `[respond]` An open, non-draft PR whose latest reviewer review at its current head is "changes requested", with no `Overstep:` finding, for at most 2 rounds | the builder, on that PR (GOV-0011) |
 
 ### What we're building

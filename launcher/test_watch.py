@@ -283,9 +283,16 @@ class WatchTest(unittest.TestCase):
     def test_unknown_raised_by_is_skipped_with_a_reason(self):
         self.scene.issues[3]["body"] = question_body(raised="someone, on #3")
         (t,) = [t for t in self.w.tick(NOW) if t.kind == "answer"]
-        self.assertIn("-> skipped: \"Raised by\" doesn't start with a known role ('someone, on #3')",
-                      t.line())
+        self.assertIn("-> skipped: \"Raised by\" doesn't start with a known role or the owner "
+                      "('someone, on #3')", t.line())
         self.assertEqual(self.w.tick(NOW), [])            # printed once
+
+    def test_owner_raised_question_starts_the_planner(self):
+        # #455: #396 and #439 were skipped; the planner now reads the owner's answer.
+        self.scene.issues[3]["body"] = question_body(raised="owner (drafted by the coordinator)")
+        self.w.tick(NOW)
+        self.assertIn("[answer] #88 ready by the owner -> would start "
+                      "`launcher/swarm launch planner --issue 88`", trigger_lines(self.lines))
 
     def test_dry_run_starts_nothing_and_writes_nothing(self):
         state = self.l.state_file
@@ -324,14 +331,34 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(rb("planner"), ("planner", ""))
         self.assertEqual(rb("-- docs (claude-opus-5-5)"), ("docs", ""))
         self.assertEqual(rb("Builder, on #5"), ("builder", ""))
-        # #271: only the asker counts, not a role named later in the text.
-        self.assertEqual(rb("owner, after the first Actions reviewer test on #251"),
-                         (None, "\"Raised by\" doesn't start with a known role "
-                                "('owner, after the first Actions reviewer test on #251')"))
+        # #271: only the asker counts, not a role named later in the text. #455: an
+        # owner-raised question starts the planner, whatever roles its text names.
+        self.assertEqual(rb("owner, after the first Actions reviewer test on #251"), ("planner", ""))
         self.assertIsNone(rb("Claude (owner's coordinating session), drafted through the owner's account.")[0])
         self.assertIsNone(rb("someone, on #3")[0])
+        self.assertEqual(rb("someone, on #3"),
+                         (None, "\"Raised by\" doesn't start with a known role or the owner "
+                                "('someone, on #3')"))
         self.assertIsNone(rb("builders, on #5")[0])
         self.assertIn("no \"Raised by\"", watch.raised_by("### Domain\n\nspend\n", ROLES)[1])
+
+    def test_raised_by_the_owner_is_the_planner(self):
+        # #455: "owner", the owner's login (any case, with or without @) and the `-- role` form.
+        rb = lambda raised: watch.raised_by(question_body(raised=raised), ROLES, OWNER)
+        self.assertEqual(rb("owner (drafted by the coordinator)"), ("planner", ""))
+        self.assertEqual(rb("owner, directly rather than from a task issue (context: #397)."),
+                         ("planner", ""))
+        self.assertEqual(rb("Owner"), ("planner", ""))
+        self.assertEqual(rb("mattmcalister"), ("planner", ""))
+        self.assertEqual(rb("@MattMcAlister, on #444"), ("planner", ""))
+        self.assertEqual(rb("-- owner"), ("planner", ""))
+        self.assertEqual(rb("-- builder (claude-opus-5-5)"), ("builder", ""))
+        self.assertIsNone(rb("owner's coordinating session")[0])
+        self.assertIsNone(rb("owners, on #5")[0])
+        self.assertIsNone(rb("someone-else")[0])
+        self.assertIsNone(rb("mattmcalister2")[0])
+        # Without the planner in the repo's roles, nothing starts.
+        self.assertIsNone(watch.raised_by(question_body(raised="owner"), ROLES - {"planner"}, OWNER)[0])
 
     def test_needs_record(self):
         self.assertIsNone(watch.needs_record(question_body()))
@@ -557,13 +584,13 @@ class StartTest(unittest.TestCase):
         self.assertEqual(w.refusal(t, [hand, mine], NOW), (None, True))
 
     def test_unknown_raised_by_is_logged_once_and_listed_in_the_inbox(self):
-        # #271: #255's text names the reviewer, but the owner asked, so nothing starts.
-        raised = "owner, after the first Actions reviewer test on #251"
+        # #271: the text names the reviewer, but an unknown asker starts nothing.
+        raised = "someone, after the first Actions reviewer test on #251"
         self.scene.issues[3]["body"] = question_body(raised=raised)
         w = self.watcher()
         w.tick(NOW)
         self.assertNotIn(88, [e.issue for e in self.l.load()])
-        why = f"skipped: \"Raised by\" doesn't start with a known role ({raised!r})"
+        why = f"skipped: \"Raised by\" doesn't start with a known role or the owner ({raised!r})"
         self.assertEqual(sum(why in x for x in self.lines), 1)
         self.assertIn(f"- [answer] #88 ready by the owner · {why}", self.inbox())
         w.tick(NOW)
@@ -572,6 +599,14 @@ class StartTest(unittest.TestCase):
         self.scene.issues[3]["state"] = "closed"                    # the owner closes it
         w.tick(NOW)
         self.assertNotIn("#88", self.inbox())
+
+    def test_owner_raised_question_starts_the_planner_not_a_named_role(self):
+        # #455 (and #271): the owner asked, so the planner starts, not the reviewer it names.
+        self.scene.issues[3]["body"] = question_body(
+            raised="owner, after the first Actions reviewer test on #251")
+        self.watcher().tick(NOW)
+        self.assertIn((88, "planner"), [(e.issue, e.role) for e in self.l.load()])
+        self.assertNotIn((88, "reviewer"), [(e.issue, e.role) for e in self.l.load()])
 
     def test_role_first_raised_by_still_starts_that_role(self):
         self.scene.issues[3]["body"] = question_body(
