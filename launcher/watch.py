@@ -183,11 +183,15 @@ def template_field(body: str | None, label: str) -> str | None:
     return m.group(1) if m and m.group(1) != "_No response_" else None
 
 
-def needs_record(body: str | None) -> str | None:
-    """Why a question needs a record under GOV-0007, as far as its body can say, else None.
+RECORD_LINE = re.compile(r"^\s*record:\s*yes\s*$", re.I | re.M)
 
-    GOV-0007's other case, "the owner says so in the answer", is a comment that the loop
-    can't read reliably, so those questions don't trigger here."""
+
+def needs_record(body: str | None, comments: list[dict] = (), owner: str | None = None) -> str | None:
+    """Why a question needs a record under GOV-0007, else None.
+
+    The body's ratings cover the governance domain, one-way and external. GOV-0007's other
+    case, "the owner says so in the answer", is a comment by the owner with a line
+    `Record: yes` on its own (#501). Nobody else's comment counts, agents included."""
     domain = (template_field(body, "Domain") or "").strip().lower()
     rev = (template_field(body, "Reversibility") or "").strip().lower()
     blast = (template_field(body, "Blast radius") or "").strip().lower()
@@ -197,6 +201,9 @@ def needs_record(body: str | None) -> str | None:
         return "one-way"
     if blast == "external":
         return "blast radius external"
+    if owner and any((c.get("user") or {}).get("login") == owner and RECORD_LINE.search(c.get("body") or "")
+                     for c in comments):
+        return "the owner asked in the answer"
     return None
 
 
@@ -230,6 +237,7 @@ class World:
     issues: list[dict]                               # raw issues (generate.fetch)
     events: dict[int, list[dict]] = field(default_factory=dict)     # issue -> events, oldest first
     reviewed: dict[int, set[str]] = field(default_factory=dict)     # PR -> SHAs the reviewer reviewed
+    comments: dict[int, list[dict]] = field(default_factory=dict)   # gov:ruled question -> comments (#501)
 
 
 def owner_label(events: list[dict], name: str, owner: str) -> dict | None:
@@ -291,7 +299,7 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         body, events = (raw.get(n) or {}).get("body"), w.events.get(n, [])
         labels = {lb.get("name") for lb in (raw.get(n) or {}).get("labels") or []}
         ruled = owner_label(events, "gov:ruled", owner) if "gov:ruled" in labels else None
-        why_record = needs_record(body)
+        why_record = needs_record(body, w.comments.get(n, []), owner)
         record = None
         if ruled and why_record and n not in closing and not busy(n):
             record = Trigger(key=f"record:{n}:{ruled.get('id')}", kind="record", ref=f"#{n}",
@@ -412,6 +420,8 @@ def gather(repo: str, idle_minutes: int, now: dt.datetime) -> World:
         labels = {lb.get("name") for lb in it.get("labels") or []}
         if labels & {"ready", "gov:ruled"} and not g.is_tracking(it):
             w.events[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/events?per_page=100")
+        if {"gov:question", "gov:ruled"} <= labels:     # the owner's `Record: yes` (#501)
+            w.comments[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/comments?per_page=100")
     for n, reviews in (data.get("reviews") or {}).items():    # fetch() read them for build()
         w.reviewed[n] = reviewed_heads(reviews)
     return w
