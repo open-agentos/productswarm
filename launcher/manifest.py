@@ -18,8 +18,10 @@ then refuses to start anything. review_in_actions (#216, GOV-0019) is an optiona
 false, default false: when true, `swarm watch` leaves every [review] trigger to the GitHub
 Actions reviewer and starts nothing for it. actions_max_reviews (#257) is the most PRs one
 `actions_review.py plan` lists: a whole number of at least 1, optional; with it left out,
-plan lists nothing. load_watch() returns them, or None if the
-manifest has no [watch] table.
+plan lists nothing. stale_minutes (#488) is how long a session may sit idle on an issue
+before `swarm watch` calls the trigger it holds stale and names the `swarm stop` that
+frees it: a whole number of at least 1, optional, default 60. load_watch() returns them,
+or None if the manifest has no [watch] table.
 """
 from __future__ import annotations
 
@@ -34,7 +36,7 @@ DEFAULT_PATH = ROOT / "swarm.toml"
 REQUIRED = ("role", "count", "model")
 OPTIONAL = ("spend_cap_usd",)
 WATCH_KEYS = ("interval_minutes", "max_live")     # required in [watch]
-WATCH_OPTIONAL = ("max_turns", "review_in_actions", "actions_max_reviews")   # watch refuses to start without max_turns
+WATCH_OPTIONAL = ("max_turns", "review_in_actions", "actions_max_reviews", "stale_minutes")   # watch refuses to start without max_turns
 
 
 class ManifestError(ValueError):
@@ -68,6 +70,7 @@ class WatchLimits:
     max_turns: int | None = None    # --max-turns for each headless run (GOV-0012); None: watch refuses
     review_in_actions: bool = False  # leave [review] to the Actions reviewer (GOV-0019)
     actions_max_reviews: int | None = None  # most PRs one Actions plan lists (#257); None: none
+    stale_minutes: int = 60     # idle this long on an issue, a holder is called stale (#488)
 
 
 def _is_number(v) -> bool:
@@ -138,6 +141,10 @@ def _check_watch(table) -> list[str]:
         v = table["actions_max_reviews"]
         if not isinstance(v, int) or isinstance(v, bool) or v < 1:
             problems.append(f"watch: actions_max_reviews must be a whole number of at least 1, got {v!r}")
+    if "stale_minutes" in table:
+        v = table["stale_minutes"]
+        if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+            problems.append(f"watch: stale_minutes must be a whole number of at least 1, got {v!r}")
     if "review_in_actions" in table:
         v = table["review_in_actions"]
         if not isinstance(v, bool):
@@ -204,7 +211,7 @@ def parse_valid(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "
     w = data.get("watch")
     limits = None if w is None else WatchLimits(float(w["interval_minutes"]), w["max_live"],
                                                 w.get("max_turns"), w.get("review_in_actions", False),
-                                                w.get("actions_max_reviews"))
+                                                w.get("actions_max_reviews"), w.get("stale_minutes", 60))
     return sessions, limits, problems
 
 

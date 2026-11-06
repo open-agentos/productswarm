@@ -35,8 +35,13 @@ later of the owner's two label events; `ready` must still be the owner's (GOV-00
 [record] is also due on that question, docs goes first: [answer] is held until [record]
 has been acted on, and then waits through busy() until docs has stopped.
 
-An issue or question with a live session on it prints nothing (`swarm launch`'s refusal
-rule), so it can fire later, once that session has stopped. Each trigger has an identity,
+An issue or question with a live session on it starts nothing (`swarm launch`'s refusal
+rule), so it can fire later, once that session has stopped. The trigger is held, not
+dropped (#488): --dry-run prints it, and a real check lists it in `swarm inbox`, with the
+session holding it and how long it has been idle (held_by()). Past [watch] stale_minutes
+(default 60) of idleness the reason says `stale` and names the `swarm stop` that frees the
+issue; the loop still never stops the session itself. Each is printed or logged once per
+holder state. Each trigger has an identity,
 which is the PR head SHA (for [review] and [respond]) or the id of the owner's label event. A trigger prints once per
 identity, so a new push or a fresh owner label is a new trigger. In dry-run the memory
 lives only in the process, and nothing is written to disk.
@@ -134,7 +139,7 @@ import tempfile
 import time
 import uuid
 import zoneinfo
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -149,6 +154,7 @@ REF_RE = re.compile(r"#(\d+)")
 GOV_RE = re.compile(r"\bGOV-\d{4}\b")
 LEFT_TO_ACTIONS = ("left to Actions: review_in_actions = true in swarm.toml, so the GitHub "
                    "Actions reviewer reviews this head (GOV-0019)")
+DEFAULT_STALE = 60            # [watch] stale_minutes when swarm.toml doesn't set it (#488)
 RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and watch.json keeps it
 
 # How a headless run ended, from the `subtype` of its --output-format json result: the
@@ -174,8 +180,12 @@ class Trigger:
     issue: int | None = None  # the issue the session works on (none for a reviewer pass)
     pr: int | None = None     # [respond]: the PR the builder responds on
     after: str | None = None  # [answer]: the [record] key that must be acted on first (#495)
+    held: str | None = None   # why a live session on the issue holds it (#488)
+    once: str | None = None   # what changes the held reason enough to log it again (#488)
 
     def line(self) -> str:
+        if self.held:
+            return f"[{self.kind}] {self.ref} {self.why} -> {self.held}"
         if self.skipped:
             return f"[{self.kind}] {self.ref} {self.why} -> skipped: {self.skipped}"
         first = " once docs has stopped ([record] first)" if self.after else ""
@@ -265,18 +275,64 @@ def later(events: list[dict], a: dict | None, b: dict) -> bool:
     return pos.get(id(a), -1) > pos.get(id(b), -1)
 
 
+def held_by(n: int, m: dict, started: list, now: dt.datetime | None,
+            stale_minutes: int = DEFAULT_STALE) -> tuple[str, str] | None:
+    """Why a live session on issue n holds its trigger (#488), as (reason, once), or None.
+
+    The same sessions as swarm.holders(): heartbeat sessions on n that aren't stopped, and
+    launcher entries on n with no heartbeat yet. A holder idle on the heartbeat for longer
+    than stale_minutes makes the reason `stale:` and names the `swarm stop` that frees n;
+    the watcher still never stops it (GOV-0008, #132). `once` changes only when a holder's
+    status does, so the reason is logged once per state, not once per tick."""
+    g = swarm.dashboard()
+    names = {e.session_id: e.name for e in started}
+    seen = {s["session_id"] for s in m["sessions"]}
+    held, stale, once = [], [], []
+    for s in m["sessions"]:
+        if s["status"] == "stopped" or s["issue"] != n:
+            continue
+        name = names.get(s["session_id"])
+        who = name or f"{s['role']} session {s['session_id']}"
+        last, status = s.get("last_ts"), s["status"]
+        if status == "idle" and last and now and now - last > dt.timedelta(minutes=stale_minutes):
+            fix = (f"swarm stop {name} frees #{n}" if name else
+                   f"it wasn't started by swarm, so stop it where it runs to free #{n}")
+            stale.append(f"{who} idle {g.ago(last, now).removesuffix(' ago')}; {fix}")
+            once.append(f"{who}:stale")
+            continue
+        state = (f"idle since {last:%H:%M} UTC" if status == "idle" and last else
+                 f"blocked on #{s['gov_question']}" if status == "blocked" else status)
+        held.append(f"{who} is live on #{n} ({state})")
+        once.append(f"{who}:{status}")
+    for e in started:
+        if e.issue == n and e.session_id not in seen:
+            held.append(f"{e.name} is live on #{n} (starting, no heartbeat yet)")
+            once.append(f"{e.name}:starting")
+    if not held and not stale:
+        return None
+    reason = f"stale: {'; '.join(stale)}" if stale else f"held: {' and '.join(held)}"
+    return reason, "|".join(sorted(once))
+
+
 def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Callable,
-             is_tracking: Callable, review_in_actions: bool = False) -> list[Trigger]:
+             is_tracking: Callable, review_in_actions: bool = False,
+             now: dt.datetime | None = None, stale_minutes: int = DEFAULT_STALE) -> list[Trigger]:
     """Every trigger present now, in needs-you order then issue order. Nothing is filtered
     for novelty here; Watch does that. With review_in_actions, each [review] trigger is
-    skipped as left to Actions (GOV-0019)."""
+    skipped as left to Actions (GOV-0019). A [record], [answer], [build] or [respond]
+    trigger on an issue a live session holds comes back with `held` set, saying who holds
+    it and whether that session is stale (#488); Watch starts nothing for it."""
     m, out = w.model, []
     items = needs_you(m)
     heads = {p["number"]: p.get("head") for p in m["prs"]}
     closing = {c["number"] for p in m["prs"] for c in p["closes"]}
 
-    def busy(n: int) -> bool:
-        return bool(swarm.holders(n, m, started))
+    def busy(n: int) -> tuple[str, str] | None:
+        return held_by(n, m, started, now, stale_minutes)
+
+    def hold(t: Trigger, n: int) -> Trigger:
+        h = busy(n)
+        return replace(t, held=h[0], once=h[1]) if h else t
 
     reviewing = reviewers(m, started)
     prs = {p["number"]: p for p in m["prs"]}
@@ -312,21 +368,21 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         ruled = owner_label(events, "gov:ruled", owner) if "gov:ruled" in labels else None
         why_record = needs_record(body, w.comments.get(n, []), owner)
         record = None
-        if ruled and why_record and n not in closing and not busy(n):
-            record = Trigger(key=f"record:{n}:{ruled.get('id')}", kind="record", ref=f"#{n}",
-                             why=f"gov:ruled by the owner, needs a record ({why_record})",
-                             role="docs", command=launch_cmd("docs", n), issue=n)
+        if ruled and why_record and n not in closing:
+            record = hold(Trigger(key=f"record:{n}:{ruled.get('id')}", kind="record", ref=f"#{n}",
+                                  why=f"gov:ruled by the owner, needs a record ({why_record})",
+                                  role="docs", command=launch_cmd("docs", n), issue=n), n)
             out.append(record)
         ready = owner_label(events, "ready", owner) if "ready" in labels else None
-        if ready and not busy(n):
+        if ready:
             # #495: a ruling on a question that is already ready fires [answer] again.
             label, e = ("gov:ruled", ruled) if later(events, ruled, ready) else ("ready", ready)
             role, why_not = raised_by(body, roles, owner)
-            out.append(Trigger(key=f"answer:{n}:{e.get('id')}", kind="answer", ref=f"#{n}",
-                               why=f"{label} by the owner", role=role,
-                               command=launch_cmd(role, n) if role else None,
-                               skipped=None if role else why_not, issue=n,
-                               after=record.key if record and role else None))
+            out.append(hold(Trigger(key=f"answer:{n}:{e.get('id')}", kind="answer", ref=f"#{n}",
+                                    why=f"{label} by the owner", role=role,
+                                    command=launch_cmd(role, n) if role else None,
+                                    skipped=None if role else why_not, issue=n,
+                                    after=record.key if record and role else None), n))
 
     # Builds: ready, open, non-question, non-tracking issues with no open PR closing them
     # (that work is done and waits on the owner's merge).
@@ -337,14 +393,14 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
                 or "gov:question" in labels or is_tracking(it) or n in closing):
             continue
         ready = owner_label(w.events.get(n, []), "ready", owner)
-        if ready and not busy(n):
-            out.append(Trigger(key=f"build:{n}:{ready.get('id')}", kind="build", ref=f"#{n}",
-                               why="ready by the owner", role="builder",
-                               command=launch_cmd("builder", n), issue=n))
+        if ready:
+            out.append(hold(Trigger(key=f"build:{n}:{ready.get('id')}", kind="build", ref=f"#{n}",
+                                    why="ready by the owner", role="builder",
+                                    command=launch_cmd("builder", n), issue=n), n))
     return out
 
 
-def respond(p: dict, busy: Callable[[int], bool]) -> Trigger | None:
+def respond(p: dict, busy: Callable[[int], tuple[str, str] | None]) -> Trigger | None:
     """GOV-0011's [respond] trigger for one open, non-draft PR, or None.
 
     Oversteps, a third request and requested changes on a PR the builder didn't open (#178)
@@ -360,10 +416,10 @@ def respond(p: dict, busy: Callable[[int], bool]) -> Trigger | None:
         return Trigger(key=key, kind="respond", ref=f"PR #{n}", why=why, role="builder", pr=n,
                        skipped=f"it closes {len(closes)} issues, and the builder responds only on "
                                f"a PR that closes exactly one")
-    if busy(closes[0]):
-        return None
+    h = busy(closes[0])
     return Trigger(key=key, kind="respond", ref=f"PR #{n}", why=why, role="builder",
-                   command=launch_cmd("builder", closes[0], n), issue=closes[0], pr=n)
+                   command=launch_cmd("builder", closes[0], n), issue=closes[0], pr=n,
+                   held=h[0] if h else None, once=h[1] if h else None)
 
 
 def gov_ids(title: str | None) -> set[str]:
@@ -739,26 +795,39 @@ class Watch:
             self.launcher.out(f"{self.manifest_path.name}: {p}")
 
     def dry_tick(self, now: dt.datetime) -> list[Trigger]:
-        """Print and return the triggers not seen before. Starts nothing, writes nothing."""
+        """Print and return the triggers not seen before. Starts nothing, writes nothing.
+        A held trigger (#488) is printed once per holder state and not returned; it prints
+        as a trigger once its holder has stopped."""
         g = swarm.dashboard()
         w = self.read(self.repo, self.idle_minutes, now)
-        new = [t for t in triggers(w, self.owner, self.launcher.running(), self.roles,
-                                   g.needs_you, g.is_tracking, self.review_in_actions())
-               if t.key not in self.seen]
-        for t in new:
-            self.seen.add(t.key)
+        limits = self.limits()
+        new = []
+        for t in triggers(w, self.owner, self.launcher.running(), self.roles, g.needs_you,
+                          g.is_tracking, bool(limits and limits.review_in_actions), now,
+                          limits.stale_minutes if limits else DEFAULT_STALE):
+            key = f"{t.key}|held|{t.once}" if t.held else t.key
+            if key in self.seen:
+                continue
+            self.seen.add(key)
             self.launcher.out(t.line())
+            if t.held:
+                continue
+            new.append(t)
             if not t.skipped:
                 self.launcher.out(f"  {self.headless(t)}")
         return new
 
-    def review_in_actions(self) -> bool:
-        """For --dry-run: swarm.toml's [watch] review_in_actions, or False if swarm.toml has
-        no [watch] table or can't be read (headless() reports that). Never raises."""
+    def limits(self) -> "manifest.WatchLimits | None":
+        """For --dry-run: swarm.toml's [watch] limits, or None if swarm.toml has no [watch]
+        table or can't be read (headless() reports that). Never raises."""
         try:
-            limits = manifest.load_watch(self.manifest_path)
+            return manifest.load_watch(self.manifest_path)
         except manifest.ManifestError:
-            return False
+            return None
+
+    def review_in_actions(self) -> bool:
+        """For --dry-run: swarm.toml's [watch] review_in_actions, or False (see limits())."""
+        limits = self.limits()
         return bool(limits and limits.review_in_actions)
 
     def headless(self, t: Trigger) -> str:
@@ -806,7 +875,7 @@ class Watch:
         if limited and not any(x.get("reason") == limited for x in st["waiting"]):
             out(f"swarm watch: a run hit the account's usage limit; {limited}, for every start (#489)")
         todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
-                                    limits.review_in_actions)
+                                    limits.review_in_actions, now, limits.stale_minutes)
                 if t.key not in acted]
         todo.sort(key=lambda t: before.get(t.key, {}).get("since", iso(now)))  # held longest first
         held, done, reviewer = [], [], None
@@ -817,11 +886,14 @@ class Watch:
             save_state(self.launcher, {"checked": iso(now), "acted": acted, "waiting": st["waiting"],
                                        "runs": runs})
 
-        def hold(t: Trigger, reason: str) -> None:
-            since = before.get(t.key, {}).get("since", iso(now))
-            held.append({"key": t.key, "kind": t.kind, "ref": t.ref, "why": t.why,
-                         "reason": reason, "since": since})
-            if reason != limited and before.get(t.key, {}).get("reason") != reason:   # each reason once
+        def hold(t: Trigger, reason: str, once: str | None = None) -> None:
+            was = before.get(t.key, {})
+            entry = {"key": t.key, "kind": t.kind, "ref": t.ref, "why": t.why,
+                     "reason": reason, "since": was.get("since", iso(now))}
+            if once:
+                entry["once"] = once
+            held.append(entry)
+            if reason != limited and (was.get("once") or was.get("reason")) != (once or reason):   # each reason once
                 out(f"[{t.kind}] {t.ref} {t.why} -> {reason}")
 
         for t in todo:
@@ -830,6 +902,11 @@ class Watch:
                 if t.key not in self.seen:
                     self.seen.add(t.key)
                     out(t.line())
+                continue
+            if t.held:
+                # #488: a live session is on the issue. Listed in `swarm inbox` with who holds
+                # it; it starts once that session stops. The loop never stops it (GOV-0008).
+                hold(t, t.held, t.once)
                 continue
             if t.kind == "answer" and t.skipped:
                 # Listed in `swarm inbox` until the owner closes the question or drops `ready` (#271).
@@ -840,8 +917,9 @@ class Watch:
                 finish(t, f"skipped: {t.skipped}")
                 continue
             if t.after and t.after not in acted:
-                # #495: docs records the ruling first; once [record] is acted on, busy() and
-                # the holders check below keep [answer] waiting until docs has stopped.
+                # #495: docs records the ruling first; once [record] is acted on, the held
+                # check above and the holders check below keep [answer] waiting until docs
+                # has stopped.
                 hold(t, f"held: docs records the ruling on {t.ref} first, then {t.role} starts")
                 continue
             if t.kind == "review" and reviewer:

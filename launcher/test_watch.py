@@ -182,10 +182,11 @@ class WatchTest(unittest.TestCase):
             "`launcher/swarm launch docs --issue 87`",
             "[answer] #88 ready by the owner -> would start `launcher/swarm launch planner --issue 88`",
             "[build] #49 ready by the owner -> would start `launcher/swarm launch builder --issue 49`",
+            "[build] #60 ready by the owner -> held: builder session busy-sid is live on #60 (active)",
         ])
         self.assertEqual(self.w.tick(NOW), [])
         self.assertEqual(self.w.tick(NOW), [])
-        self.assertEqual(len(self.lines), 8)       # each with its headless command (#147)
+        self.assertEqual(len(self.lines), 9)       # each start with its headless command (#147)
 
     def test_dry_run_prints_the_full_headless_command_under_each_trigger(self):
         # #147: what a real start would run, with every flag, from swarm.toml.
@@ -193,7 +194,7 @@ class WatchTest(unittest.TestCase):
                               max_turns=200)
         w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=path)
         w.tick(NOW)
-        self.assertEqual(len(self.lines), 8)
+        self.assertEqual(len(self.lines), 9)       # 4 starts with a command each, 1 held (#488)
         build = self.lines[self.lines.index(
             "[build] #49 ready by the owner -> would start `launcher/swarm launch builder --issue 49`") + 1]
         argv = headless_argv(build.strip())
@@ -464,7 +465,8 @@ class HelpersTest(unittest.TestCase):
 
 
 def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = True,
-                   max_turns: int | None = 50, review_in_actions: bool | None = None) -> Path:
+                   max_turns: int | None = 50, review_in_actions: bool | None = None,
+                   stale_minutes: int | None = None) -> Path:
     """A swarm.toml with every role, the given caps, and a [watch] table."""
     text = ""
     if watch_table:
@@ -472,6 +474,8 @@ def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = 
         text += "max_turns = %d\n" % max_turns if max_turns is not None else ""
         if review_in_actions is not None:
             text += f"review_in_actions = {str(review_in_actions).lower()}\n"
+        if stale_minutes is not None:
+            text += f"stale_minutes = {stale_minutes}\n"
         text += "\n"
     for role in sorted(ROLES):
         text += f'[[session]]\nrole = "{role}"\ncount = 1\nmodel = "m-{role}"\n'
@@ -629,7 +633,9 @@ class StartTest(unittest.TestCase):
         self.assertIn("[build] #49", self.inbox())
         self.exit("reviewer-watch")
         self.assertEqual([t.ref for t in w.tick(NOW)], ["#49"])
-        self.assertEqual(self.inbox(), "Nothing is waiting on you.")
+        self.assertEqual(self.inbox(), "swarm watch is holding (last check just now):\n"   # only #488's
+                         "- [build] #60 ready by the owner · held: builder session busy-sid is live on "
+                         "#60 (active)")
         self.assertEqual(len(self.fake.commands), 5)                  # 4 by watch, 1 by hand
 
     def test_a_role_with_no_cap_is_skipped_and_listed_until_it_has_one(self):
@@ -977,7 +983,7 @@ class ManifestWatchTest(unittest.TestCase):
             manifest.parse_all(text)
         self.assertEqual(c.exception.problems, [
             "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live, max_turns, "
-            "review_in_actions, actions_max_reviews)",
+            "review_in_actions, actions_max_reviews, stale_minutes)",
             "watch: interval_minutes must be a positive number, got 0",
             "watch: max_live must be a whole number of at least 1, got 1.5"])
         with self.assertRaises(manifest.ManifestError) as c:
@@ -1066,7 +1072,8 @@ class ReviewInActionsTest(unittest.TestCase):
         w.tick(NOW)
         self.assertEqual(self.lines.count(self.LEFT), 1)                   # logged once per head
         self.assertNotIn("review:70:" + SHA1, watch.load_state(self.l)["acted"])
-        self.assertEqual(watch.waiting(self.l)[1], [])                     # not listed as held
+        self.assertEqual([x["key"] for x in watch.waiting(self.l)[1]],      # [review] not listed as held,
+                         ["build:60:12"])                                  # only #60's live session (#488)
 
     def test_off_or_missing_starts_the_review(self):
         for value in (False, None):
@@ -1569,6 +1576,7 @@ class RunRecordTest(unittest.TestCase):
         self.assertIn("- [record] #87 docs-issue-87 · done · $1.23 (est.)", recent)
 
     def test_only_costs_still_says_nothing_is_waiting(self):
+        self.scene.tracking, self.scene.comments = [], {}       # nothing held on #60 (#488)
         self.watcher().tick(NOW)
         self.end("docs-issue-87", BANNER + CANNED["success"])
         self.watcher().tick(NOW)
@@ -1628,7 +1636,9 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual(st["runs"]["build:49:11"]["ending"], "limited")
         self.assertEqual(st["runs"]["build:49:11"]["until"], "2026-11-03T13:00:00+00:00")
         reason = f"held: usage limit (until {hhmm(NOW.replace(hour=13))})"
-        self.assertEqual({x["ref"]: x["reason"] for x in st["waiting"]}, {"#49": reason, "#50": reason})
+        self.assertEqual({x["ref"]: x["reason"] for x in st["waiting"]},
+                         {"#49": reason, "#50": reason,   # #60's live builder holds it (#488)
+                          "#60": "held: builder session busy-sid is live on #60 (active)"})
         self.assertIn("[build] #49 builder-issue-49 · limited (You've hit your 5-hour limit · resets 1pm "
                       "(Europe/London)) · $0.00 (est.) -> recorded; trying again after the hold", self.lines)
         self.watcher().tick(later + dt.timedelta(minutes=5))       # said once, across checks
@@ -1679,3 +1689,116 @@ class RunRecordTest(unittest.TestCase):
         (self.home / "launcher" / "watch.json").write_text(json.dumps({"checked": None, "acted": {}, "waiting": []}))
         self.assertEqual(watch.load_state(self.l)["runs"], {})
         self.assertEqual(watch.runs(self.l), [])
+
+
+class HeldTest(unittest.TestCase):
+    """#488: a trigger a live session holds is listed with who holds it, and called stale
+    with the `swarm stop` that frees it once that session has been idle past stale_minutes."""
+
+    setUp_start = StartTest.setUp
+    manifest, watcher, exit, inbox = StartTest.manifest, StartTest.watcher, StartTest.exit, StartTest.inbox
+    RECORD = "[record] #87 gov:ruled by the owner, needs a record (domain governance) -> "
+
+    def setUp(self):
+        self.setUp_start()
+        sc = self.scene
+        sc.issues, sc.events = [sc.issues[2]], {87: sc.events[87]}       # just the ruled question
+        sc.prs, sc.reviewed, sc.tracking, sc.comments = [], {}, [], {}
+
+    def docs_on_87(self, minutes_ago, by_launcher=True):
+        """docs on #87, quiet for minutes_ago: swarm-launched as docs-issue-87, or by hand."""
+        if by_launcher:
+            self.l.start(swarm.Started("docs-issue-87", "docs", "m", "docs-sid", self.fake.t, issue=87), [])
+            self.lines.clear()                                  # the launcher's own `started:` line
+        it, comments = tracking(201, "docs-sid", "docs", 87, minutes_ago)
+        self.scene.tracking, self.scene.comments = [it], {201: comments}
+
+    def dry(self, **kw):
+        path = write_manifest(self.home, ALL_CAPPED, **kw)
+        return watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=path)
+
+    def test_dry_run_prints_the_held_record_with_its_holder_and_idle_time(self):
+        self.docs_on_87(30)
+        w = self.dry()
+        self.assertEqual(w.tick(NOW), [])
+        self.assertEqual(self.lines, [self.RECORD + "held: docs-issue-87 is live on #87 (idle since 11:30 UTC)"])
+        self.assertEqual(w.tick(NOW), [])                       # once per holder state
+        self.assertEqual(len(self.lines), 1)
+
+    def test_past_stale_minutes_it_says_stale_and_gives_the_stop_command(self):
+        self.docs_on_87(600)
+        self.dry().tick(NOW)
+        self.assertEqual(self.lines, [self.RECORD + "stale: docs-issue-87 idle 10h; "
+                                                    "swarm stop docs-issue-87 frees #87"])
+        self.lines.clear()
+        self.dry(stale_minutes=720).tick(NOW)                   # [watch] stale_minutes = 720
+        self.assertEqual(self.lines, [self.RECORD + "held: docs-issue-87 is live on #87 (idle since 02:00 UTC)"])
+
+    def test_a_holder_not_started_by_swarm_names_no_swarm_stop(self):
+        self.docs_on_87(90, by_launcher=False)
+        self.dry().tick(NOW)
+        self.assertEqual(self.lines, [self.RECORD + "stale: docs session docs-sid idle 1h; it wasn't "
+                                                    "started by swarm, so stop it where it runs to free #87"])
+
+    def test_an_active_holder_and_one_with_no_heartbeat_yet(self):
+        self.docs_on_87(1)
+        self.dry().tick(NOW)
+        self.assertEqual(self.lines, [self.RECORD + "held: docs-issue-87 is live on #87 (active)"])
+        self.lines.clear()
+        self.scene.tracking, self.scene.comments = [], {}
+        self.dry().tick(NOW)
+        self.assertEqual(self.lines, [self.RECORD + "held: docs-issue-87 is live on #87 "
+                                                    "(starting, no heartbeat yet)"])
+
+    def test_held_then_stale_is_listed_logged_once_each_and_fires_when_the_holder_stops(self):
+        self.manifest(ALL_CAPPED)
+        self.docs_on_87(30)
+        w = self.watcher()
+        self.assertEqual(w.tick(NOW), [])
+        held = "held: docs-issue-87 is live on #87 (idle since 11:30 UTC)"
+        self.assertEqual(self.lines, [self.RECORD + held])
+        self.assertIn(f"- [record] #87 gov:ruled by the owner, needs a record (domain governance) · {held}",
+                      self.inbox())
+        self.assertEqual(w.tick(NOW), [])
+        self.assertEqual(len(self.lines), 1)                    # logged once per reason
+        later = NOW + dt.timedelta(hours=10)
+        self.assertEqual(w.tick(later), [])
+        stale = "stale: docs-issue-87 idle 10h; swarm stop docs-issue-87 frees #87"
+        self.assertEqual(self.lines[-1], self.RECORD + stale)
+        self.assertIn(stale, self.inbox())
+        self.assertEqual(w.tick(later + dt.timedelta(hours=1)), [])   # 11h: still the same state
+        self.assertEqual(len(self.lines), 2)
+        self.assertEqual(len(self.fake.commands), 1)            # only the docs started by hand
+        self.exit("docs-issue-87")                              # the owner ran swarm stop
+        self.scene.tracking[0]["state"] = "closed"
+        self.assertEqual([t.kind for t in w.tick(later)], ["record"])
+        self.assertEqual(self.l.load()[-1].name, "docs-issue-87")
+        self.assertEqual(self.inbox(), "Nothing is waiting on you.")
+
+    def test_respond_and_answer_are_held_too(self):
+        sc = self.scene
+        sc.issues = [issue(73, ["ready"]),
+                     issue(88, ["gov:question", "ready"], question_body(raised="planner, on #87"))]
+        sc.events = {73: [ev("ready", eid=15)], 88: [ev("ready", eid=14)]}
+        sc.prs, sc.reviews = [pr(72, SHA1, closes=[73])], {72: [review("CHANGES_REQUESTED", SHA1)]}
+        sc.reviewed = {72: {SHA1}}
+        a, ac = tracking(201, "b-sid", "builder", 73, 30)
+        b, bc = tracking(202, "p-sid", "planner", 88, 30)
+        sc.tracking, sc.comments = [a, b], {201: ac, 202: bc}
+        self.dry().tick(NOW)
+        self.assertEqual(self.lines, [
+            "[respond] PR #72 changes requested at aaaaaaa (round 1 of 2) -> held: builder session "
+            "b-sid is live on #73 (idle since 11:30 UTC)",
+            "[answer] #88 ready by the owner -> held: planner session p-sid is live on #88 "
+            "(idle since 11:30 UTC)"])
+
+    def test_stale_minutes_is_a_positive_whole_number_and_defaults_to_60(self):
+        import manifest
+        base = '[watch]\ninterval_minutes = 5\nmax_live = 2\n%s\n[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n'
+        self.assertEqual(manifest.parse_all(base % "")[1].stale_minutes, 60)
+        self.assertEqual(manifest.parse_all(base % "stale_minutes = 90")[1].stale_minutes, 90)
+        for v in ("0", "-3", "1.5", '"60"', "true"):
+            with self.assertRaises(manifest.ManifestError, msg=v) as c:
+                manifest.parse_all(base % f"stale_minutes = {v}")
+            self.assertEqual(c.exception.problems,
+                             [f"watch: stale_minutes must be a whole number of at least 1, got {manifest.tomllib.loads('v = ' + v)['v']!r}"])
