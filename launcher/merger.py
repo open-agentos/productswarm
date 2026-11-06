@@ -13,8 +13,8 @@ instructions. `plan` (#589) writes nothing to GitHub. `run` (#592) runs plan, th
   PR the reviewer or the owner approved at head, post `Left for the owner at <sha>: <reason>.`
   once per head (not while `tests` is still running). Other misses post nothing.
 - live: merge with the head SHA pinned, then post `Merged under <kind> (GOV-0027) at <sha>.`
-  Until GOV-0027's shadow bar is met (SHADOW_COMMENTS "would merge" comments by the merger
-  App, or a day since the first), live acts as shadow and says so in the log.
+  Until GOV-0027's shadow bar is met ("would merge" by the merger App on SHADOW_PRS
+  distinct PRs, or a day since the first), live acts as shadow and says so in the log.
 - off: nothing.
 
 Every comment ends `-- merger`. `--dry-run` prints each comment or merge instead of making
@@ -411,7 +411,7 @@ def plan(repo: str, pr: int | None = None, manifest_path: Path | str | None = No
 MERGER = "productswarm-merger[bot]"   # the App whose comments count (GOV-0022, GOV-0028)
 SIGN = "\n\n-- merger"
 WOULD, MERGED, LEFT = "Would merge", "Merged under", "Left for the owner"
-SHADOW_COMMENTS = 10                  # GOV-0027: 10 "would merge" comments ...
+SHADOW_PRS = 10                       # GOV-0027: "would merge" on 10 PRs ...
 SHADOW_SECONDS = 24 * 3600            # ... or a day since the first, whichever comes first
 
 
@@ -438,16 +438,19 @@ def posted(comments: list[dict], prefix: str, head: str) -> bool:
 
 
 def shadow_bar(comments: list[dict], now: float) -> str | None:
-    """None once GOV-0027's shadow is over (SHADOW_COMMENTS "would merge" comments by the
-    merger App, or SHADOW_SECONDS since the first), else why live is still held back."""
-    times = sorted(t for c in comments if isinstance(c, dict) and login(c) == MERGER
-                   and (c.get("body") or "").startswith(WOULD)
-                   and (t := actions_review.iso_time(c.get("created_at"))) is not None)
-    if len(times) >= SHADOW_COMMENTS or (times and now - times[0] >= SHADOW_SECONDS):
+    """None once GOV-0027's shadow is over ("would merge" by the merger App on SHADOW_PRS
+    distinct PRs, or SHADOW_SECONDS since the first), else why live is still held back.
+    A PR counts once however many heads it was posted for; a comment without an
+    issue_url names no PR, so it doesn't count towards the PRs (it still dates the first)."""
+    mine = [c for c in comments if isinstance(c, dict) and login(c) == MERGER
+            and (c.get("body") or "").startswith(WOULD)]
+    prs = {u for c in mine if isinstance(u := c.get("issue_url"), str) and u}
+    times = sorted(t for c in mine if (t := actions_review.iso_time(c.get("created_at"))) is not None)
+    if len(prs) >= SHADOW_PRS or (times and now - times[0] >= SHADOW_SECONDS):
         return None
     since = f", the first at {actions_review.utc(times[0])}" if times else ""
-    return (f"the shadow bar isn't met ({len(times)} of {SHADOW_COMMENTS} \"would merge\" "
-            f"comments{since}; or a day since the first)")
+    return (f"the shadow bar isn't met ({len(prs)} of {SHADOW_PRS} PRs with a \"would merge\" "
+            f"comment{since}; or a day since the first)")
 
 
 def worth_telling(d: Decision, reviews: list[dict], owner: str) -> bool:

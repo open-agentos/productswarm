@@ -414,9 +414,9 @@ def iso(t):
     return merger.actions_review.utc(t)
 
 
-def would(t, head="c" * 40, who=merger.MERGER):
+def would(t, head="c" * 40, who=merger.MERGER, pr=1):
     return {"user": {"login": who}, "body": f"Would merge (standing grant) at {head}.\n\n-- merger",
-            "created_at": iso(t)}
+            "created_at": iso(t), "issue_url": f"https://api.github.com/repos/{REPO}/issues/{pr}"}
 
 
 class FakeWriter:
@@ -513,7 +513,7 @@ class Run(unittest.TestCase):
         self.assertEqual(fw.posts, [])
 
     def test_live_held_back_by_shadow_bar(self):
-        w, fw = World(), FakeWriter([would(T0 - 3600 * i) for i in range(9)])
+        w, fw = World(), FakeWriter([would(T0 - 3600 * i, pr=i) for i in range(9)])
         code, out = self.run_run(w, fw, mode="live")
         self.assertEqual(code, 0)
         self.assertEqual(fw.merges, [])
@@ -521,7 +521,7 @@ class Run(unittest.TestCase):
         self.assertTrue(any("live acts as shadow" in line and "9 of 10" in line for line in out), out)
 
     def test_live_merges_after_ten(self):
-        w, fw = World(), FakeWriter([would(T0 - 60 * i) for i in range(10)])
+        w, fw = World(), FakeWriter([would(T0 - 60 * i, pr=i) for i in range(10)])
         code, out = self.run_run(w, fw, mode="live")
         self.assertEqual(code, 0)
         self.assertEqual(fw.merges, [(70, HEAD)])
@@ -536,7 +536,22 @@ class Run(unittest.TestCase):
         self.assertEqual(fw.merges, [])
 
     def test_shadow_bar_counts_only_the_merger(self):
-        w, fw = World(), FakeWriter([would(T0 - 60 * i, who="stranger") for i in range(10)])
+        w, fw = World(), FakeWriter([would(T0 - 60 * i, who="stranger", pr=i) for i in range(10)])
+        self.run_run(w, fw, mode="live")
+        self.assertEqual(fw.merges, [])
+
+    def test_shadow_bar_counts_prs_not_heads(self):
+        # GOV-0027's bar is 10 PRs: ten heads of one PR, or of nine, don't meet it.
+        for history in ([would(T0 - 60 * i, head=f"{i:040x}") for i in range(10)],
+                        [would(T0 - 60 * i, head=f"{i:040x}", pr=i % 9) for i in range(20)]):
+            w, fw = World(), FakeWriter(history)
+            code, out = self.run_run(w, fw, mode="live")
+            self.assertEqual(fw.merges, [])
+            self.assertTrue(any("live acts as shadow" in line for line in out), out)
+
+    def test_shadow_bar_ignores_comments_naming_no_pr(self):
+        history = [dict(would(T0 - 60 * i, pr=i), issue_url=None) for i in range(10)]
+        w, fw = World(), FakeWriter(history)
         self.run_run(w, fw, mode="live")
         self.assertEqual(fw.merges, [])
 
@@ -551,7 +566,7 @@ class Run(unittest.TestCase):
         self.assertTrue(fw.posts[0][1].startswith("Would merge"))
 
     def test_head_pin(self):
-        w, fw = World(), FakeWriter([would(T0 - 60 * i) for i in range(10)])
+        w, fw = World(), FakeWriter([would(T0 - 60 * i, pr=i) for i in range(10)])
         r = w.reader()
         calls = []
         def pr(n):
@@ -563,14 +578,14 @@ class Run(unittest.TestCase):
         self.assertTrue(any("head moved" in line for line in out), out)
 
     def test_merge_refused_by_github_posts_nothing(self):
-        w, fw = World(), FakeWriter([would(T0 - 60 * i) for i in range(10)])
+        w, fw = World(), FakeWriter([would(T0 - 60 * i, pr=i) for i in range(10)])
         fw.fail_merge = True
         code, out = self.run_run(w, fw, mode="live")
         self.assertEqual(code, 1)
         self.assertEqual(fw.posts, [])
 
     def test_off_writes_nothing(self):
-        w, fw = World(), FakeWriter([would(T0 - 60 * i) for i in range(10)])
+        w, fw = World(), FakeWriter([would(T0 - 60 * i, pr=i) for i in range(10)])
         w.pr["additions"] = 500
         for mode in ("off", "bogus"):
             code, out = self.run_run(w, fw, mode=mode)
@@ -579,7 +594,7 @@ class Run(unittest.TestCase):
 
     def test_dry_run_writes_nothing(self):
         for mode in ("shadow", "live"):
-            w, fw = World(), FakeWriter([would(T0 - 60 * i) for i in range(10)])
+            w, fw = World(), FakeWriter([would(T0 - 60 * i, pr=i) for i in range(10)])
             code, out = self.run_run(w, fw, mode=mode, dry_run=True)
             self.assertEqual((code, fw.posts, fw.merges), (0, [], []))
             self.assertTrue(any(line.startswith("dry run: would ") for line in out), out)
