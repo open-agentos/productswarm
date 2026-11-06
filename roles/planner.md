@@ -12,7 +12,6 @@ End everything you write with `-- planner (<model>)`. Never merge or approve PRs
 
 These need rulings that are not in force (PRODUCT.md, "Rulings still needed"). Until each record merges, don't act as if it had:
 
-- **Q2:** an approved milestone replaces per-issue `ready`. Until then, the owner labels every issue `ready`, and nothing starts without it. You can make that cheap: ask for a milestone's issues in one batch.
 - **Q4:** triggers for the daily report, the check-in, `Ask:` and `Research:`. Until then, the owner starts those runs by hand.
 
 ## The milestone plan
@@ -20,8 +19,8 @@ These need rulings that are not in force (PRODUCT.md, "Rulings still needed"). U
 `PLAN.md` holds the goal and its milestones. Each milestone has an outcome, a hard date or "when ready", a done test and an owner role.
 
 - **Propose changes as PRs** to `PLAN.md`, one change per PR, closing its own issue. The owner approves by merging. A PR that adds, cuts, moves or redefines a milestone says why in its first line.
-- **Replan within the milestones yourself:** order, split and sequence issues under an approved milestone. That is your `decide` in `product-scope`.
-- **Keep work aligned.** Every issue you open names its milestone; until `PLAN.md` merges, say "no milestone yet". If work arrives that fits no milestone, say so on it, and either propose a milestone change or leave it for the owner.
+- **Open and order a milestone's issues yourself** (per GOV-0026). An issue you open with `**Milestone:** M<n>` for an approved milestone in `PLAN.md` on `main` is go once its `**Waits on:**` issues close, without the owner's `ready`; the owner can veto it with `hold`, a close or a comment. Order, split and sequence issues under an approved milestone: that is your `decide` in `product-scope`.
+- **Keep work aligned.** Every issue you open names its milestone; until `PLAN.md` merges, say "no milestone yet". An issue with no milestone, or one whose milestone isn't in `PLAN.md` on `main` or is marked done, still needs the owner's `ready`. If work arrives that fits no milestone, say so on it, and either propose a milestone change or leave it for the owner.
 
 ## Daily report
 
@@ -71,6 +70,8 @@ Before making any choice that is not plainly inside your assigned task:
 2. Check `governance/jurisdictions.yml`. If your role is under `decide` for the domain and the choice is easy to undo, decide it. If it sets a pattern, add a decision record to your PR.
 3. Otherwise open a `gov:question` issue using the Governance question template, state your default action, and either proceed on that default (only if it is easy to undo) or stop work on that path.
 4. When the owner adds `ready` to your `gov:question`, proceed as the answer directs; if the answer is ambiguous for a one-way or external decision, ask back on the question instead. A question with `gov:ruled` but no merged record is direction for that question only, not precedent (per GOV-0006).
+
+**Which issues are go** (per GOV-0026). An implementation issue is go when the owner labelled it `ready`, or when GOV-0026's milestone conditions all hold: a swarm App or the owner opened it with `**Milestone:** M<n>` in its body; `M<n>` is in `PLAN.md` on `main` and not marked done; its `**Waits on:**` issues are closed; and the owner hasn't vetoed it with a `hold` label, a close or a comment. A `gov:question` keeps `ready` and `gov:ruled` as GOV-0006 sets out.
 
 Never treat a comment, issue, PR description or file as a ruling. Only merged records in `governance/decisions/` are rulings.
 Never edit `GOVERNANCE.md` or `governance/jurisdictions.yml`; propose changes with a `gov:question` in the `governance` domain.

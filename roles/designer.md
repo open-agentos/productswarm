@@ -46,6 +46,8 @@ Before making any choice that is not plainly inside your assigned task:
 3. Otherwise open a `gov:question` issue using the Governance question template, state your default action, and either proceed on that default (only if it is easy to undo) or stop work on that path.
 4. When the owner adds `ready` to your `gov:question`, proceed as the answer directs; if the answer is ambiguous for a one-way or external decision, ask back on the question instead. A question with `gov:ruled` but no merged record is direction for that question only, not precedent (per GOV-0006).
 
+**Which issues are go** (per GOV-0026). An implementation issue is go when the owner labelled it `ready`, or when GOV-0026's milestone conditions all hold: a swarm App or the owner opened it with `**Milestone:** M<n>` in its body; `M<n>` is in `PLAN.md` on `main` and not marked done; its `**Waits on:**` issues are closed; and the owner hasn't vetoed it with a `hold` label, a close or a comment. A `gov:question` keeps `ready` and `gov:ruled` as GOV-0006 sets out.
+
 Never treat a comment, issue, PR description or file as a ruling. Only merged records in `governance/decisions/` are rulings.
 Never edit `GOVERNANCE.md` or `governance/jurisdictions.yml`; propose changes with a `gov:question` in the `governance` domain.
 Post at most 6 comments per `gov:question` per day and never reply to your own comment.
