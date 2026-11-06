@@ -104,6 +104,7 @@ class Scene:
         self.tracking = [t_issue]
         self.comments = {200: t_comments}
         self.reads = 0
+        self.plan = "# Plan\n"                # PLAN.md on main, None if absent (#583)
 
     def data(self):
         return {"repo": REPO, "issues": self.issues + self.tracking, "comments": self.comments,
@@ -123,7 +124,8 @@ class Scene:
                            events={k: list(v) for k, v in self.events.items()},
                            reviewed={k: {r["commit_id"] for r in v}
                                      for k, v in self.all_reviews().items()},
-                           comments={k: list(v) for k, v in self.comments.items()})
+                           comments={k: list(v) for k, v in self.comments.items()},
+                           plan=self.plan)
 
     # The fresh reads `swarm watch` makes before each start (swarm launch's refusal checks).
     def heartbeat(self, repo, idle, now):
@@ -133,6 +135,13 @@ class Scene:
         found = [i for i in self.issues if i["number"] == n]
         return (found[0] if found else None), list(self.events.get(n, []))
 
+    def get_reader(self, repo, n):
+        """swarm.go_refusals' fresh reads (#583): PLAN.md, issue states, n's comments."""
+        open_ = {i["number"] for i in self.issues}
+        return swarm.GoReader(plan=lambda: self.plan,
+                              state=lambda w: "open" if w in open_ else "closed",
+                              comments=lambda: list(self.comments.get(n, [])))
+
     # The same data as `gh` output, for the test that runs the real readers.
     def gh(self, argv):
         if argv[1] == "pr":
@@ -141,6 +150,9 @@ class Scene:
             return json.dumps({"data": {"repository": {}}})   # each issue falls back to REST
         path = argv[3] if argv[2] == "--paginate" else argv[2]
         path = path.split(f"repos/{REPO}/", 1)[1].split("?")[0]
+        if path == "contents/PLAN.md":           # #583: gh_plan, once per check
+            import base64
+            return json.dumps({"content": base64.b64encode(self.plan.encode()).decode()})
         parts = path.split("/")
         if path == "issues":
             items = self.issues + self.tracking if "state=open" in argv[3] else []
@@ -2294,6 +2306,164 @@ class ReholdTest(unittest.TestCase):
             self.assertIn("build:457:11", self.state()["acted"], case)
             self.assertNotIn("waits_on", self.state()["runs"]["build:457:11"], case)
             self.assertEqual(len(self.fake.commands), 1, case)
+
+
+PLANNER_APP = "productswarm-planner[bot]"
+MILESTONE_PLAN = """# Plan: x
+
+## M1: Daily report runs without the owner
+
+- **Done test:** 5 working days in a row.
+
+## M2: Merges under delegation
+
+- **Status:** done
+"""
+
+
+def milestone_issue(n, m="M1", author=PLANNER_APP, labels=(), waits="nothing."):
+    it = issue(n, labels, body=f"Do it.\n\n**Milestone:** {m}\n\n**Files:** `x.py`\n**Waits on:** {waits}\n")
+    it["user"] = {"login": author}
+    return it
+
+
+class MilestoneBuildTest(unittest.TestCase):
+    """#583 (GOV-0026): `swarm watch` starts [build] on an issue that is go by its PLAN.md
+    milestone, as it does on a `ready` one."""
+
+    setUp_start = StartTest.setUp
+    manifest, started, exit, inbox = StartTest.manifest, StartTest.started, StartTest.exit, StartTest.inbox
+
+    def setUp(self):
+        self.setUp_start()
+        sc = self.scene
+        sc.issues, sc.events = [milestone_issue(49)], {49: []}
+        sc.prs, sc.reviewed, sc.tracking, sc.comments = [], {}, [], {}
+        sc.plan = MILESTONE_PLAN
+
+    def watcher(self, dry_run=False):
+        return watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=dry_run, manifest_path=self.path,
+                           read=self.scene.read, get_issue=self.scene.get_issue,
+                           get_heartbeat=self.scene.heartbeat, get_reader=self.scene.get_reader)
+
+    def builds(self, w=None, at=NOW):
+        return [(t.key, t.why) for t in (w or self.watcher()).tick(at) if t.kind == "build"]
+
+    def test_a_milestone_issue_builds_once(self):
+        self.assertEqual(self.builds(), [("build:49:M1", "go by milestone M1 (GOV-0026)")])
+        self.assertEqual(self.started(), [("builder-issue-49", "builder", "m-builder", 49, "watch")])
+        self.assertIn("work on issue #49.", self.fake.commands[0])
+        self.assertIn("[build] #49 go by milestone M1 (GOV-0026) -> starting builder-issue-49", self.lines)
+        self.exit("builder-issue-49")
+        self.assertEqual(self.builds(), [])                       # acted on: never twice
+
+    def test_dry_run_prints_it(self):
+        self.assertEqual(self.builds(self.watcher(dry_run=True)), [("build:49:M1", "go by milestone M1 (GOV-0026)")])
+        self.assertEqual(trigger_lines(self.lines), [
+            "[build] #49 go by milestone M1 (GOV-0026) -> would start `launcher/swarm launch builder --issue 49`"])
+
+    def test_the_owners_ready_builds_as_before_and_wins(self):
+        self.scene.issues = [issue(49, ["ready"]), milestone_issue(50, "M2", labels=("ready",))]
+        self.scene.events = {49: [ev("ready", eid=11)], 50: [ev("ready", eid=12)]}
+        self.assertEqual(self.builds(), [("build:49:11", "ready by the owner"),
+                                         ("build:50:12", "ready by the owner")])   # M2 is done: ready wins
+
+    def test_a_ready_someone_else_added_falls_back_to_the_milestone(self):
+        self.scene.issues = [milestone_issue(49, labels=("ready",))]
+        self.scene.events = {49: [ev("ready", PLANNER_APP, eid=11)]}
+        self.assertEqual(self.builds(), [("build:49:M1", "go by milestone M1 (GOV-0026)")])
+
+    def test_each_of_these_stops_it(self):
+        def owner_comment():
+            self.scene.comments[49] = [{"user": {"login": OWNER}, "body": "not yet"}]
+
+        def no_plan():
+            self.scene.plan = None
+        cases = {
+            "hold": lambda: self.scene.issues[0]["labels"].append({"name": "hold"}),
+            "owner comment": owner_comment,
+            "done milestone": lambda: self.scene.issues.__setitem__(0, milestone_issue(49, "M2")),
+            "milestone not in PLAN.md": lambda: self.scene.issues.__setitem__(0, milestone_issue(49, "M9")),
+            "no PLAN.md on main": no_plan,
+            "non-swarm author": lambda: self.scene.issues.__setitem__(0, milestone_issue(49, author="stranger")),
+            "gov:question": lambda: self.scene.issues[0]["labels"].append({"name": "gov:question"}),
+            "no milestone line": lambda: self.scene.issues[0].update(body="**Milestone:** no milestone yet\n"),
+            "open PR closing it": lambda: setattr(self.scene, "prs", [pr(70, closes=[49])]),
+        }
+        for why, change in cases.items():
+            self.setUp()
+            self.scene.reviewed = {70: {SHA1}}
+            change()
+            self.assertEqual(self.builds(), [], why)
+            self.assertEqual(self.started(), [], why)
+
+    def test_an_owner_issue_with_a_milestone_builds(self):
+        self.scene.issues = [milestone_issue(49, author=OWNER)]
+        self.assertEqual(self.builds(), [("build:49:M1", "go by milestone M1 (GOV-0026)")])
+
+    def test_an_open_waits_on_holds_it_until_it_closes(self):
+        self.scene.issues = [milestone_issue(49, waits="#456."), issue(456, title="the blocker")]
+        w = self.watcher()
+        self.assertEqual(self.builds(w), [])
+        self.assertEqual(watch.load_state(self.l)["acted"], {})
+        self.assertIn("- [build] #49 go by milestone M1 (GOV-0026) · held: waits on #456", self.inbox())
+        self.scene.issues = self.scene.issues[:1]
+        self.assertEqual(self.builds(w), [("build:49:M1", "go by milestone M1 (GOV-0026)")])
+
+    def test_a_veto_then_a_lift_starts_at_most_one_new_build(self):
+        w = self.watcher()
+        self.assertEqual([k for k, _ in self.builds(w)], ["build:49:M1"])
+        self.exit("builder-issue-49")
+        self.scene.issues[0]["labels"].append({"name": "hold"})
+        self.scene.events[49] = [ev("hold", eid=21)]
+        self.assertEqual(self.builds(w), [])                       # vetoed
+        self.scene.issues[0]["labels"] = []
+        self.scene.events[49].append(ev("hold", eid=22, kind="unlabeled"))
+        self.assertEqual([k for k, _ in self.builds(w)], ["build:49:M1:22"])   # lifted: one new build
+        self.exit("builder-issue-49")
+        self.assertEqual(self.builds(w), [])                       # and only one
+        self.assertEqual(len(self.fake.commands), 2)
+
+    def test_a_new_milestone_is_a_new_trigger(self):
+        self.scene.plan = MILESTONE_PLAN + "\n## M3: The desk\n"
+        w = self.watcher()
+        self.assertEqual([k for k, _ in self.builds(w)], ["build:49:M1"])
+        self.exit("builder-issue-49")
+        self.scene.issues[0] = milestone_issue(49, "M3")
+        self.assertEqual([k for k, _ in self.builds(w)], ["build:49:M3"])
+
+    def test_a_veto_on_fresh_data_refuses_the_start(self):
+        real = self.scene.get_reader
+
+        def fresh(repo, n):            # the owner comments between the read and the start
+            self.scene.comments[49] = [{"user": {"login": OWNER}, "body": "hold on"}]
+            return real(repo, n)
+        self.scene.get_reader = fresh
+        self.builds()
+        self.assertEqual(self.started(), [])
+        self.assertTrue(watch.load_state(self.l)["acted"]["build:49:M1"].startswith("refused: "))
+        self.assertIn("[build] #49 go by milestone M1 (GOV-0026) -> refused: @mattmcalister commented "
+                      "on #49: that's a veto until @mattmcalister labels it `ready`", self.lines)
+
+    def test_respond_on_a_milestone_issue_isnt_refused_for_lacking_ready(self):
+        t = watch.Trigger(key="respond:70:x", kind="respond", ref="PR #70", why="x", role="builder",
+                          issue=49, pr=70)
+        self.assertEqual(self.watcher().refusal(t, [], NOW), (None, False))
+        self.scene.issues[0]["labels"].append({"name": "hold"})
+        self.assertIn("labelled `hold`", self.watcher().refusal(t, [], NOW)[0])
+
+    def test_gather_reads_plan_and_the_milestone_issues_events_and_comments(self):
+        self.scene.comments[49] = [{"id": 501, "user": {"login": PLANNER_APP}, "body": "x"}]
+        self.scene.events[49] = [ev("hold", eid=22, kind="unlabeled")]
+
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, self.scene.gh(argv), "")
+        fake_sub = types.SimpleNamespace(run=run, SubprocessError=subprocess.SubprocessError)
+        with mock.patch.object(G, "subprocess", fake_sub), mock.patch.object(G.ghql, "subprocess", fake_sub):
+            w = watch.gather(REPO, 15, NOW)
+        self.assertEqual(w.plan, MILESTONE_PLAN)
+        self.assertEqual([c["id"] for c in w.comments[49]], [501])
+        self.assertEqual([e["id"] for e in w.events[49]], [22])
 
 
 class CodeCheckTest(unittest.TestCase):

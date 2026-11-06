@@ -12,8 +12,9 @@ it has none (for example, the role has no spend_cap_usd).
 | kind   | trigger                                                                 | would start          |
 |--------|-------------------------------------------------------------------------|----------------------|
 | review | open, non-draft PR whose head the reviewer App hasn't reviewed          | a reviewer pass      |
-| build  | issue whose most recent `ready` was added by the owner (GOV-0006),      | builder on the issue |
-|        | with no open PR closing it                                              |                      |
+| build  | issue whose most recent `ready` was added by the owner (GOV-0006), or   | builder on the issue |
+|        | that is go by its PLAN.md milestone (GOV-0026, #583), with no open PR   |                      |
+|        | closing it                                                              |                      |
 | record | gov:question whose most recent `gov:ruled` was added by the owner, that | docs on the question |
 |        | needs a record (GOV-0007), with no open PR closing it                   |                      |
 | answer | gov:question whose most recent `ready` was added by the owner, again    | its "Raised by" role |
@@ -105,6 +106,17 @@ held while N's title shares a GOV id with the title of
 The hold is listed in `swarm inbox` with what it waits on, logged once per reason, and
 starts held-longest-first once the overlap clears. An issue whose title cites no GOV id
 is never held this way, and [respond], [review], [record] and [answer] never are.
+
+[build] by milestone (#583, GOV-0026): an open, non-question, non-tracking issue without
+the owner's `ready` builds when swarm.milestone_refusal() passes on this tick's reading:
+the owner or a swarm App (identities.agents) opened it, its `**Milestone:** M<n>` names a
+milestone in PLAN.md on main (read once per check) that isn't marked done, and there is no
+`hold` label and no owner comment. Its `**Waits on:**` issues hold it, as for `ready`, rather
+than stopping it. The owner's `ready` is read first and wins. The trigger's key is
+`build:N:M<n>`, plus the id of the latest event removing `hold` if there is one, so a
+change of milestone, or a veto then a lift, is one new trigger and starts at most one new
+build. Its why is "go by milestone M<n> (GOV-0026)". Before the start, refusal() runs
+swarm.go_refusals() on fresh GitHub data, as `swarm launch` does.
 
 A [build] is also held while an issue its body's `**Waits on:**` line names is still open
 (#490): the #N refs on that line; "nothing" or no line means none. The hold is listed in
@@ -340,6 +352,7 @@ class World:
     events: dict[int, list[dict]] = field(default_factory=dict)     # issue -> events, oldest first
     reviewed: dict[int, set[str]] = field(default_factory=dict)     # PR -> SHAs the reviewer reviewed
     comments: dict[int, list[dict]] = field(default_factory=dict)   # gov:ruled question -> comments (#501)
+    plan: str | None = None                          # PLAN.md on main, None if absent (#583)
 
 
 def owner_label(events: list[dict], name: str, owner: str) -> dict | None:
@@ -469,21 +482,32 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
                                     skipped=None if role else why_not, issue=n,
                                     after=record.key if record and role else None), n))
 
-    # Builds: ready, open, non-question, non-tracking issues with no open PR closing them
-    # (that work is done and waits on the owner's merge).
+    # Builds: open, non-question, non-tracking issues with no open PR closing them (that
+    # work is done and waits on the owner's merge) that are go: the owner's `ready`
+    # (GOV-0006), or else their PLAN.md milestone (GOV-0026, #583).
+    agents = set(apps or {})
     for it in sorted(w.issues, key=lambda i: i["number"]):
         n = it["number"]
         labels = {lb.get("name") for lb in it.get("labels") or []}
-        if (it.get("state") != "open" or "pull_request" in it or "ready" not in labels
-                or "gov:question" in labels or is_tracking(it) or n in closing):
+        if (it.get("state") != "open" or "pull_request" in it or "gov:question" in labels
+                or is_tracking(it) or n in closing):
             continue
-        ready = owner_label(w.events.get(n, []), "ready", owner)
+        events = w.events.get(n, [])
+        ready = owner_label(events, "ready", owner) if "ready" in labels else None
         if ready:
-            t = hold(Trigger(key=f"build:{n}:{ready.get('id')}", kind="build", ref=f"#{n}",
-                             why="ready by the owner", role="builder",
-                             command=launch_cmd("builder", n), issue=n), n)
-            waits = None if t.held else blocked(it.get("body"), w)
-            out.append(replace(t, held=waits, once=waits) if waits else t)
+            key, why = f"build:{n}:{ready.get('id')}", "ready by the owner"
+        else:
+            mile = milestone_go(it, w, owner, agents)
+            if mile is None:
+                continue
+            lift = next((e for e in reversed(events) if e.get("event") == "unlabeled"
+                         and (e.get("label") or {}).get("name") == "hold"), None)
+            key = f"build:{n}:M{mile}" + (f":{lift.get('id')}" if lift else "")
+            why = f"go by milestone M{mile} (GOV-0026)"
+        t = hold(Trigger(key=key, kind="build", ref=f"#{n}", why=why, role="builder",
+                         command=launch_cmd("builder", n), issue=n), n)
+        waits = None if t.held else blocked(it.get("body"), w)
+        out.append(replace(t, held=waits, once=waits) if waits else t)
 
     # Call-ins (#520, GOV-0023): `Call in:` lines on ready issues, questions included.
     for it in sorted(w.issues, key=lambda i: i["number"]):
@@ -593,6 +617,18 @@ def waits_on(body: str | None) -> list[int]:
         return []
     first = re.split(r"\.(?:\s|$)", value, maxsplit=1)[0]
     return sorted({int(x) for x in REF_RE.findall(first)})
+
+
+def milestone_go(it: dict, w: World, owner: str, agents: set[str]) -> int | None:
+    """n if issue `it` is go by its milestone M<n> on this tick's reading (GOV-0026, #583),
+    else None. Its `**Waits on:**` issues aren't checked here: blocked() holds the build
+    until they close, as it does for `ready` (#490)."""
+    n, m = it["number"], swarm.milestone_of(it.get("body"))
+    if m is None:
+        return None
+    r = swarm.GoReader(plan=lambda: w.plan, state=lambda _: "closed",
+                       comments=lambda: w.comments.get(n, []))
+    return None if swarm.milestone_refusal(n, it, owner, agents, r) else m
 
 
 def open_issues(w: World) -> set[int]:
@@ -706,12 +742,17 @@ def gather(repo: str, idle_minutes: int, now: dt.datetime) -> World:
     g = swarm.dashboard()
     data, model = swarm.snapshot(repo, idle_minutes, now)
     issues = [i for i in data["issues"] if i.get("state") == "open"]
-    w = World(model=model, issues=issues)
+    w = World(model=model, issues=issues, plan=swarm.gh_plan(repo))   # PLAN.md once per check (#583)
     for it in issues:
         labels = {lb.get("name") for lb in it.get("labels") or []}
-        if labels & {"ready", "gov:ruled"} and not g.is_tracking(it):
+        # A milestone issue (#583) needs its events (ready, a lifted hold) and its comments
+        # (the owner's veto), like a ready one.
+        milestone = ("gov:question" not in labels and not g.is_tracking(it)
+                     and swarm.milestone_of(it.get("body")) is not None)
+        if (labels & {"ready", "gov:ruled"} and not g.is_tracking(it)) or milestone:
             w.events[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/events?per_page=100")
-        if {"gov:question", "gov:ruled"} <= labels or ("ready" in labels and not g.is_tracking(it)):
+        if ({"gov:question", "gov:ruled"} <= labels or ("ready" in labels and not g.is_tracking(it))
+                or milestone):
             # the owner's `Record: yes` (#501), and `Call in:` lines on ready issues (#520)
             w.comments[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/comments?per_page=100")
     for n, reviews in (data.get("reviews") or {}).items():    # fetch() read them for build()
@@ -1202,6 +1243,7 @@ class Watch:
     read: Callable[[str, int, dt.datetime], World] = gather
     get_issue: Callable[[str, int], tuple] = swarm.gh_issue           # refusal re-checks
     get_heartbeat: Callable[[str, int, dt.datetime], dict] = swarm.heartbeat
+    get_reader: Callable[[str, int], "swarm.GoReader"] = swarm.gh_go_reader   # milestone go (#583)
     seen: set[str] = field(default_factory=set)                      # dry-run memory
     roles_from: Path | None = None    # repo root whose roles/ is re-read every tick (#487)
     jurisdictions: Path = swarm.JURISDICTIONS   # always_one_way domains, re-read every tick (#519)
@@ -1604,8 +1646,13 @@ class Watch:
             # A pass already running may have listed PRs before this push: wait for it.
             return None, bool(reviewers(hb, live))
         issue, events = self.get_issue(self.repo, t.issue)
-        label = "gov:ruled" if t.kind == "record" else "ready"
-        refused = swarm.issue_refusals(t.issue, issue, events, self.owner, label)
+        if t.kind in ("build", "respond"):
+            # The owner's `ready`, or the issue's milestone (GOV-0026, #583), as `swarm launch`.
+            refused = swarm.go_refusals(t.issue, issue, events, self.owner, set(self.apps()),
+                                        self.get_reader(self.repo, t.issue))
+        else:
+            label = "gov:ruled" if t.kind == "record" else "ready"
+            refused = swarm.issue_refusals(t.issue, issue, events, self.owner, label)
         if refused:
             return refused[0], False
         taken = swarm.holders(t.issue, hb, live, own_role(t))
