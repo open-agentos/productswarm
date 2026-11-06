@@ -502,7 +502,7 @@ Per GOV-0016, claude's stdout and stderr go to files in a fresh directory under 
 
 ## merger.py: merge or miss per PR (GOV-0022, GOV-0027)
 
-`python3 launcher/merger.py plan [--pr N] [--manifest PATH] [--repo OWNER/NAME]` (#589) is the merger's decision, read-only. It is a reconciler like `actions_review.py plan` (GOV-0020): it reads repo state from GitHub and the checkout of `main` it runs from, never takes PR text as instructions, and writes nothing to GitHub. Posting "would merge", merging, the workflow and the `productswarm-merger` App come in later issues.
+`python3 launcher/merger.py plan [--pr N] [--manifest PATH] [--repo OWNER/NAME]` (#589) is the merger's decision, read-only. It is a reconciler like `actions_review.py plan` (GOV-0020): it reads repo state from GitHub and the checkout of `main` it runs from, never takes PR text as instructions, and writes nothing to GitHub. `run` (below) acts on its decisions.
 
 It prints one line per open PR: `#N <head sha> merge (standing grant)`, `merge (approved ask)` or `miss: <first failed condition>`. Drafts, fork heads and closed PRs get a `skip:` line. A PR is judged as a standing grant unless it touches a protected path; then it is judged as an approved ask.
 
@@ -536,3 +536,21 @@ max_changed_lines = 300    # a whole number of at least 1
 ```
 
 If the table or either key is missing or bad, the merger is off and every PR is a miss with that reason. `manifest.py` allows the table but doesn't check it. Exit 0 when it decided, even if nothing merges. If GitHub or a file (`swarm.toml`, `jurisdictions.yml`) can't be read, every PR is a miss and it exits 1.
+
+### `run`: shadow comments and live merges (#592)
+
+`python3 launcher/merger.py run [--dry-run] [--pr N] [--manifest PATH] [--repo OWNER/NAME]` runs `plan`, prints its lines, then acts on each PR by `[merger] mode` (GOV-0027):
+
+- **`shadow`:** on a merge, it posts `Would merge (standing grant) at <sha>.` (or `approved ask`) once per head. On a miss for a PR that the reviewer or the owner approved at its head, it posts `Left for the owner at <sha>: <reason>.` once per head, so the owner sees why the PR is theirs (GOV-0022). Other misses post nothing, and neither does a miss while `tests` is still running.
+- **`live`:** it merges with the head SHA pinned (the merge API's `sha`, so a push after the decision can't ride on an earlier approval; it also re-reads the head just before merging and leaves a moved head alone), then posts `Merged under standing grant (GOV-0027) at <sha>.` (or `approved ask`).
+- **`off`**, or a missing or bad `[merger]` table: nothing.
+
+**The shadow bar.** GOV-0027 has the merger post "would merge" for one day or 10 PRs, whichever comes first, before it goes live. `run` counts the `Would merge` comments by `productswarm-merger[bot]` across the repo's issue and PR comments: once there are 10, or a day has passed since the first, the bar is met. Until then `live` acts as `shadow` and logs `live acts as shadow: ...` with the count. If the comments can't be read, `live` also acts as `shadow`. Comments by anyone else don't count, and don't stop the merger posting its own.
+
+Every comment ends `-- merger`. "Once per head" means a comment of that kind from the merger App naming that SHA is already on the PR; a new head gets a new one.
+
+`--dry-run` prints `dry run: would post on #N: ...` or `dry run: would merge #N at <sha>` and writes nothing; it still reads GitHub. The token is `$GH_TOKEN`; the code holds no credentials and never runs Claude. In Actions it is the `productswarm-merger` App's token, which only the workflow mints (GOV-0028).
+
+Exit 0 when every write it tried worked, even if nothing merged. Exit 1 if it couldn't decide (it then writes nothing) or a comment or merge failed; it carries on with the other PRs.
+
+**Going live** needs owner steps outside the code: the merger App and its key (GOV-0028), the workflow (`.github/workflows/merger.yml`, which only the owner can commit, #32), #572's ruleset steps, and setting `[merger] mode` in `swarm.toml`. The switch turns it all off.

@@ -1,12 +1,25 @@
-"""The merger's decision, read-only (#589): for each open PR, merge or miss under GOV-0027's
+"""The merger (GOV-0022, GOV-0027): for each open PR, merge or miss under GOV-0027's
 standing grants and approved asks, with GOV-0022's other conditions kept.
 
     python3 launcher/merger.py plan [--pr N] [--manifest PATH] [--repo OWNER/NAME]
+    python3 launcher/merger.py run [--dry-run] [--pr N] [--manifest PATH] [--repo OWNER/NAME]
 
 A reconciler in the shape of actions_review.py's `plan` (GOV-0020): it reads repo state
-from GitHub and the checkout of main it runs from, reads PRs as data and never PR text as
-instructions, and writes nothing to GitHub. Posting "would merge", merging, the workflow and
-the merger App come in later issues.
+from GitHub and the checkout of main it runs from, and reads PRs as data, never PR text as
+instructions. `plan` (#589) writes nothing to GitHub. `run` (#592) runs plan, then acts per
+[merger] mode:
+
+- shadow: on a merge, post `Would merge (<kind>) at <sha>.` once per head. On a miss for a
+  PR the reviewer or the owner approved at head, post `Left for the owner at <sha>: <reason>.`
+  once per head (not while `tests` is still running). Other misses post nothing.
+- live: merge with the head SHA pinned, then post `Merged under <kind> (GOV-0027) at <sha>.`
+  Until GOV-0027's shadow bar is met (SHADOW_COMMENTS "would merge" comments by the merger
+  App, or a day since the first), live acts as shadow and says so in the log.
+- off: nothing.
+
+Every comment ends `-- merger`. `--dry-run` prints each comment or merge instead of making
+it. The token is $GH_TOKEN (the merger App's, minted by the workflow, GOV-0028); this code
+holds no credentials and never runs Claude.
 
 It prints one line per open PR: `#N <head sha> merge (standing grant)`, `... merge
 (approved ask)` or `... miss: <first failed condition>`. Draft PRs, fork heads and closed
@@ -51,6 +64,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -280,10 +294,24 @@ def decide(pr: dict, ctx: Context, r: Reader) -> str:
     return GRANT
 
 
-def make_plan(prs: list[dict], ctx: Context, r: Reader) -> list[str]:
-    """One line per PR considered, lowest number first. Skips drafts, forks and closed PRs;
-    an author outside the swarm Apps and the owner is a miss, not a skip."""
-    lines = []
+@dataclass(frozen=True)
+class Decision:
+    number: int
+    head: str          # "-" if unknown
+    verdict: str       # GRANT, ASK, "miss: ..." or "skip: ..."
+
+    @property
+    def merges(self) -> bool:
+        return self.verdict in (GRANT, ASK)
+
+    def line(self) -> str:
+        return f"#{self.number} {self.head} {self.verdict}"
+
+
+def make_decisions(prs: list[dict], ctx: Context, r: Reader) -> list[Decision]:
+    """One decision per PR considered, lowest number first. Skips drafts, forks and closed
+    PRs; an author outside the swarm Apps and the owner is a miss, not a skip."""
+    out = []
     def number(p):
         n = p.get("number")
         return n if isinstance(n, int) and not isinstance(n, bool) else 0
@@ -297,11 +325,16 @@ def make_plan(prs: list[dict], ctx: Context, r: Reader) -> list[str]:
                 ((pr.get("head") or {}).get("repo") or {}).get("full_name") != ctx.repo:
             why = ("closed" if pr.get("state") != "open" else "a draft" if pr.get("draft")
                    else "its head isn't in this repo")
-            lines.append(f"#{n} {sha} skip: {why}")
+            out.append(Decision(n, sha, f"skip: {why}"))
             continue
         ok, _, why = actions_review.eligible(pr, ctx.repo, ctx.owner, ctx.agents)
-        lines.append(f"#{n} {sha} {decide(pr, ctx, r) if ok else 'miss: ' + why}")
-    return lines
+        out.append(Decision(n, sha, decide(pr, ctx, r) if ok else "miss: " + why))
+    return out
+
+
+def make_plan(prs: list[dict], ctx: Context, r: Reader) -> list[str]:
+    """make_decisions() as plan's lines."""
+    return [d.line() for d in make_decisions(prs, ctx, r)]
 
 
 # ---------------------------------------------------------------- reading GitHub
@@ -330,6 +363,28 @@ def live(repo: str) -> Reader:
         go_reader=lambda k: swarm.gh_go_reader(repo, k))
 
 
+def decide_all(repo: str, pr: int | None, manifest_path: Path | str | None, r: Reader,
+               owner: Callable[[], str], authors: Callable[[], tuple[frozenset[str], str | None]],
+               list_prs: Callable[[], list[dict]]) -> tuple[Context, list[Decision]]:
+    """plan's reads and decisions. Raises one of UNREADABLE if it can't decide."""
+    switch = load_switch(manifest_path or swarm.ROOT / "swarm.toml")
+    apps, why_none = authors()
+    if why_none:
+        raise ValueError(why_none)
+    ctx = Context(repo, owner(), apps, switch)
+    prs = [{"number": pr}] if pr is not None else list_prs()
+    if not isinstance(prs, list):
+        raise ValueError("the PR list is not a list")
+    return ctx, make_decisions(prs, ctx, r)
+
+
+UNREADABLE = (KeyError, TypeError, OSError, ValueError, RuntimeError, subprocess.SubprocessError)
+
+
+def default_list_prs(repo: str) -> Callable[[], list[dict]]:
+    return lambda: swarm.dashboard().gh_items(f"repos/{repo}/pulls?state=open&per_page=100")
+
+
 def plan(repo: str, pr: int | None = None, manifest_path: Path | str | None = None,
          reader: Reader | None = None, owner: Callable[[], str] = swarm.owner_login,
          authors: Callable[[], tuple[frozenset[str], str | None]] = actions_review.trusted_authors,
@@ -337,27 +392,172 @@ def plan(repo: str, pr: int | None = None, manifest_path: Path | str | None = No
          out: Callable[[str], None] = print) -> int:
     """Print merge or miss for each open PR (or only PR pr). 0 decided, 1 couldn't."""
     r = reader or live(repo)
-    if list_prs is None:
-        list_prs = lambda: swarm.dashboard().gh_items(f"repos/{repo}/pulls?state=open&per_page=100")
     try:
-        switch = load_switch(manifest_path or swarm.ROOT / "swarm.toml")
-        apps, why_none = authors()
-        if why_none:
-            raise ValueError(why_none)
-        ctx = Context(repo, owner(), apps, switch)
-        prs = [{"number": pr}] if pr is not None else list_prs()
-        if not isinstance(prs, list):
-            raise ValueError("the PR list is not a list")
-        lines = make_plan(prs, ctx, r)
-    except (KeyError, TypeError, OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        ctx, decisions = decide_all(repo, pr, manifest_path, r, owner, authors,
+                                    list_prs or default_list_prs(repo))
+    except UNREADABLE as e:
         out(f"merger: can't decide ({e.__class__.__name__}): every PR is a miss")
         return 1
-    for line in lines:
-        out(line)
-    merging = sum(line.endswith((GRANT, ASK)) for line in lines)
-    out(f"merger: mode {switch.mode}: {merging} PR(s) would merge" +
+    for d in decisions:
+        out(d.line())
+    merging = sum(d.merges for d in decisions)
+    out(f"merger: mode {ctx.switch.mode}: {merging} PR(s) would merge" +
         (f" (--pr {pr})" if pr is not None else ""))
     return 0
+
+
+# ---------------------------------------------------------------- run: comments and merges (#592)
+
+MERGER = "productswarm-merger[bot]"   # the App whose comments count (GOV-0022, GOV-0028)
+SIGN = "\n\n-- merger"
+WOULD, MERGED, LEFT = "Would merge", "Merged under", "Left for the owner"
+SHADOW_COMMENTS = 10                  # GOV-0027: 10 "would merge" comments ...
+SHADOW_SECONDS = 24 * 3600            # ... or a day since the first, whichever comes first
+
+
+def kind(verdict: str) -> str:
+    return "standing grant" if verdict == GRANT else "approved ask"
+
+
+def would_body(d: Decision) -> str:
+    return f"{WOULD} ({kind(d.verdict)}) at {d.head}.{SIGN}"
+
+
+def merged_body(d: Decision) -> str:
+    return f"{MERGED} {kind(d.verdict)} (GOV-0027) at {d.head}.{SIGN}"
+
+
+def left_body(d: Decision) -> str:
+    return f"{LEFT} at {d.head}: {d.verdict.removeprefix('miss: ')}.{SIGN}"
+
+
+def posted(comments: list[dict], prefix: str, head: str) -> bool:
+    """Whether the merger App already posted a `prefix` comment for this head."""
+    return any(login(c) == MERGER and (c.get("body") or "").startswith(prefix)
+               and f" at {head}" in (c.get("body") or "") for c in comments if isinstance(c, dict))
+
+
+def shadow_bar(comments: list[dict], now: float) -> str | None:
+    """None once GOV-0027's shadow is over (SHADOW_COMMENTS "would merge" comments by the
+    merger App, or SHADOW_SECONDS since the first), else why live is still held back."""
+    times = sorted(t for c in comments if isinstance(c, dict) and login(c) == MERGER
+                   and (c.get("body") or "").startswith(WOULD)
+                   and (t := actions_review.iso_time(c.get("created_at"))) is not None)
+    if len(times) >= SHADOW_COMMENTS or (times and now - times[0] >= SHADOW_SECONDS):
+        return None
+    since = f", the first at {actions_review.utc(times[0])}" if times else ""
+    return (f"the shadow bar isn't met ({len(times)} of {SHADOW_COMMENTS} \"would merge\" "
+            f"comments{since}; or a day since the first)")
+
+
+def worth_telling(d: Decision, reviews: list[dict], owner: str) -> bool:
+    """A miss is posted only on a PR the reviewer or the owner approved at head (GOV-0022:
+    the owner sees why it's left to them), and not while `tests` is still running."""
+    if not d.verdict.startswith("miss: ") or "hasn't finished" in d.verdict:
+        return False
+    return approved_at_head(reviews, REVIEWER, d.head) or approved_at_head(reviews, owner, d.head)
+
+
+@dataclass
+class Writer:
+    """What run writes to GitHub, and the repo-wide comment list the shadow bar counts.
+    Tests pass canned functions; gh_writer() uses `gh` with $GH_TOKEN."""
+    history: Callable[[], list[dict]]          # every issue and PR comment in the repo
+    post: Callable[[int, str], None]           # comment on PR n
+    merge: Callable[[int, str], None]          # merge PR n only if its head is still sha
+
+
+def gh_writer(repo: str) -> Writer:
+    g = swarm.dashboard()
+
+    def gh(*args: str) -> None:
+        r = subprocess.run(["gh", "api", *args], capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError(f"gh api {args[0]} failed: {r.stderr.strip()[:300]}")
+
+    return Writer(
+        history=lambda: g.gh_items(f"repos/{repo}/issues/comments?per_page=100"),
+        post=lambda n, body: gh(f"repos/{repo}/issues/{n}/comments", "-f", f"body={body}"),
+        # sha pins the merge to the head the decision saw: GitHub refuses it if the head moved.
+        merge=lambda n, sha: gh("-X", "PUT", f"repos/{repo}/pulls/{n}/merge",
+                                "-f", f"sha={sha}", "-f", "merge_method=merge"))
+
+
+def run(repo: str, dry_run: bool = False, pr: int | None = None,
+        manifest_path: Path | str | None = None, reader: Reader | None = None,
+        writer: Writer | None = None, owner: Callable[[], str] = swarm.owner_login,
+        authors: Callable[[], tuple[frozenset[str], str | None]] = actions_review.trusted_authors,
+        list_prs: Callable[[], list[dict]] | None = None, clock: Callable[[], float] = time.time,
+        out: Callable[[str], None] = print) -> int:
+    """plan, then act on each decision per [merger] mode. 0 done, 1 couldn't decide or a
+    write failed. --dry-run prints each write instead of making it."""
+    r = reader or live(repo)
+    w = writer or gh_writer(repo)
+    try:
+        ctx, decisions = decide_all(repo, pr, manifest_path, r, owner, authors,
+                                    list_prs or default_list_prs(repo))
+    except UNREADABLE as e:
+        out(f"merger: can't decide ({e.__class__.__name__}): nothing posted or merged")
+        return 1
+    for d in decisions:
+        out(d.line())
+    mode = ctx.switch.mode
+    if mode == "off":
+        out(f"merger: off ({ctx.switch.why_off}): nothing posted or merged")
+        return 0
+    held = None
+    if mode == "live":
+        try:
+            held = shadow_bar(w.history(), clock())
+        except UNREADABLE as e:
+            held = f"can't count the shadow's comments ({e.__class__.__name__})"
+        if held:
+            out(f"merger: live acts as shadow: {held}")
+    merging = mode == "live" and not held
+    failed = 0
+
+    def write(what: str, act: Callable[[], None]) -> bool:
+        nonlocal failed
+        if dry_run:
+            out(f"dry run: would {what}")
+            return True
+        try:
+            act()
+            out(f"merger: {what}")
+            return True
+        except UNREADABLE as e:
+            failed += 1
+            out(f"merger: couldn't {what} ({e.__class__.__name__}: {str(e)[:200]})")
+            return False
+
+    def comment(n: int, body: str) -> bool:
+        return write(f"post on #{n}: {body.removesuffix(SIGN)}", lambda: w.post(n, body))
+
+    for d in decisions:
+        if d.verdict.startswith("skip: "):
+            continue
+        try:
+            if d.merges and merging:
+                now_head = actions_review.head_sha(r.pr(d.number))
+                if now_head != d.head:
+                    out(f"merger: #{d.number}'s head moved since the decision "
+                        f"({d.head[:7]} to {(now_head or '-')[:7]}); not merging")
+                    continue
+                if write(f"merge #{d.number} at {d.head}", lambda: w.merge(d.number, d.head)):
+                    comment(d.number, merged_body(d))
+            elif d.merges:
+                if not posted(r.comments(d.number), WOULD, d.head):
+                    comment(d.number, would_body(d))
+            elif worth_telling(d, r.reviews(d.number), ctx.owner) \
+                    and not posted(r.comments(d.number), LEFT, d.head):
+                comment(d.number, left_body(d))
+        except UNREADABLE as e:
+            failed += 1
+            out(f"merger: #{d.number}: can't read GitHub ({e.__class__.__name__}); left alone")
+    verb = "merged" if merging else "would merge"
+    out(f"merger: mode {mode}{' (dry run)' if dry_run else ''}: "
+        f"{sum(d.merges for d in decisions)} PR(s) {verb}" + (f", {failed} failure(s)" if failed else ""))
+    return 1 if failed else 0
 
 
 def main(argv: list[str] | None = None, env: dict | None = None) -> int:
@@ -365,14 +565,19 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> int:
     ap = argparse.ArgumentParser(prog="merger.py", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("plan", help="print merge or miss for each open PR; writes nothing")
-    p.add_argument("--pr", type=int, help="consider only this PR")
-    p.add_argument("--manifest", help="swarm.toml to read [merger] from (default: the repo's)")
-    p.add_argument("--repo", help="owner/name (default: $GITHUB_REPOSITORY, else origin)")
+    q = sub.add_parser("run", help="plan, then comment or merge per [merger] mode (GOV-0027)")
+    q.add_argument("--dry-run", action="store_true", help="print what it would post or merge")
+    for x in (p, q):
+        x.add_argument("--pr", type=int, help="consider only this PR")
+        x.add_argument("--manifest", help="swarm.toml to read [merger] from (default: the repo's)")
+        x.add_argument("--repo", help="owner/name (default: $GITHUB_REPOSITORY, else origin)")
     args = ap.parse_args(argv)
     repo = args.repo or env.get("GITHUB_REPOSITORY") or swarm.dashboard().default_repo()
     if not repo:
         print("merger: can't tell the repo; pass --repo owner/name")
         return 1
+    if args.cmd == "run":
+        return run(repo, args.dry_run, args.pr, args.manifest)
     return plan(repo, args.pr, args.manifest)
 
 
