@@ -662,6 +662,17 @@ class LaunchTest(Base):
         called = swarm.opener("docs", 49, None, "the builder", "see issue #12 and Issue 13")
         self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(called), ["49"])
         self.assertIn("see #12 and #13", called)
+        self.assertEqual(h.ISSUE_IN_PROMPT_RE.findall(swarm.opener("planner", 600,
+                                                                   daily="the daily report")), ["600"])
+
+    def test_daily_opener_names_the_report_and_the_report_issue(self):
+        o = swarm.opener("planner", 600, daily="the daily report")
+        self.assertEqual(o, "You are the planner for productswarm. Read CLAUDE.md, PRODUCT.md and "
+                            "roles/planner.md, then write the daily report on issue #600, as "
+                            "roles/planner.md says. swarm watch started this run from its [daily] "
+                            "trigger (GOV-0029); post on #600 and stop.")
+        self.assertIn("write the daily report and the Monday check-in on issue #600",
+                      swarm.opener("planner", 600, daily="the daily report and the Monday check-in"))
 
     def test_call_in_opener_says_who_why_and_one_comment(self):
         o = swarm.opener("docs", 49, None, "the planner (productswarm-planner[bot])", "wording check")

@@ -63,9 +63,9 @@ class HookCase(unittest.TestCase):
         (self.home / "launcher").mkdir()
         self.gh = FakeGitHub()
 
-    def run_as(self, role, issue_n=None, pr=None, by="watch", called_by=None):
+    def run_as(self, role, issue_n=None, pr=None, by="watch", called_by=None, daily=None):
         e = swarm.Started(name=f"{role}-x", role=role, model="m", session_id=SID, started=T0,
-                          issue=issue_n, pr=pr, by=by, called_by=called_by)
+                          issue=issue_n, pr=pr, by=by, called_by=called_by, daily=daily)
         (self.home / "launcher" / "sessions.json").write_text(json.dumps([e.__dict__]))
 
     def decide(self, active=False):
@@ -368,6 +368,20 @@ class CallInTest(HookCase):
     def test_the_same_builder_not_called_in_still_blocks(self):
         self.builder_on()
         self.assertBlocks("No PR closes #7")
+
+
+class DailyTest(HookCase):
+    def test_a_daily_run_may_always_stop(self):
+        # #588: the planner posts the report (and on Mondays the check-in); no PR, no condition.
+        for what in ("the daily report", "the daily report and the Monday check-in"):
+            with self.subTest(what=what):
+                self.run_as("planner", 600, daily=what)
+                self.assertAllows()
+                self.assertEqual(self.gh.calls, [])
+
+    def test_the_entry_keeps_daily_across_a_save(self):
+        self.run_as("planner", 600, daily="the daily report")
+        self.assertEqual(stophook.entry_for(self.home, SID).daily, "the daily report")
 
 
 class GuardTest(HookCase):

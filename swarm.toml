@@ -37,6 +37,17 @@
 #                     oldest first; the rest wait for the next sweep. Left out, plan lists
 #                     nothing. 2 (today's max_live) is the builder's suggested value: the
 #                     owner sets it. Changing it is a `spend` decision.
+#
+#   daily             optional, true or false, default false (#588, GOV-0029). When true,
+#                     swarm watch starts the planner on report_issue once each working day
+#                     (Mon-Fri, local time) at or after daily_at, to write the daily report,
+#                     and on Mondays the check-in too. Needs both settings below. Turning it
+#                     on is a `spend` decision for the owner.
+#   daily_at          local time it is due, "HH:MM" (24-hour), e.g. "08:30"
+#   report_issue      the pinned report issue's number
+# daily = true
+# daily_at = "08:30"
+# report_issue = <the pinned report issue>
 [watch]
 interval_minutes = 5
 max_live = 2

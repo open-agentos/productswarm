@@ -103,7 +103,8 @@ STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
 
 def opener(role: str, issue: int | None = None, pr: int | None = None,
-           called_by: str | None = None, call_why: str | None = None) -> str:
+           called_by: str | None = None, call_why: str | None = None,
+           daily: str | None = None) -> str:
     """The prompt ops/swarm-session uses when given no args (it passes args on unchanged).
 
     With an issue, it names it: the heartbeat's `working_on` detection matches
@@ -111,8 +112,13 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     With a PR too, the session responds to requested changes on it (GOV-0011). With only a
     PR, it reviews that PR once (a reviewer run in Actions, #215). With called_by, the
     role was called in to the issue (GOV-0023, #520): the prompt says by whom and why, and
-    that it posts one comment."""
-    if issue and called_by:
+    that it posts one comment. With daily, a [daily] run (GOV-0029, #588): the planner posts
+    `daily` ("the daily report", or on Mondays "the daily report and the Monday check-in")
+    on the report issue."""
+    if issue and daily:
+        then = (f"write {daily} on issue #{issue}, as roles/{role}.md says. swarm watch started "
+                f"this run from its [daily] trigger (GOV-0029); post on #{issue} and stop")
+    elif issue and called_by:
         # "issue #M" in the why would give the heartbeat two issues and so none: say "#M".
         safe = ISSUE_WORD_RE.sub(r"#\1", call_why) if call_why else ""
         why = f" because: {safe}" if safe else ""
@@ -197,13 +203,15 @@ class Started:
     max_turns: int | None = None      # by="watch": --max-turns, [watch] max_turns (GOV-0012)
     called_by: str | None = None      # a call-in run (GOV-0023, #520): who called it in
     call_why: str | None = None       # and why, from the `Call in:` line
+    daily: str | None = None          # a [daily] run (GOV-0029, #588): what it writes
 
     @classmethod
     def from_dict(cls, d: dict) -> "Started":
         return cls(**{k: d[k] for k in ("name", "role", "model", "session_id", "started")},
                    issue=d.get("issue"), by=d.get("by"), pr=d.get("pr"),
                    budget_usd=d.get("budget_usd"), max_turns=d.get("max_turns"),
-                   called_by=d.get("called_by"), call_why=d.get("call_why"))
+                   called_by=d.get("called_by"), call_why=d.get("call_why"),
+                   daily=d.get("daily"))
 
 
 def recovered(sid: str, cmd: str, started: float) -> Started:
@@ -467,7 +475,7 @@ class Launcher:
         wt = self.worktree(s.session_id)
         session = ["exec", shlex.quote(str(wt / "ops" / "swarm-session")), shlex.quote(s.role),
                    "--model", shlex.quote(s.model), "--session-id", s.session_id]
-        prompt = shlex.quote(opener(s.role, s.issue, s.pr, s.called_by, s.call_why))
+        prompt = shlex.quote(opener(s.role, s.issue, s.pr, s.called_by, s.call_why, s.daily))
         if s.by == "watch":
             result = shlex.quote(str(self.result_file(s.session_id)))
             note = shlex.quote(f"swarm: headless run (claude -p); it ends when done or at its budget, "
@@ -696,14 +704,25 @@ def inbox(launcher: Launcher, repo: str, idle_minutes: int,
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     items = g.needs_you(heartbeat(repo, idle_minutes, now))
     import watch
+    try:
+        limits = manifest.load_watch(manifest_path)
+    except manifest.ManifestError:
+        limits = None
+    try:
+        acted = watch.load_state(launcher)["acted"]
+    except RuntimeError:
+        acted = {}
+    daily = watch.daily_text(limits, acted, now)
     launcher.out(inbox_text(items, now, g, watch.waiting(launcher), watch.runs(launcher),
-                            review_in_actions(manifest_path)))
+                            review_in_actions(manifest_path), daily))
     return 0
 
 
 def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None,
-               runs: list[dict] | None = None, review_in_actions: bool = False) -> str:
+               runs: list[dict] | None = None, review_in_actions: bool = False,
+               daily: str | None = None) -> str:
     """The needs-you list, then a line if swarm watch leaves [review] to Actions (#216),
+    then when [daily] is next due if it is on (watch.daily_text(), #588),
     then runs `swarm watch` started that ended at cap (#149) or never started (#550), then any triggers it is
     holding or skipping (#90), then each recorded run's cost (#149).
 
@@ -719,6 +738,8 @@ def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None
         out.append(g.NEEDS_EMPTY)
     if review_in_actions:
         out.append(f"\n{REVIEW_IN_ACTIONS}")
+    if daily:
+        out.append(f"\n{daily}")
     if capped:
         out.append("\nswarm watch runs that ended at cap (restart one if its work should go on):")
         out += capped

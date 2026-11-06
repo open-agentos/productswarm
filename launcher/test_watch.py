@@ -533,7 +533,8 @@ def jurisdictions_marking(d: Path, domain: str) -> Path:
 
 def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = True,
                    max_turns: int | None = 50, review_in_actions: bool | None = None,
-                   stale_minutes: int | None = None, call_ins: bool | None = None) -> Path:
+                   stale_minutes: int | None = None, call_ins: bool | None = None,
+                   extra: str = "") -> Path:
     """A swarm.toml with every role, the given caps, and a [watch] table."""
     text = ""
     if watch_table:
@@ -545,7 +546,7 @@ def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = 
             text += f"stale_minutes = {stale_minutes}\n"
         if call_ins is not None:
             text += f"call_ins = {str(call_ins).lower()}\n"
-        text += "\n"
+        text += extra + "\n"
     for role in sorted(ROLES):
         text += f'[[session]]\nrole = "{role}"\ncount = 1\nmodel = "m-{role}"\n'
         if role in caps:
@@ -1058,7 +1059,8 @@ class ManifestWatchTest(unittest.TestCase):
             manifest.parse_all(text)
         self.assertEqual(c.exception.problems, [
             "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live, max_turns, "
-            "review_in_actions, actions_max_reviews, stale_minutes, call_ins)",
+            "review_in_actions, actions_max_reviews, stale_minutes, call_ins, daily, daily_at, "
+            "report_issue)",
             "watch: interval_minutes must be a positive number, got 0",
             "watch: max_live must be a whole number of at least 1, got 1.5"])
         with self.assertRaises(manifest.ManifestError) as c:
@@ -2166,6 +2168,170 @@ class CallInTest(unittest.TestCase):
         self.assertEqual(apps[BUILDER_APP], "builder")
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(watch.swarm_apps(Path(d) / "nope.yml")[0], {})
+
+
+DAILY_ON = 'daily = true\ndaily_at = "08:30"\nreport_issue = 600\n'
+TUE = dt.datetime(2026, 11, 3, 12, 0, tzinfo=dt.timezone.utc)    # NOW: a Tuesday
+UTC = dt.timezone.utc
+
+
+class DailyTest(unittest.TestCase):
+    """GOV-0029's [daily] trigger (#588): the planner on report issue #600, once each
+    working day at or after daily_at. The Watch's time zone is UTC here."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        (self.home / "launcher").mkdir()
+        self.fake = Fake(self.home / "launcher")
+        self.lines = []
+        self.l = swarm.Launcher(self.home, run=self.fake.run, proc=self.fake.proc, kill=self.fake.kill,
+                                clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append,
+                                root=self.home / "repo", git=FakeGit(), claude_dir=self.home / "claude")
+        self.scene = Scene()
+        self.scene.issues.append(issue(600, title="Daily report"))   # no label: it needs none
+        self.manifest(DAILY_ON)
+
+    def manifest(self, extra=""):
+        self.path = write_manifest(self.home, ALL_CAPPED, 10, extra=extra)
+
+    def watcher(self, dry_run=False, tz=UTC):
+        return watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=dry_run, manifest_path=self.path,
+                           read=self.scene.read, get_issue=self.scene.get_issue,
+                           get_heartbeat=self.scene.heartbeat, get_reader=self.scene.get_reader,
+                           tz=tz)
+
+    def tick(self, now, dry_run=False, tz=UTC):
+        return [t for t in self.watcher(dry_run, tz).tick(now) if t.kind == "daily"]
+
+    def dailies(self):
+        return [(e.name, e.role, e.issue, e.daily) for e in self.l.load() if e.daily]
+
+    def at(self, day, hh, mm=0):
+        return dt.datetime(2026, 11, day, hh, mm, tzinfo=UTC)
+
+    def test_fires_once_on_a_weekday_after_daily_at(self):
+        self.assertEqual([t.key for t in self.tick(TUE)], ["daily:600:2026-11-03"])
+        self.assertEqual(self.dailies(), [("planner-issue-600", "planner", 600, "the daily report")])
+        cmd = [c for c in self.fake.commands if "roles/planner.md" in c][-1]
+        self.assertIn("write the daily report on issue #600, as roles/planner.md says", cmd)
+        self.assertNotIn("check-in", cmd)
+        argv = headless_argv(cmd)          # GOV-0012's budget and turns, GOV-0013's denies
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "50")
+        self.assertIn("Bash(gh pr merge *)", argv)
+        self.assertIn("[daily] #600 Tue 2026-11-03, due at 08:30 -> starting planner-issue-600",
+                      self.lines)
+        StartTest.exit(self, "planner-issue-600")
+        n = len(self.fake.commands)
+        self.assertEqual(self.tick(self.at(3, 18)), [])           # not twice in a day
+        self.assertEqual(len(self.fake.commands), n)
+        self.assertEqual([t.key for t in self.tick(self.at(4, 9))], ["daily:600:2026-11-04"])
+
+    def test_not_before_daily_at(self):
+        self.assertEqual(self.tick(self.at(3, 8, 29)), [])
+        self.assertEqual(self.dailies(), [])
+        self.assertEqual([t.key for t in self.tick(self.at(3, 8, 30))], ["daily:600:2026-11-03"])
+
+    def test_a_missed_poll_fires_late_the_same_day(self):
+        self.assertEqual([t.key for t in self.tick(self.at(3, 23, 55))], ["daily:600:2026-11-03"])
+
+    def test_not_on_a_weekend(self):
+        for day in (7, 8):                                       # Saturday, Sunday
+            self.assertEqual(self.tick(self.at(day, 12)), [])
+        self.assertEqual(self.dailies(), [])
+
+    def test_mondays_prompt_names_the_check_in(self):
+        self.tick(self.at(9, 9))
+        self.assertEqual(self.dailies(), [("planner-issue-600", "planner", 600,
+                                           "the daily report and the Monday check-in")])
+        cmd = [c for c in self.fake.commands if "roles/planner.md" in c][-1]
+        self.assertIn("write the daily report and the Monday check-in on issue #600", cmd)
+
+    def test_off_by_default(self):
+        self.manifest()
+        self.assertEqual(self.tick(TUE), [])
+        self.assertEqual(self.tick(TUE, dry_run=True), [])
+        self.assertFalse(any(x.startswith("[daily]") for x in self.lines))
+        self.manifest('daily = false\ndaily_at = "08:30"\nreport_issue = 600\n')
+        self.assertEqual(self.tick(TUE), [])
+
+    def test_missing_report_issue_starts_nothing(self):
+        self.manifest('daily = true\ndaily_at = "08:30"\n')
+        with self.assertRaises(RuntimeError) as c:
+            self.watcher().tick(TUE)
+        self.assertIn("daily = true needs 'report_issue'", str(c.exception))
+        self.assertEqual(self.l.load(), [])
+
+    def test_uses_the_local_time_zone(self):
+        la = watch.zoneinfo.ZoneInfo("America/Los_Angeles")      # 12:00 UTC is 04:00 there
+        self.assertEqual(self.tick(TUE, tz=la), [])
+        self.assertEqual([t.key for t in self.tick(self.at(3, 17), tz=la)], ["daily:600:2026-11-03"])
+        # Saturday 03:00 UTC is still Friday evening there: a working day.
+        self.assertEqual(watch.daily_trigger(self.at(7, 3), dt.time(8, 30), 600, la).key,
+                         "daily:600:2026-11-06")
+
+    def test_a_live_planner_on_the_report_issue_holds_it_and_a_missed_day_is_logged(self):
+        t_issue, t_comments = tracking(201, "planner-sid", "planner", 600)
+        self.scene.tracking.append(t_issue)
+        self.scene.comments[201] = t_comments
+        self.assertEqual(self.tick(TUE), [])
+        (held,) = [x for x in watch.waiting(self.l)[1] if x["kind"] == "daily"]
+        self.assertEqual(held["reason"], "held: planner session planner-sid is live on #600 (active)")
+        self.tick(self.at(4, 8))                                  # next day, before daily_at
+        missed = [x for x in self.lines if "no daily report run that day" in x]
+        self.assertEqual(missed, ["[daily] #600 2026-11-03: no daily report run that day (held: planner "
+                                  "session planner-sid is live on #600 (active)); not caught up (GOV-0029)"])
+        self.assertEqual(watch.waiting(self.l)[1], [x for x in watch.waiting(self.l)[1]
+                                                     if x["kind"] != "daily"])
+        self.tick(self.at(4, 8, 10))
+        self.assertEqual(len([x for x in self.lines if "no daily report run" in x]), 1)   # once
+        self.assertEqual(self.dailies(), [])                      # not caught up
+
+    def test_another_roles_session_on_the_report_issue_doesnt_hold_it(self):
+        t_issue, t_comments = tracking(201, "docs-sid", "docs", 600)
+        self.scene.tracking.append(t_issue)
+        self.scene.comments[201] = t_comments
+        self.assertEqual([t.key for t in self.tick(TUE)], ["daily:600:2026-11-03"])
+
+    def test_a_closed_report_issue_is_refused(self):
+        self.scene.issues[-1]["state"] = "closed"
+        self.tick(TUE)
+        self.assertIn("[daily] #600 Tue 2026-11-03, due at 08:30 -> refused: #600 is closed", self.lines)
+        self.assertEqual(self.dailies(), [])
+
+    def test_runs_stay_inside_gov_0010(self):
+        self.path = write_manifest(self.home, {r: 10 for r in ROLES if r != "planner"}, 10,
+                                   extra=DAILY_ON)
+        self.tick(TUE)
+        (held,) = [x for x in watch.waiting(self.l)[1] if x["kind"] == "daily"]
+        self.assertIn("planner has no spend_cap_usd", held["reason"])
+
+    def test_dry_run_prints_it_with_the_headless_command(self):
+        self.assertEqual([t.key for t in self.tick(TUE, dry_run=True)], ["daily:600:2026-11-03"])
+        i = self.lines.index("[daily] #600 Tue 2026-11-03, due at 08:30 -> would start planner on #600, "
+                             "the daily report")
+        self.assertIn("write the daily report on issue #600", self.lines[i + 1])
+        self.assertEqual(self.l.load(), [])
+
+    def test_next_daily(self):
+        at = dt.time(8, 30)
+        self.assertEqual(watch.next_daily(TUE, at, 600, {}, UTC), "due now")
+        done = {"daily:600:2026-11-03": "started planner-issue-600"}
+        self.assertEqual(watch.next_daily(TUE, at, 600, done, UTC), "next due Wed 2026-11-04 at 08:30")
+        self.assertEqual(watch.next_daily(self.at(3, 7), at, 600, {}, UTC),
+                         "next due Tue 2026-11-03 at 08:30")
+        self.assertEqual(watch.next_daily(self.at(6, 9), at, 600, {"daily:600:2026-11-06": "x"}, UTC),
+                         "next due Mon 2026-11-09 at 08:30")
+        self.assertEqual(watch.next_daily(self.at(7, 7), at, 600, {}, UTC),
+                         "next due Mon 2026-11-09 at 08:30")
+
+    def test_inbox_says_when_it_is_next_due(self):
+        limits = swarm.manifest.load_watch(self.path)
+        line = watch.daily_text(limits, {}, TUE, UTC)
+        self.assertEqual(line, "swarm watch's [daily]: the planner writes the daily report on #600 each "
+                               "working day at 08:30 local time (GOV-0029); due now")
+        self.assertIn(line, swarm.inbox_text([], NOW, G, daily=line))
+        self.manifest()
+        self.assertIsNone(watch.daily_text(swarm.manifest.load_watch(self.path), {}, TUE, UTC))
 
 
 class RetryTest(unittest.TestCase):
