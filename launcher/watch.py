@@ -88,6 +88,11 @@ The hold is listed in `swarm inbox` with what it waits on, logged once per reaso
 starts held-longest-first once the overlap clears. An issue whose title cites no GOV id
 is never held this way, and [respond], [review], [record] and [answer] never are.
 
+A [build] is also held while an issue its body's `**Waits on:**` line names is still open
+(#490): the #N refs on that line; "nothing" or no line means none. The hold is listed in
+`swarm inbox` as `held: waits on #N`, shown by --dry-run too, and never goes into "acted",
+so the build starts on the first check after every listed issue is closed.
+
 Before each start it runs `swarm launch`'s refusal checks again on fresh GitHub data. A
 refusal is logged and the trigger is done. What it has acted on is kept in
 ~/.productswarm/launcher/watch.json, so a restart starts nothing twice. One reviewer
@@ -152,6 +157,7 @@ STATE_FILE = "watch.json"     # in the launcher's state directory
 LOCK_FILE = "watch.lock"      # held by the one running watcher (#273)
 REF_RE = re.compile(r"#(\d+)")
 GOV_RE = re.compile(r"\bGOV-\d{4}\b")
+WAITS_RE = re.compile(r"^\s*\*\*Waits on:\*\*(.*)$", re.MULTILINE | re.IGNORECASE)
 LEFT_TO_ACTIONS = ("left to Actions: review_in_actions = true in swarm.toml, so the GitHub "
                    "Actions reviewer reviews this head (GOV-0019)")
 DEFAULT_STALE = 60            # [watch] stale_minutes when swarm.toml doesn't set it (#488)
@@ -180,7 +186,8 @@ class Trigger:
     issue: int | None = None  # the issue the session works on (none for a reviewer pass)
     pr: int | None = None     # [respond]: the PR the builder responds on
     after: str | None = None  # [answer]: the [record] key that must be acted on first (#495)
-    held: str | None = None   # why a live session on the issue holds it (#488)
+    held: str | None = None   # why it is held: a live session on the issue (#488), or [build]'s
+                              # open Waits-on issues (#490); a held trigger starts nothing
     once: str | None = None   # what changes the held reason enough to log it again (#488)
 
     def line(self) -> str:
@@ -394,10 +401,33 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
             continue
         ready = owner_label(w.events.get(n, []), "ready", owner)
         if ready:
-            out.append(hold(Trigger(key=f"build:{n}:{ready.get('id')}", kind="build", ref=f"#{n}",
-                                    why="ready by the owner", role="builder",
-                                    command=launch_cmd("builder", n), issue=n), n))
+            t = hold(Trigger(key=f"build:{n}:{ready.get('id')}", kind="build", ref=f"#{n}",
+                             why="ready by the owner", role="builder",
+                             command=launch_cmd("builder", n), issue=n), n)
+            waits = None if t.held else blocked(it.get("body"), w)
+            out.append(replace(t, held=waits, once=waits) if waits else t)
     return out
+
+
+def waits_on(body: str | None) -> list[int]:
+    """The issues a task issue waits on: the #N refs in the first sentence of its body's
+    first `**Waits on:**` line (#490). No line, a line that starts "nothing", or no #N means
+    none. Prose after the first sentence ("nothing. Do this before #480 ...") doesn't count."""
+    m = WAITS_RE.search(body or "")
+    value = m.group(1).strip() if m else ""
+    if not value or value.lower().startswith("nothing"):
+        return []
+    first = re.split(r"\.(?:\s|$)", value, maxsplit=1)[0]
+    return sorted({int(x) for x in REF_RE.findall(first)})
+
+
+def blocked(body: str | None, w: World) -> str | None:
+    """Why a [build] is held because an issue its `**Waits on:**` line names is still open
+    (#490), or None. Open means an open issue in this tick's reading; anything else counts
+    as closed."""
+    open_ = {i["number"] for i in w.issues if i.get("state") == "open" and "pull_request" not in i}
+    still = [n for n in waits_on(body) if n in open_]
+    return f"held: waits on {', '.join(f'#{n}' for n in still)}" if still else None
 
 
 def respond(p: dict, busy: Callable[[int], tuple[str, str] | None]) -> Trigger | None:
@@ -796,8 +826,8 @@ class Watch:
 
     def dry_tick(self, now: dt.datetime) -> list[Trigger]:
         """Print and return the triggers not seen before. Starts nothing, writes nothing.
-        A held trigger (#488) is printed once per holder state and not returned; it prints
-        as a trigger once its holder has stopped."""
+        A held trigger (#488, #490) is printed once per reason and not returned; it prints
+        as a trigger once its holder has stopped or its Waits-on issues have closed."""
         g = swarm.dashboard()
         w = self.read(self.repo, self.idle_minutes, now)
         limits = self.limits()
@@ -904,8 +934,9 @@ class Watch:
                     out(t.line())
                 continue
             if t.held:
-                # #488: a live session is on the issue. Listed in `swarm inbox` with who holds
-                # it; it starts once that session stops. The loop never stops it (GOV-0008).
+                # #488: a live session is on the issue, or #490: a [build]'s Waits-on issues are
+                # still open. Listed in `swarm inbox` with why, never recorded in `acted`; it
+                # starts once that clears. The loop never stops a session (GOV-0008).
                 hold(t, t.held, t.once)
                 continue
             if t.kind == "answer" and t.skipped:
@@ -928,6 +959,10 @@ class Watch:
                 continue
             if t.issue is not None and swarm.holders(t.issue, w.model, live):
                 continue      # a session started this check is on it; it fires again once that stops
+            if t.held:
+                # #490: not acted on, so it starts on the first check after its blockers close.
+                hold(t, t.held)
+                continue
             s = by_role.get(t.role)
             mine = sum(e.by == "watch" for e in live)
             if s is None:

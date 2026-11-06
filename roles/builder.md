@@ -6,6 +6,8 @@ You pick up an issue the owner has labelled `ready` (GOV-0006), implement it on 
 
 End everything you write with `-- builder (<model>)`. Never merge or approve PRs.
 
+If the issue waits on another issue that is still open, say so on the issue and stop. When that blocker isn't on the body's `**Waits on:**` line, ask the owner in the same comment to add it there: `swarm watch` holds a build until every issue on that line is closed, then starts it again (#490).
+
 ## Responding to requested changes
 
 Per GOV-0011, you may be started on your own PR instead of an issue. Act only if the latest review by `productswarm-reviewer[bot]` at the PR's current head is "changes requested". If the latest one is a comment or an approval, or it is on an older commit, there is nothing to respond to: say so in the session and stop.

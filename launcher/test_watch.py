@@ -1412,6 +1412,87 @@ def hhmm(t: dt.datetime) -> str:
     return t.astimezone().strftime("%H:%M")
 
 
+class WaitsOnTest(unittest.TestCase):
+    """#490: a [build] waits until the issues its body's `**Waits on:**` line names are closed."""
+
+    setUp_start = StartTest.setUp
+    manifest, watcher, started, exit, inbox = (StartTest.manifest, StartTest.watcher, StartTest.started,
+                                               StartTest.exit, StartTest.inbox)
+
+    def setUp(self):
+        self.setUp_start()
+        sc = self.scene
+        sc.issues = [issue(49, ["ready"], body="**Files:** `x.py`\n**Waits on:** #456.\n"),
+                     issue(456, title="the blocker")]
+        sc.events = {49: [ev("ready", eid=11)]}
+        sc.prs, sc.reviewed, sc.tracking, sc.comments = [], {}, [], {}
+
+    def close(self, n):
+        self.scene.issues = [i for i in self.scene.issues if i["number"] != n]
+
+    def test_waits_on_reads_the_line(self):
+        for body, want in [
+            ("", []),
+            (None, []),
+            ("**Files:** `a.py`\n", []),                               # no line
+            ("**Waits on:** nothing.\n", []),
+            ("**Waits on:** Nothing\n", []),
+            ("**Waits on:** #456.\n", [456]),
+            ("x\n**Waits on:** #457 (the record) and #456, #457\n", [456, 457]),
+            ("We hit #12 earlier.\n**Waits on:** nothing.\n", []),    # refs elsewhere don't count
+            ("**waits on:** #3\n", [3]),
+            # #487's line: prose after "nothing" or after the first sentence isn't a blocker.
+            ("**Waits on:** nothing. Do this before #480's stage 1 makes tests required.\n", []),
+            ("**Waits on:** #456. Then #480 can go.\n", [456]),
+            ("Blockers are named (`**Waits on:** #456`) in prose.\n", []),   # not at line start
+        ]:
+            self.assertEqual(watch.waits_on(body), want, body)
+
+    def test_blocked_names_only_the_open_ones(self):
+        w = watch.World(model={}, issues=[issue(456), issue(458)])
+        self.assertIsNone(watch.blocked("**Waits on:** nothing.", w))
+        self.assertIsNone(watch.blocked("no line here", w))
+        self.assertIsNone(watch.blocked("**Waits on:** #457", w))            # closed
+        self.assertEqual(watch.blocked("**Waits on:** #456", w), "held: waits on #456")
+        self.assertEqual(watch.blocked("**Waits on:** #458, #457, #456", w),
+                         "held: waits on #456, #458")                         # a mix
+
+    def test_dry_run_holds_then_fires_on_the_tick_after_the_blocker_closes(self):
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=self.path)
+        self.assertEqual(w.tick(NOW), [])                    # printed, not returned (#488)
+        self.assertEqual(self.lines, ["[build] #49 ready by the owner -> held: waits on #456"])
+        self.assertEqual(w.tick(NOW), [])                    # logged once while held
+        self.assertEqual(len(self.lines), 1)
+        self.close(456)
+        (t,) = w.tick(NOW)
+        self.assertIsNone(t.held)
+        self.assertEqual(self.lines[1],
+                         "[build] #49 ready by the owner -> would start `launcher/swarm launch builder --issue 49`")
+        self.assertEqual(len(self.lines), 3)                 # with its headless command
+
+    def test_holds_without_acting_then_starts_once_every_blocker_is_closed(self):
+        self.scene.issues[0]["body"] = "**Waits on:** #456, #457\n"
+        self.scene.issues.append(issue(457))
+        w = self.watcher()
+        self.assertEqual(w.tick(NOW), [])
+        self.assertEqual(self.started(), [])
+        self.assertEqual(watch.load_state(self.l)["acted"], {})
+        self.assertIn("- [build] #49 ready by the owner · held: waits on #456, #457", self.inbox())
+        self.close(457)
+        self.assertEqual(w.tick(NOW), [])                    # #456 is still open
+        self.assertIn("- [build] #49 ready by the owner · held: waits on #456", self.inbox())
+        self.close(456)
+        self.assertEqual([t.ref for t in w.tick(NOW)], ["#49"])
+        self.assertEqual([s[0] for s in self.started()], ["builder-issue-49"])
+        self.assertEqual(self.inbox(), "Nothing is waiting on you.")
+
+    def test_no_line_or_nothing_starts_as_usual(self):
+        for body in ("", "**Waits on:** nothing.\n"):
+            self.setUp()
+            self.scene.issues[0]["body"] = body
+            self.assertEqual([t.ref for t in self.watcher().tick(NOW)], ["#49"])
+
+
 class ReadResultTest(unittest.TestCase):
     """watch.read_result() on canned result files, one per way a run can end."""
 

@@ -13,6 +13,7 @@ End everything you write with `-- planner (<model>)`. Never merge or approve PRs
 **A ruling.** `[answer]` starts you again when the owner adds `gov:ruled` to a question that is already `ready` (#495). If docs also has a record to write, it runs first, and you start once it has stopped. Turn the ruling into work:
 
 1. Open one unlabelled issue for each stage that can start now. Each one closes as a single PR, names its files and says what it waits on, and cites the question.
+   End the body with two lines `swarm watch` reads: `**Files:** ` and the files, then `**Waits on:** ` and the blocking issues as `#N` refs (e.g. `**Waits on:** #456, #457.`), or `**Waits on:** nothing.` A `[build]` is held while any issue on that line is open (#490), so put only blocking issues on it, and no other `#N`.
 2. Comment on the question: list the issues you opened, and say which stages wait and on what (a merged record, an earlier stage, an owner choice).
 3. Don't open issues for stages that can't start yet; the comment records them. Adding or cutting scope beyond the ruling is a governance question.
 
