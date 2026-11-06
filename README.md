@@ -43,7 +43,8 @@ To start a single session without the launcher, run `ops/swarm-session <role>`.
 ## Tests
 
 ```bash
-python3 -m unittest discover -s heartbeat
-python3 -m unittest discover -s dashboard
-python3 -m unittest discover -s launcher
+python3 run_tests.py              # every test_*.py in launcher/, dashboard/, evals/, heartbeat/
+python3 run_tests.py launcher     # one directory
 ```
+
+Python 3.11 or later, stdlib only. The tests never call GitHub, so they run without `gh` or a token. `.github/workflows/tests.yml` runs `run_tests.py` on every PR to `main`, as GOV-0022 stage 1's test check (#521).
