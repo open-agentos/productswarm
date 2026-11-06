@@ -23,8 +23,9 @@ it has none (for example, the role has no spend_cap_usd).
 |        | at its head is CHANGES_REQUESTED, with Authority not `fail`, for at     | (GOV-0011)           |
 |        | most 2 rounds                                                           |                      |
 | call-in| a `Call in: <role>, <role>: <why>` line in a comment on an issue whose  | each named role on   |
-|        | most recent `ready` was added by the owner, posted since that label, by | the issue, once per  |
-|        | a swarm App or the owner (GOV-0023, #520)                               | call                 |
+|        | most recent `ready` was added by the owner, posted since that label, or | the issue, once per  |
+|        | on an issue under an open PLAN.md milestone, posted since the issue was | call                 |
+|        | opened (GOV-0029, #594), by a swarm App or the owner (GOV-0023, #520)   |                      |
 | daily  | a working day (Mon-Fri, local time) at or after [watch] daily_at, once  | planner on the       |
 |        | per day, with daily = true (GOV-0029, #588)                             | report issue         |
 | ask    | the owner's `Ask: <role>: <question>` comment on [watch] report_issue,  | that role on the     |
@@ -87,6 +88,17 @@ GOV-0013); its prompt names the caller and the why, says the call asks it in (§
 it posts one comment, and stophook.py lets it stop whenever it likes. `call_ins = true` in
 [watch] turns call-ins on; while it is off (the default) each call is listed as off and
 never recorded, so turning it on starts the calls still on `ready` issues.
+
+[call-in] on a milestone issue (#594, GOV-0029): calls also count on an open, non-question,
+non-tracking issue without the owner's `ready` that is under an open PLAN.md milestone:
+milestone_refusal() passes with its `**Waits on:**` issues and the owner's comments left
+out, since a blocked issue still sits under its milestone and the owner's own `Call in:`
+mustn't veto itself; a `hold` label still stops it. GitHub's REST API doesn't say when a
+body gained its `**Milestone:**` line, so calls count from the issue's creation. An issue
+that is both `ready` and under a milestone is read once, from the earlier of the two
+(its creation), so each call starts each role once and MAX_CALLS counts across both. The
+same `call_ins` switch covers both. Before the start, refusal() checks `ready` or else the
+milestone again on fresh data.
 
 [respond] counts the reviewer's CHANGES_REQUESTED reviews on the PR from GitHub's review
 history, so the count holds across restarts. A third request starts nothing, and an
@@ -580,16 +592,22 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         waits = None if t.held else blocked(it.get("body"), w)
         out.append(replace(t, held=waits, once=waits) if waits else t)
 
-    # Call-ins (#520, GOV-0023): `Call in:` lines on ready issues, questions included.
+    # Call-ins (#520, GOV-0023): `Call in:` lines on ready issues, questions included, and
+    # on issues under an open PLAN.md milestone (#594, GOV-0029), each issue read once.
     for it in sorted(w.issues, key=lambda i: i["number"]):
         n = it["number"]
         labels = {lb.get("name") for lb in it.get("labels") or []}
-        if it.get("state") != "open" or "pull_request" in it or "ready" not in labels or is_tracking(it):
+        if it.get("state") != "open" or "pull_request" in it or is_tracking(it):
             continue
-        ready = owner_label(w.events.get(n, []), "ready", owner)
-        if not ready:
+        ready = owner_label(w.events.get(n, []), "ready", owner) if "ready" in labels else None
+        since = None
+        if call_milestone(it, owner, agents, lambda: w.plan) is None:
+            since = it.get("created_at") or ""     # when its milestone line came isn't readable
+        elif ready:
+            since = ready.get("created_at") or ""
+        if since is None:
             continue
-        for t in calls(n, w.comments.get(n, []), ready, owner, apps or {}, roles):
+        for t in calls(n, w.comments.get(n, []), since, owner, apps or {}, roles):
             if t.skipped:
                 out.append(t)
             elif not call_ins:
@@ -777,12 +795,13 @@ def research(comments: list[dict], issues: dict[int, dict], owner: str,
     return out
 
 
-def calls(n: int, comments: list[dict], ready: dict, owner: str, apps: dict[str, str],
+def calls(n: int, comments: list[dict], since: str, owner: str, apps: dict[str, str],
           roles: set[str]) -> list[Trigger]:
-    """GOV-0023's [call-in] triggers on ready issue n, from its comments (#520): one per
-    named role per call, keyed on the comment id, or a skipped one saying why it doesn't
-    count. ready is the owner's `ready` event: a call posted before it doesn't count."""
-    since, out, per_day = ready.get("created_at") or "", [], {}
+    """GOV-0023's [call-in] triggers on issue n, from its comments (#520): one per named
+    role per call, keyed on the comment id, or a skipped one saying why it doesn't count.
+    since is when calls start to count (ISO; "" for all): the owner's `ready` event, or the
+    issue's creation for one under a milestone (#594)."""
+    out, per_day = [], {}
     for c in sorted(comments, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)):
         parsed = call_line(c.get("body"))
         at = c.get("created_at") or ""
@@ -865,6 +884,21 @@ def milestone_go(it: dict, w: World, owner: str, agents: set[str]) -> int | None
     r = swarm.GoReader(plan=lambda: w.plan, state=lambda _: "closed",
                        comments=lambda: w.comments.get(n, []))
     return None if swarm.milestone_refusal(n, it, owner, agents, r) else m
+
+
+def call_milestone(it: dict, owner: str, agents: set[str],
+                   plan: Callable[[], str | None]) -> str | None:
+    """Why `Call in:` lines on issue `it` don't count by its milestone (#594, GOV-0029), or
+    None if they do: an open, non-question issue that milestone_refusal() passes with its
+    `**Waits on:**` issues and the owner's comments left out. A blocked issue is still under
+    its milestone, and the owner's own `Call in:` comment mustn't veto the call it makes; a
+    `hold` label still does."""
+    n = it["number"]
+    labels = {lb.get("name") for lb in it.get("labels") or []}
+    if "gov:question" in labels:
+        return f"#{n} is a gov:question, which only `ready` opens to call-ins"
+    r = swarm.GoReader(plan=plan, state=lambda _: "closed", comments=lambda: [])
+    return swarm.milestone_refusal(n, it, owner, agents, r)
 
 
 def open_issues(w: World) -> set[int]:
@@ -990,6 +1024,7 @@ def gather(repo: str, idle_minutes: int, now: dt.datetime) -> World:
         if ({"gov:question", "gov:ruled"} <= labels or ("ready" in labels and not g.is_tracking(it))
                 or milestone):
             # the owner's `Record: yes` (#501), and `Call in:` lines on ready issues (#520)
+            # and milestone issues (#594)
             w.comments[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/comments?per_page=100")
     for n, reviews in (data.get("reviews") or {}).items():    # fetch() read them for build()
         w.reviewed[n] = reviewed_heads(reviews)
@@ -1973,6 +2008,12 @@ class Watch:
         else:
             label = "gov:ruled" if t.kind == "record" else "ready"
             refused = swarm.issue_refusals(t.issue, issue, events, self.owner, label)
+            if refused and t.kind == CALL_IN and issue and "pull_request" not in issue \
+                    and issue.get("state") == "open" and swarm.milestone_of(issue.get("body")) is not None:
+                # #594: a call-in counts on an issue under an open milestone, too.
+                why = call_milestone(issue, self.owner, set(self.apps()),
+                                     self.get_reader(self.repo, t.issue).plan)
+                refused = [why, *refused] if why else []
         if refused:
             return refused[0], False
         taken = swarm.holders(t.issue, hb, live, own_role(t))
