@@ -407,5 +407,208 @@ class Plan(unittest.TestCase):
         self.assertIn("every PR is a miss", out[0])
 
 
+T0 = 1_800_000_000.0   # a fixed "now" for the shadow bar
+
+
+def iso(t):
+    return merger.actions_review.utc(t)
+
+
+def would(t, head="c" * 40, who=merger.MERGER, pr=1):
+    return {"user": {"login": who}, "body": f"Would merge (standing grant) at {head}.\n\n-- merger",
+            "created_at": iso(t), "issue_url": f"https://api.github.com/repos/{REPO}/issues/{pr}"}
+
+
+class FakeWriter:
+    def __init__(self, history=()):
+        self.history_items, self.posts, self.merges = list(history), [], []
+        self.fail_merge = False
+
+    def writer(self, w):
+        def post(n, body):
+            self.posts.append((n, body))
+            w.comments.append({"user": {"login": merger.MERGER}, "body": body})
+        def merge(n, sha):
+            if self.fail_merge:
+                raise RuntimeError("409 head moved")
+            self.merges.append((n, sha))
+        return merger.Writer(history=lambda: self.history_items, post=post, merge=merge)
+
+
+class Run(unittest.TestCase):
+    def run_run(self, w, fw, mode="shadow", dry_run=False, reader=None):
+        out = []
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "swarm.toml"
+            p.write_text(f'[merger]\nmode = "{mode}"\nmax_changed_lines = 100\n')
+            code = merger.run(REPO, dry_run=dry_run, manifest_path=p, reader=reader or w.reader(),
+                              writer=fw.writer(w), owner=lambda: OWNER,
+                              authors=lambda: (AGENTS | {"productswarm-planner[bot]"}, None),
+                              list_prs=lambda: [{"number": 70}], clock=lambda: T0,
+                              out=out.append)
+        return code, out
+
+    def test_shadow_posts_once_per_head(self):
+        w, fw = World(), FakeWriter()
+        code, out = self.run_run(w, fw)
+        self.assertEqual(code, 0)
+        self.assertEqual(fw.posts, [(70, f"Would merge (standing grant) at {HEAD}.\n\n-- merger")])
+        self.assertEqual(fw.merges, [])
+        self.run_run(w, fw)                       # the next sweep repeats nothing
+        self.assertEqual(len(fw.posts), 1)
+
+    def test_shadow_posts_again_for_a_new_head(self):
+        w, fw = World(), FakeWriter()
+        self.run_run(w, fw)
+        # A "would merge" at the old head doesn't count for a new one.
+        w.comments = [{"user": {"login": merger.MERGER},
+                       "body": f"Would merge (standing grant) at {OLD}.\n\n-- merger"}]
+        self.run_run(w, fw)
+        self.assertEqual(len(fw.posts), 2)
+
+    def test_someone_elses_would_merge_doesnt_count(self):
+        w, fw = World(), FakeWriter()
+        w.comments = [{"user": {"login": "stranger"},
+                       "body": f"Would merge (standing grant) at {HEAD}.\n\n-- merger"}]
+        self.run_run(w, fw)
+        self.assertEqual(len(fw.posts), 1)
+
+    def test_approved_ask_wording(self):
+        w, fw = World(), FakeWriter()
+        w.protect()
+        self.run_run(w, fw)
+        self.assertEqual(fw.posts, [(70, f"Would merge (approved ask) at {HEAD}.\n\n-- merger")])
+
+    def test_miss_on_an_approved_pr_posts_reason_once(self):
+        w, fw = World(), FakeWriter()
+        w.pr["additions"] = 500
+        self.run_run(w, fw)
+        self.assertEqual(len(fw.posts), 1)
+        n, body = fw.posts[0]
+        self.assertTrue(body.startswith(f"Left for the owner at {HEAD}: 510 changed lines"), body)
+        self.assertTrue(body.endswith("\n\n-- merger"))
+        self.run_run(w, fw)
+        self.assertEqual(len(fw.posts), 1)
+
+    def test_miss_approved_by_owner_posts(self):
+        w, fw = World(), FakeWriter()
+        w.protect(".github/workflows/x.yml")      # excluded: the owner merges it
+        self.run_run(w, fw)
+        self.assertEqual(len(fw.posts), 1)
+        self.assertIn("which the owner merges", fw.posts[0][1])
+
+    def test_miss_without_approval_posts_nothing(self):
+        w, fw = World(), FakeWriter()
+        w.reviews = []
+        code, _ = self.run_run(w, fw)
+        self.assertEqual((code, fw.posts, fw.merges), (0, [], []))
+        w.reviews = [{"user": {"login": merger.REVIEWER}, "state": "APPROVED", "commit_id": OLD}]
+        self.run_run(w, fw)
+        self.assertEqual(fw.posts, [])
+
+    def test_miss_while_tests_run_posts_nothing(self):
+        w, fw = World(), FakeWriter()
+        w.checks[0]["status"] = "in_progress"
+        self.run_run(w, fw)
+        self.assertEqual(fw.posts, [])
+
+    def test_live_held_back_by_shadow_bar(self):
+        w, fw = World(), FakeWriter([would(T0 - 3600 * i, pr=i) for i in range(9)])
+        code, out = self.run_run(w, fw, mode="live")
+        self.assertEqual(code, 0)
+        self.assertEqual(fw.merges, [])
+        self.assertTrue(fw.posts[0][1].startswith("Would merge"))
+        self.assertTrue(any("live acts as shadow" in line and "9 of 10" in line for line in out), out)
+
+    def test_live_merges_after_ten(self):
+        w, fw = World(), FakeWriter([would(T0 - 60 * i, pr=i) for i in range(10)])
+        code, out = self.run_run(w, fw, mode="live")
+        self.assertEqual(code, 0)
+        self.assertEqual(fw.merges, [(70, HEAD)])
+        self.assertEqual(fw.posts, [(70, f"Merged under standing grant (GOV-0027) at {HEAD}.\n\n-- merger")])
+
+    def test_live_merges_a_day_after_the_first(self):
+        w, fw = World(), FakeWriter([would(T0 - merger.SHADOW_SECONDS)])
+        self.run_run(w, fw, mode="live")
+        self.assertEqual(fw.merges, [(70, HEAD)])
+        w, fw = World(), FakeWriter([would(T0 - merger.SHADOW_SECONDS + 60)])
+        self.run_run(w, fw, mode="live")
+        self.assertEqual(fw.merges, [])
+
+    def test_shadow_bar_counts_only_the_merger(self):
+        w, fw = World(), FakeWriter([would(T0 - 60 * i, who="stranger", pr=i) for i in range(10)])
+        self.run_run(w, fw, mode="live")
+        self.assertEqual(fw.merges, [])
+
+    def test_shadow_bar_counts_prs_not_heads(self):
+        # GOV-0027's bar is 10 PRs: ten heads of one PR, or of nine, don't meet it.
+        for history in ([would(T0 - 60 * i, head=f"{i:040x}") for i in range(10)],
+                        [would(T0 - 60 * i, head=f"{i:040x}", pr=i % 9) for i in range(20)]):
+            w, fw = World(), FakeWriter(history)
+            code, out = self.run_run(w, fw, mode="live")
+            self.assertEqual(fw.merges, [])
+            self.assertTrue(any("live acts as shadow" in line for line in out), out)
+
+    def test_shadow_bar_ignores_comments_naming_no_pr(self):
+        history = [dict(would(T0 - 60 * i, pr=i), issue_url=None) for i in range(10)]
+        w, fw = World(), FakeWriter(history)
+        self.run_run(w, fw, mode="live")
+        self.assertEqual(fw.merges, [])
+
+    def test_shadow_bar_unreadable_holds_live_back(self):
+        w, fw = World(), FakeWriter()
+        writer = fw.writer(w)
+        def boom():
+            raise RuntimeError("gh failed")
+        fw.writer = lambda w: merger.Writer(history=boom, post=writer.post, merge=writer.merge)
+        code, out = self.run_run(w, fw, mode="live")
+        self.assertEqual(fw.merges, [])
+        self.assertTrue(fw.posts[0][1].startswith("Would merge"))
+
+    def test_head_pin(self):
+        w, fw = World(), FakeWriter([would(T0 - 60 * i, pr=i) for i in range(10)])
+        r = w.reader()
+        calls = []
+        def pr(n):
+            calls.append(n)          # the second read, just before merging, sees a new head
+            return w.pr if len(calls) == 1 else dict(w.pr, head={"sha": OLD, "repo": {"full_name": REPO}})
+        r.pr = pr
+        code, out = self.run_run(w, fw, mode="live", reader=r)
+        self.assertEqual((fw.merges, fw.posts), ([], []))
+        self.assertTrue(any("head moved" in line for line in out), out)
+
+    def test_merge_refused_by_github_posts_nothing(self):
+        w, fw = World(), FakeWriter([would(T0 - 60 * i, pr=i) for i in range(10)])
+        fw.fail_merge = True
+        code, out = self.run_run(w, fw, mode="live")
+        self.assertEqual(code, 1)
+        self.assertEqual(fw.posts, [])
+
+    def test_off_writes_nothing(self):
+        w, fw = World(), FakeWriter([would(T0 - 60 * i, pr=i) for i in range(10)])
+        w.pr["additions"] = 500
+        for mode in ("off", "bogus"):
+            code, out = self.run_run(w, fw, mode=mode)
+            self.assertEqual((code, fw.posts, fw.merges), (0, [], []))
+            self.assertIn("nothing posted or merged", out[-1])
+
+    def test_dry_run_writes_nothing(self):
+        for mode in ("shadow", "live"):
+            w, fw = World(), FakeWriter([would(T0 - 60 * i, pr=i) for i in range(10)])
+            code, out = self.run_run(w, fw, mode=mode, dry_run=True)
+            self.assertEqual((code, fw.posts, fw.merges), (0, [], []))
+            self.assertTrue(any(line.startswith("dry run: would ") for line in out), out)
+        self.assertIn(f"dry run: would merge #70 at {HEAD}", out)
+
+    def test_cant_decide_writes_nothing(self):
+        w, fw = World(), FakeWriter()
+        r = w.reader()
+        def boom(n):
+            raise RuntimeError("gh api failed")
+        r.reviews = boom
+        code, out = self.run_run(w, fw, reader=r)
+        self.assertEqual((code, fw.posts, fw.merges), (1, [], []))
+
+
 if __name__ == "__main__":
     unittest.main()
