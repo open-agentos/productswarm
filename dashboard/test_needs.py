@@ -89,6 +89,18 @@ class NeedsYouTest(unittest.TestCase):
         self.assertEqual(g.needs_you(m), [])
         self.assertIn(g.NEEDS_EMPTY, g.render(m)["operations.html"])
 
+    def test_never_acted_sessions_are_left_out(self):
+        # #454: the same 19, with no events at all and tracking issues older than the
+        # idle threshold. Marked never_acted; even one flagged over cap isn't listed.
+        issues = [tracking(100 + i, f"rev{i:05d}") for i in range(19)]
+        m = build(issues, {})
+        self.assertTrue(all(s["never_acted"] for s in m["sessions"]))
+        self.assertEqual(g.needs_you(m), [])
+        m["sessions"][0].update(over_cap=True, cost=20.0, cap=15.0)
+        self.assertEqual(g.needs_you(m), [])
+        m["sessions"][0]["never_acted"] = False
+        self.assertEqual([i["kind"] for i in g.needs_you(m)], ["over_cap"])
+
     def test_ruled_question_with_a_blocked_session_still_shows_as_blocked(self):
         m = build([question(396, "GOV-Q: ruled", 600, labels=["gov:ruled"]), tracking(50, "blocked")],
                   {50: [comment([ev("blocked", "blocked", 5, gov_question=396)])]})

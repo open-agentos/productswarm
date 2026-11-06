@@ -264,7 +264,8 @@ def tracking_issues(issues) -> list[dict]:
         marker = MARKER_RE.match(it.get("body") or "")
         if bot and marker:
             out.append({"issue": it["number"], "session_id": marker.group(1), "role": bot.group(1),
-                        "author": login, "closed": it.get("state") == "closed"})
+                        "author": login, "closed": it.get("state") == "closed",
+                        "created_ts": parse_ts(it.get("created_at") or "")})
     return out
 
 
@@ -327,6 +328,12 @@ def derive(session: dict, events: list[dict], open_issues: set[int], now: dt.dat
         status = "idle"
     else:
         status = "active"
+    # Never acted (#454): no events, and its tracking issue is older than the idle threshold,
+    # such as the empty `[heartbeat] reviewer` issues Actions runs opened before #307. A newer
+    # one stays visible: its first event may not have reached GitHub yet.
+    created = session.get("created_ts")
+    never_acted = (status == "idle" and not events and created is not None
+                   and now - created > idle_after)
     return {
         "session_id": session["session_id"], "role": session["role"],
         "tracking_issue": session["issue"], "status": status, "issue": issue, "pr": pr,
@@ -334,6 +341,7 @@ def derive(session: dict, events: list[dict], open_issues: set[int], now: dt.dat
         "last_event": last["event"] if last else None, "last_ts": last_ts,
         "started_ts": parse_ts(events[0]["ts"]) if events else None,
         "cost": spend.session_cost(events), "daily": spend.daily(events, parse_ts),
+        "never_acted": never_acted,
     }
 
 
@@ -465,7 +473,8 @@ def needs_you(m: dict) -> list[dict]:
     """Everything waiting on the owner, most urgent first: the one list behind both the
     dashboard's first section and `swarm inbox`, so they can't disagree.
 
-    Leaves out idle sessions (`swarm ls` and the floor show them) and questions the owner
+    Leaves out idle sessions (`swarm ls` and the floor show them), sessions that never
+    acted (#454), and questions the owner
     has labelled gov:ruled, whose next step is docs or the planner, not the owner (#469);
     a record PR still shows as a PR.
 
@@ -484,7 +493,8 @@ def needs_you(m: dict) -> list[dict]:
         return f"{s['role']} session {s['session_id'][:8]}"
 
     items = []
-    for s in m["sessions"]:
+    acted = [s for s in m["sessions"] if not s.get("never_acted")]   # #454
+    for s in acted:
         if s["status"] == "blocked":
             q = s["gov_question"]
             items.append({"kind": "blocked", "ref": f"#{q}", "title": titles.get(q, ""),
@@ -512,7 +522,7 @@ def needs_you(m: dict) -> list[dict]:
                           "url": p["url"],
                           "detail": state + (f", closes {closes}" if closes else ""),
                           "since": p["created_ts"]})
-    for s in m["sessions"]:
+    for s in acted:
         if s.get("over_cap"):
             items.append({"kind": "over_cap", "ref": session(s), "title": "",
                           "url": issue_url(s["tracking_issue"]),

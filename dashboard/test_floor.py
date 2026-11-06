@@ -112,6 +112,32 @@ class CardTest(unittest.TestCase):
         self.assertEqual([i["session_id"] for i in m["floor"]["idle"]], ["s-idle"])
 
 
+class NeverActedTest(unittest.TestCase):
+    """#454: a tracking issue with no events, older than the idle threshold, never acted."""
+
+    def built(self, created_minutes_ago):
+        from test_generate import ts
+        t = tracking(60, "empty") | {"created_at": ts(created_minutes_ago)}
+        return g.build({"repo": REPO, "issues": [t], "comments": {}, "prs": []}, NOW, IDLE)
+
+    def test_never_acted_leaves_the_floor(self):
+        m = self.built(60)
+        (s,) = m["sessions"]
+        self.assertEqual((s["status"], s["never_acted"]), ("idle", True))
+        self.assertEqual(m["floor"], {"cards": [], "idle": []})
+
+    def test_new_session_without_events_stays(self):
+        m = self.built(5)   # younger than IDLE: its first event may not have flushed
+        (s,) = m["sessions"]
+        self.assertFalse(s["never_acted"])
+        self.assertEqual(floor.idle_line(m["floor"]["idle"]), "idle: builder no events")
+
+    def test_a_session_with_events_is_never_never_acted(self):
+        m = model({"old": [ev("old", "session_started", 300)]})
+        self.assertFalse(m["sessions"][0]["never_acted"])
+        self.assertEqual([i["session_id"] for i in m["floor"]["idle"]], ["old"])
+
+
 class IdleLineTest(unittest.TestCase):
     def test_line(self):
         m = model({"a": [ev("a", "working_on", 40, issue=1, role="builder")],
