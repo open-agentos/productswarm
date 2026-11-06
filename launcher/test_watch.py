@@ -122,7 +122,8 @@ class Scene:
         return watch.World(model=model, issues=self.issues + self.tracking,
                            events={k: list(v) for k, v in self.events.items()},
                            reviewed={k: {r["commit_id"] for r in v}
-                                     for k, v in self.all_reviews().items()})
+                                     for k, v in self.all_reviews().items()},
+                           comments={k: list(v) for k, v in self.comments.items()})
 
     # The fresh reads `swarm watch` makes before each start (swarm launch's refusal checks).
     def heartbeat(self, repo, idle, now):
@@ -280,6 +281,37 @@ class WatchTest(unittest.TestCase):
         self.scene.reviewed[92] = {SHA1}
         self.assertNotIn("record", [t.kind for t in self.w.tick(NOW)])
 
+    def owner_asks_for_a_record(self, login=OWNER, body="Approved as drafted.\n\nRecord: yes\n"):
+        """Question #87 becomes two-way, repo and spend; `login` comments `body` on it (#501)."""
+        self.scene.issues[2]["body"] = question_body(domain="spend")
+        self.scene.comments[87] = [{"user": {"login": login}, "body": body}]
+
+    def test_record_when_the_owner_asks_in_the_answer(self):
+        self.owner_asks_for_a_record()
+        (t,) = [t for t in self.w.tick(NOW) if t.kind == "record"]
+        self.assertEqual((t.key, t.ref, t.role), ("record:87:13", "#87", "docs"))
+        self.assertIn("[record] #87 gov:ruled by the owner, needs a record (the owner asked in the answer) "
+                      "-> would start `launcher/swarm launch docs --issue 87`", self.lines)
+
+    def test_record_line_from_anyone_else_starts_nothing(self):
+        for login in ("productswarm-planner[bot]", "someone-else"):
+            self.w.seen.clear()
+            self.owner_asks_for_a_record(login=login)
+            self.assertNotIn("record", [t.kind for t in self.w.tick(NOW)], login)
+
+    def test_no_record_line_starts_nothing(self):
+        self.owner_asks_for_a_record(body="Approved as drafted. A record would be nice, but no.")
+        self.assertNotIn("record", [t.kind for t in self.w.tick(NOW)])
+
+    def test_record_line_posted_after_the_ruling(self):
+        self.scene.issues[2]["body"] = question_body(domain="spend")
+        self.assertNotIn("record", [t.kind for t in self.w.tick(NOW)])   # ruled, no line yet
+        self.owner_asks_for_a_record()
+        self.assertEqual([t.key for t in self.w.tick(NOW) if t.kind == "record"], ["record:87:13"])
+        # The key is still the ruling's, so a second line doesn't fire it again.
+        self.scene.comments[87].append({"user": {"login": OWNER}, "body": "record: YES"})
+        self.assertEqual([t.kind for t in self.w.tick(NOW) if t.kind == "record"], [])
+
     def test_unknown_raised_by_is_skipped_with_a_reason(self):
         self.scene.issues[3]["body"] = question_body(raised="someone, on #3")
         (t,) = [t for t in self.w.tick(NOW) if t.kind == "answer"]
@@ -408,6 +440,13 @@ class HelpersTest(unittest.TestCase):
     def test_needs_record(self):
         self.assertIsNone(watch.needs_record(question_body()))
         self.assertEqual(watch.needs_record(question_body(blast="external")), "blast radius external")
+        said = lambda body, login=OWNER: [{"user": {"login": login}, "body": body}]
+        asked = "the owner asked in the answer"
+        self.assertEqual(watch.needs_record(question_body(), said("Yes.\n  RECORD: Yes  \n"), OWNER), asked)
+        self.assertIsNone(watch.needs_record(question_body(), said("Record: yes"), None))
+        self.assertIsNone(watch.needs_record(question_body(), said("Record: yes", "bot[bot]"), OWNER))
+        self.assertIsNone(watch.needs_record(question_body(), said("I'd say Record: yes here"), OWNER))
+        self.assertIsNone(watch.needs_record(question_body(), said("Record: no"), OWNER))
 
 
 def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = True,
