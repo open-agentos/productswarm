@@ -186,6 +186,49 @@ class HookTest(unittest.TestCase):
         self.assertEqual(events[1]["gov_question"], 15)
         self.assertEqual((events[2]["event"], events[2]["issue"]), ("working_on", 4))
 
+    def comments(self):
+        return [c["stdin"] for c in self.gh_calls() if c["argv"][:2] == ["issue", "comment"]]
+
+    def test_comments_name_the_issue_for_its_timeline(self):
+        self.full_session()
+        bodies = self.comments()
+        named = [l for b in bodies for l in b.split("```jsonl", 1)[0].splitlines() if l.strip()]
+        self.assertEqual(named, ["builder session working on #3", "builder opened PR #21 for #3"])
+        for b in bodies:                        # the prose stays above the fence
+            self.assertTrue(b.startswith("```jsonl") or b.split("\n\n", 1)[1].startswith("```jsonl"), b)
+
+    def test_working_on_is_named_once_per_issue(self):
+        def emit(issue):
+            r = subprocess.run([sys.executable, "-I", str(HOOK), "emit", "working_on", "--issue", str(issue)],
+                               capture_output=True, text=True, env=self.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.run_hook("SessionStart", source="startup")
+        for issue in (4, 5, 4):
+            emit(issue)
+        named = [b.split("```jsonl", 1)[0].strip() for b in self.comments()]
+        self.assertEqual([n for n in named if n],
+                         ["builder session working on #4", "builder session working on #5"])
+        self.assertEqual([e["issue"] for e in self.remote_events() if e["event"] == "working_on"], [4, 5, 4])
+
+    def test_failed_post_names_the_issue_on_retry(self):
+        self.run_hook("SessionStart", source="startup")
+        self.env["FAKE_GH_FAIL"] = "1"
+        subprocess.run([sys.executable, "-I", str(HOOK), "emit", "working_on", "--issue", "4"], env=self.env)
+        del self.env["FAKE_GH_FAIL"]
+        failed = len(self.comments())           # the fake gh logs the failed attempt too
+        self.run_hook("SessionEnd", reason="exit")
+        named = [b.split("```jsonl", 1)[0].strip() for b in self.comments()[failed:]]
+        self.assertEqual([n for n in named if n], ["builder session working on #4"])
+
+    def test_dashboard_still_parses_named_comments(self):
+        sys.path.insert(0, str(HERE.parent / "dashboard"))
+        import generate
+        self.full_session()
+        parsed = [e for b in self.comments() for e in generate.parse_comment(b)]
+        self.assertEqual(parsed, self.remote_events())
+        self.assertEqual([e["event"] for e in parsed],
+                         ["session_started", "prompt_submitted", "working_on", "pr_opened", "stopped"])
+
     def test_resume_after_stop_reopens(self):
         self.run_hook("SessionStart", source="startup")
         self.run_hook("SessionEnd", reason="exit")

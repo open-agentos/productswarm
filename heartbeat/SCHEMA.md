@@ -91,9 +91,13 @@ The session's role App opens **one issue per session** in `repo`:
 - **Labels:** none. Never `status:` or `gov:` labels (GOV-0003), and new issues are created unlabelled anyway (CLAUDE.md).
 - The issue is closed after the `stopped` event is posted, so the open issue list only shows live sessions. The dashboard reads open and closed tracking issues alike.
 
-Each **comment** carries one or more events, without `prompt`, as a fenced `jsonl` block, one event per line, in time order. The comment ends with the usual signature line, which readers ignore:
+Each **comment** carries one or more events, without `prompt`, as a fenced `jsonl` block, one event per line, in time order. The comment ends with the usual signature line, which readers ignore.
+
+When the batch holds a `working_on` or `pr_opened` event, the comment starts with a line per event naming its issue in prose, above the fence: `builder session working on #N` or `builder opened PR #P for #N`. GitHub turns each `#N` into a "mentioned this" reference on issue N's timeline, so the issue shows the session working on it (#453). `working_on` is named only the first time the session works on that issue, so each issue's timeline gets one reference, not one per batch. The lines add no captured field: `issue` and `pr` are already in the event (GOV-0002). Readers ignore them like any other text outside the fence:
 
 ````
+builder session working on #3
+
 ```jsonl
 {"schema_version":1,"ts":"...","event":"heartbeat",...}
 {"schema_version":1,"ts":"...","event":"working_on",...}
