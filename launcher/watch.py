@@ -361,13 +361,11 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         if t:
             out.append(t)
 
-    # Questions: the needs-you list holds every open gov:question, as `question` or `blocked`.
-    questions = []
-    for it in items:
-        if it["kind"] in ("question", "blocked"):
-            n = int(REF_RE.search(it["ref"]).group(1))
-            if n not in questions:
-                questions.append(n)
+    # Questions: every open gov:question, from the model, plus any a session is blocked on.
+    # Not from needs-you alone: it leaves out gov:ruled questions (#469), which [record]
+    # and [answer] still need.
+    questions = {q["number"] for q in m["gov"]}
+    questions |= {int(REF_RE.search(it["ref"]).group(1)) for it in items if it["kind"] == "blocked"}
     raw = {i["number"]: i for i in w.issues}
     for n in sorted(questions):
         body, events = (raw.get(n) or {}).get("body"), w.events.get(n, [])
