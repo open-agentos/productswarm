@@ -56,10 +56,9 @@ class NeedsYouTest(unittest.TestCase):
         items = g.needs_you(model())
         self.assertEqual([(i["kind"], i["ref"]) for i in items], [
             ("blocked", "#28"), ("blocked", "#29"),             # longest blocked first
-            ("question", "#26"), ("question", "#27"),           # unwaited, oldest first
+            ("question", "#27"),                                # unwaited; #26 is gov:ruled
             ("pr", "PR #30"), ("pr", "PR #31"),                 # not drafts, oldest first
-            ("idle", "builder session idle-lon"), ("idle", "builder session idle-sho"),
-        ])
+        ])                                                      # idle sessions: not listed (#469)
 
     def test_details_and_links(self):
         items = {i["ref"]: i for i in g.needs_you(model())}
@@ -67,18 +66,33 @@ class NeedsYouTest(unittest.TestCase):
         self.assertEqual(b["url"], "https://github.com/open-agentos/productswarm/issues/29")
         self.assertEqual(b["session_url"], "https://github.com/open-agentos/productswarm/issues/50")
         self.assertEqual(b["detail"], "builder session blocked- is blocked on it (working on #4)")
-        self.assertEqual(items["#26"]["detail"], "time to live 2026-11-09, gov:ruled")
         self.assertEqual(items["#27"]["detail"], "no time to live given")
         self.assertEqual(items["PR #30"]["detail"], "changes requested")
         self.assertEqual(items["PR #31"]["detail"], "awaiting review, closes #4")
-        self.assertEqual(items["builder session idle-sho"]["detail"], "no event since 20m ago, on #4")
 
     def test_line(self):
         items = g.needs_you(model())
         self.assertEqual(g.needs_line(items[0], NOW),
                          "[blocked] #28 GOV-Q: someone waits · builder session blocked- is blocked on it · 50m ago")
         self.assertEqual(g.needs_line(items[-1], NOW),
-                         "[idle session] builder session idle-sho · no event since 20m ago, on #4")
+                         "[PR to review] PR #31 PR 31 · awaiting review, closes #4 · 10m ago")
+
+    def test_todays_shape_lists_neither_idle_nor_ruled(self):
+        # #469: 19 idle reviewer sessions that never sent an event past session_started,
+        # and one question the owner has ruled. Neither is the owner's to act on.
+        issues = [tracking(100 + i, f"rev{i:05d}") | {"title": f"[heartbeat] reviewer rev{i:05d}"}
+                  for i in range(19)]
+        issues += [question(396, "GOV-Q: ruled", 600, labels=["gov:ruled", "ready"])]
+        m = build(issues, {})
+        self.assertEqual(sum(s["status"] == "idle" for s in m["sessions"]), 19)
+        self.assertEqual([q["number"] for q in m["gov"]], [396])
+        self.assertEqual(g.needs_you(m), [])
+        self.assertIn(g.NEEDS_EMPTY, g.render(m)["operations.html"])
+
+    def test_ruled_question_with_a_blocked_session_still_shows_as_blocked(self):
+        m = build([question(396, "GOV-Q: ruled", 600, labels=["gov:ruled"]), tracking(50, "blocked")],
+                  {50: [comment([ev("blocked", "blocked", 5, gov_question=396)])]})
+        self.assertEqual([(i["kind"], i["ref"]) for i in g.needs_you(m)], [("blocked", "#396")])
 
     def test_empty(self):
         m = build([tracking(54, "active")], {54: [comment([ev("active", "working_on", 1, issue=4)])]})
@@ -263,7 +277,7 @@ class PageTest(unittest.TestCase):
     def test_first_section_matches_the_list(self):
         m = model()
         page = g.render(m)["operations.html"]
-        self.assertLess(page.index("<h2>Needs you (8)</h2>"), page.index("<h2>Sessions</h2>"))
+        self.assertLess(page.index("<h2>Needs you (5)</h2>"), page.index("<h2>Sessions</h2>"))
         section = page[page.index('<ol class="inbox">'):page.index("</ol>")]
         shown = [html.unescape(re.sub(r"<[^>]+>", "", li)).split(" · session")[0]
                  for li in re.findall(r"<li[^>]*>(.*?)</li>", section)]

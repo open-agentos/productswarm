@@ -37,8 +37,6 @@ def one_of_each():
          "detail": "time to live 2026-11-09", "since": ago(600)},
         {"kind": "pr", "ref": "PR #30", "title": LONG, "url": "u30",
          "detail": "awaiting review, closes #4", "since": ago(90)},
-        {"kind": "idle", "ref": "builder session idle-lon", "title": "", "url": sess,
-         "session_url": sess, "detail": "no event since 5h ago", "since": ago(300)},
         {"kind": "over_cap", "ref": "builder session b-over", "title": "", "url": sess,
          "session_url": sess, "detail": "est. $20.00, cap $15.00; warn only: swarm stop ends it (GOV-0008)",
          "since": ago(1), "over": 20 / 15},
@@ -56,16 +54,15 @@ class DigestTest(unittest.TestCase):
     def test_one_of_each_kind(self):
         body = d.render(one_of_each(), NOW, REPO)
         lines = body.splitlines()
-        self.assertEqual(lines[0], f"{d.MARKER} **5 things need you**")
+        self.assertEqual(lines[0], f"{d.MARKER} **4 things need you**")
         self.assertEqual([ln for ln in lines if ln.startswith("### ")], [
             "### Blocked (1)", "### Gov question (1)", "### PR to review (1)",
-            "### Idle session (1)", "### Over cap (1)"])
+            "### Over cap (1)"])
         self.assertIn("- #28 GOV-Q: someone waits: builder session s1 is blocked on it · 50m ago", lines)
         self.assertIn("- #26 GOV-Q: unwaited: time to live 2026-11-09 · 10h ago", lines)
         # Session items have no #N reference, so they link to the tracking issue; no age (as needs_line).
-        self.assertIn("- [builder session idle-lon](https://github.com/open-agentos/productswarm/"
-                      "issues/50): no event since 5h ago", lines)
-        self.assertTrue(any(ln.startswith("- [builder session b-over](") and ln.endswith("(GOV-0008)")
+        self.assertTrue(any(ln.startswith("- [builder session b-over](https://github.com/open-agentos/"
+                                          "productswarm/issues/50)") and ln.endswith("(GOV-0008)")
                             for ln in lines))
         self.assertEqual(lines[-1], "Updated 2026-11-02 12:00 UTC · dashboard: "
                                     "https://open-agentos.github.io/productswarm/")
@@ -75,9 +72,9 @@ class DigestTest(unittest.TestCase):
             f"{d.MARKER} **1 thing needs you**"))
 
     def test_only_kinds_with_items_get_a_heading(self):
-        items = [i for i in one_of_each() if i["kind"] in ("question", "idle")]
+        items = [i for i in one_of_each() if i["kind"] in ("question", "over_cap")]
         heads = [ln for ln in d.render(items, NOW, REPO).splitlines() if ln.startswith("### ")]
-        self.assertEqual(heads, ["### Gov question (1)", "### Idle session (1)"])
+        self.assertEqual(heads, ["### Gov question (1)", "### Over cap (1)"])
 
     def test_title_shortening(self):
         s = d.short(LONG)
@@ -213,10 +210,11 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(self.run_update([digest_issue(9, body=stale)]), 0)
         self.assertEqual(self.writes(), [])
 
-        # The list changes (a new tracking issue's session is idle): one more edit.
-        self.assertEqual(self.run_update([digest_issue(9, body=body), tracking(50, "s-idle")]), 0)
+        # The list changes (a new gov:question): one more edit.
+        self.assertEqual(self.run_update([digest_issue(9, body=body),
+                                          issue(70, "GOV-Q: new", ["gov:question"])]), 0)
         self.assertEqual(len(self.writes()), 1)
-        self.assertIn("### Idle session (1)", self.body(9))
+        self.assertIn("### Gov question (1)", self.body(9))
 
     def test_patch_failure_is_reported(self):
         self.data.write_text(json.dumps({"open": [digest_issue(9)], "closed": [], "prs": []}))

@@ -457,12 +457,17 @@ def ttl_date(ttl: str | None) -> dt.date | None:
 
 # ---------------------------------------------------------------- needs you (L5)
 
-NEEDS_KINDS = ("blocked", "question", "pr", "idle", "over_cap")   # most urgent first
+# Idle sessions aren't here: they belong in `swarm ls` and the floor (#469).
+NEEDS_KINDS = ("blocked", "question", "pr", "over_cap")   # most urgent first
 
 
 def needs_you(m: dict) -> list[dict]:
     """Everything waiting on the owner, most urgent first: the one list behind both the
     dashboard's first section and `swarm inbox`, so they can't disagree.
+
+    Leaves out idle sessions (`swarm ls` and the floor show them) and questions the owner
+    has labelled gov:ruled, whose next step is docs or the planner, not the owner (#469);
+    a record PR still shows as a PR.
 
     Reads only build()'s model, which comes from public GitHub data (GOV-0002, GOV-0004).
     Within a kind, the longest waiting comes first, except that questions past their time
@@ -488,7 +493,7 @@ def needs_you(m: dict) -> list[dict]:
                                     + (f" (working on #{s['issue']})" if s["issue"] else ""),
                           "since": s["last_ts"]})
     for q in m["gov"]:
-        if not q["waiting"]:
+        if not q["waiting"] and "gov:ruled" not in q["labels"]:
             # Only shows a lapse; the owner alone adds gov:lapsed (GOV-0006).
             d = ttl_date(q["ttl"])
             past = d if d and d < now.date() else None
@@ -508,14 +513,6 @@ def needs_you(m: dict) -> list[dict]:
                           "detail": state + (f", closes {closes}" if closes else ""),
                           "since": p["created_ts"]})
     for s in m["sessions"]:
-        if s["status"] == "idle":
-            items.append({"kind": "idle", "ref": session(s), "title": "",
-                          "url": issue_url(s["tracking_issue"]),
-                          "session_url": issue_url(s["tracking_issue"]),
-                          "detail": f"no event since {ago(s['last_ts'], now)}"
-                                    + (f", on #{s['issue']}" if s["issue"] else ""),
-                          "since": s["last_ts"]})
-    for s in m["sessions"]:
         if s.get("over_cap"):
             items.append({"kind": "over_cap", "ref": session(s), "title": "",
                           "url": issue_url(s["tracking_issue"]),
@@ -533,7 +530,7 @@ def needs_you(m: dict) -> list[dict]:
 
 
 NEEDS_LABELS = {"blocked": "blocked", "question": "gov question", "pr": "PR to review",
-                "idle": "idle session", "over_cap": "over cap"}
+                "over_cap": "over cap"}
 NEEDS_EMPTY = "Nothing is waiting on you."
 
 
@@ -541,7 +538,7 @@ def needs_line(item: dict, now: dt.datetime) -> str:
     """One item as plain text, without its link. The CLI and the page both show this."""
     title = f" {item['title']}" if item["title"] else ""
     since = (f" · {ago(item['since'], now)}"
-             if item["since"] and item["kind"] not in ("idle", "over_cap") else "")
+             if item["since"] and item["kind"] != "over_cap" else "")
     return f"[{NEEDS_LABELS[item['kind']]}] {item['ref']}{title} · {item['detail']}{since}"
 
 

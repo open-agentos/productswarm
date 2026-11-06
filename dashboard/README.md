@@ -135,10 +135,11 @@ The operations page opens with one ordered list of everything waiting on the own
 | Order | What | Within the kind |
 |---|---|---|
 | 1 | Sessions blocked on a `gov:question`, with the question | longest blocked first |
-| 2 | Open `gov:question`s nobody is blocked on, with their time to live | oldest first |
+| 2 | Open `gov:question`s nobody is blocked on and the owner hasn't labelled `gov:ruled`, with their time to live | oldest first |
 | 3 | Open PRs that aren't drafts, waiting for review or merge | oldest first |
-| 4 | Idle sessions: no event within the idle threshold | longest idle first |
-| 5 | Sessions over their role's spend cap (warn only, GOV-0008) | furthest over first |
+| 4 | Sessions over their role's spend cap (warn only, GOV-0008) | furthest over first |
+
+Idle sessions aren't listed: `swarm ls` and the floor show them. A ruled question's next step is docs or the planner, so it's left out too; a record PR for it still shows as a PR (#469).
 
 Each item links to its question, PR or session tracking issue. An empty list says "Nothing is waiting on you." The list is built only from the GitHub data below, so it shows nothing that isn't already public (GOV-0002, GOV-0004).
 
