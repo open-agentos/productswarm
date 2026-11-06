@@ -37,8 +37,9 @@ Also done, because a run can stop for good reasons without that (#125, point 2):
   session's;
 - the run commented on its own issue since it started, naming another open issue as #M:
   it is blocked on an unfinished prerequisite (#184);
-- the issue fails `swarm launch`'s refusal checks: it is closed, or its latest `ready`
-  (`gov:ruled` for [record]) wasn't added by the owner (GOV-0006);
+- the issue fails `swarm launch`'s refusal checks: it is closed, or it isn't go: neither
+  the owner's latest `ready` (GOV-0006) nor its PLAN.md milestone (GOV-0026) makes it go
+  (for [record], the owner's latest `gov:ruled`);
 - the work is already done: a PR, open or merged, already closes the issue.
 
 When the condition isn't met it prints {"decision": "block", "reason": ...} naming what's
@@ -247,6 +248,20 @@ def missing_respond(g: GitHub, repo: str, e: swarm.Started, login: str) -> str |
             f"says, then stop.")
 
 
+def plan_on_main(g: GitHub, repo: str) -> str | None:
+    """PLAN.md on main, or None if it isn't there."""
+    import base64
+    d = g.get(f"repos/{repo}/contents/PLAN.md?ref=main")
+    return base64.b64decode(d["content"]).decode() if d else None
+
+
+def go_reader(g: GitHub, repo: str, n: int) -> swarm.GoReader:
+    """swarm.go_refusals' reads, through the run's GitHub (#582)."""
+    return swarm.GoReader(plan=lambda: plan_on_main(g, repo),
+                          state=lambda w: (g.get(f"repos/{repo}/issues/{w}") or {}).get("state"),
+                          comments=lambda: g.items(f"repos/{repo}/issues/{n}/comments?per_page=100"))
+
+
 def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
     """What the run still has to do before it may stop, or None if it may stop."""
     login = app_login(e.role)
@@ -264,8 +279,11 @@ def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
         if closed_by(g, repo, e.issue):
             return None      # opened its PR, or the work was already done
         events = g.items(f"repos/{repo}/issues/{e.issue}/events?per_page=100")
-        if swarm.issue_refusals(e.issue, issue, events, owner, "gov:ruled" if record else "ready"):
-            return None      # it was right to refuse the issue (GOV-0006)
+        refused = (swarm.issue_refusals(e.issue, issue, events, owner, "gov:ruled") if record
+                   else swarm.go_refusals(e.issue, issue, events, owner, swarm.agent_logins(),
+                                          go_reader(g, repo, e.issue)))
+        if refused:
+            return None      # it was right to refuse the issue (GOV-0006, GOV-0026)
         if blocked_on_prerequisite(g, repo, e, login):
             return None      # said on its issue which unfinished issue it waits for (#184)
         what = (f"No PR closes #{e.issue} yet. Open the {'record ' if record else ''}PR for "

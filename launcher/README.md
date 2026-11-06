@@ -41,10 +41,21 @@ It starts one session in a new Terminal window, as `up` does. Its opener ends "â
 It refuses, and says why, if:
 
 - #N doesn't exist, is a pull request, or is closed;
-- #N doesn't carry `ready`, or the most recent `ready` label was added by anyone other than the owner named in `governance/jurisdictions.yml` (per GOV-0006);
+- #N isn't go (see "Two ways an issue is go" below);
 - a live session is already on #N. "Live" means a heartbeat session that isn't stopped and whose current issue is #N, or a session `launch` started on #N that hasn't sent a heartbeat yet. The refusal names the session.
 
-`--force` overrides only the last of these. GOV-0006 says the launcher starts sessions only on `ready` issues, so no flag skips the label check. Add `ready` to the issue instead.
+`--force` overrides only the last of these. No flag makes an issue go: add `ready` to the issue, or put it under an open milestone.
+
+**Two ways an issue is go** (`swarm.go_refusals`, #582). `swarm launch` and the stop hook (`stophook.py`) share this check:
+
+1. **The owner's `ready`** (GOV-0006): the most recent `ready` label on #N was added by the owner named in `governance/jurisdictions.yml`. This is checked first, and is enough on its own.
+2. **Its milestone** (GOV-0026), for an implementation issue only. All of these hold:
+   - the owner or a swarm App (a login under `identities.agents` in `jurisdictions.yml`) opened #N, and its body has a line `**Milestone:** M<n>`;
+   - `PLAN.md` on `main` has a `## M<n>` section that isn't marked done. `PLAN.md`'s format (#574) doesn't yet say how a milestone is marked done, so either form counts: `(done)` or âœ… in the heading, or a `**Status:** done` line in the section;
+   - every issue on its `**Waits on:**` line is closed (read as `swarm watch` reads it, #490);
+   - the owner hasn't vetoed it: it has no `hold` label, and the owner hasn't commented on it. Any owner comment is a veto, whatever it says, until the owner labels the issue `ready` (the record says "a comment" without narrowing it, so this reads it strictly).
+
+A `gov:question` is go only by `ready`, even with a milestone line (GOV-0026 leaves GOV-0006's rule for questions unchanged). When #N has a milestone line and neither way passes, the refusal names the milestone condition that failed, for example `#N's milestone M2 is marked done in PLAN.md`. Without a milestone line it names the `ready` check, as before. `swarm watch`'s `[build]` trigger still starts only on `ready` issues; reading milestones there is the next issue.
 
 ## Spend cap (warn only)
 
@@ -410,7 +421,7 @@ These also count as done, because a run can stop for good reasons without a PR:
 
 - since it started, the run opened or commented on a `gov:question` that names its issue or PR as `#N`. Every session of a role acts as the same App, so the `#N` is how the hook tells this run's question from another session's;
 - since it started, the run commented on its own issue naming another open issue as `#M` (not a PR): it's blocked on an unfinished prerequisite, e.g. a `[build]` whose file another issue creates (#184). Only a comment on the run's own issue counts, so another session's comment elsewhere doesn't;
-- the issue fails `swarm launch`'s refusal checks: it's closed, or its latest `ready` (`gov:ruled` for `[record]`) wasn't added by the owner (GOV-0006);
+- the issue fails `swarm launch`'s refusal checks: it's closed, or it isn't go by either way above, the owner's `ready` (GOV-0006) or its milestone (GOV-0026). For `[record]`, the owner's latest `gov:ruled`;
 - a PR, open or merged, already closes the issue.
 
 If the condition isn't met, the hook blocks the stop and gives a short reason naming what's missing, and the run continues. It allows the stop whenever `stop_hook_active` is set (a hook is already continuing the run), after 3 blocks in one run (counted in `~/.productswarm/launcher/<session id>.stop.json`), and whenever GitHub can't be read or anything else fails. It never fails closed: the run's budget (GOV-0012) is what bounds spend. What it blocked, and any read that failed, go to `~/.productswarm/launcher/stophook.log`.
