@@ -13,6 +13,7 @@ from pathlib import Path
 
 import activity
 import committees
+import floor as floor_mod
 import generate
 import layout
 import live
@@ -85,6 +86,15 @@ def floor(f: dict | None) -> dict | None:
     return {"cards": [pick(c, CARD_FIELDS) for c in f["cards"]], "idle": f["idle"]}
 
 
+# The watcher's state (#459): floor.watcher() already kept only #456's fields, so this
+# copies them by name again and adds nothing. No cost: #456's public form carries none.
+WATCHER_FIELDS = ("status", "issue", "checked", "age_minutes", "stale", *floor_mod.LISTS)
+
+
+def watcher(w: dict | None) -> dict | None:
+    return None if w is None else pick(w, WATCHER_FIELDS)
+
+
 def desk(m: dict) -> dict:
     """The desk's masthead and panels as node trees, which the live refresh draws (#411)."""
     mast = layout.masthead("index.html", m["repo"], m["now"], generate.owner_line(m))
@@ -101,6 +111,7 @@ def state(m: dict) -> dict:
         "needs_you": needs(m),
         "sessions": [session(s) for s in m["sessions"]],
         "floor": floor(m.get("floor")),
+        "watcher": watcher(m.get("watcher")),   # #459: swarm watch's state, from the [watch] issue
         "prs": [pick(p, PR_FIELDS) for p in m["prs"]],
         "gov_questions": [gov_question(q) for q in m["governance"]["questions"]],
         "governance": {**gov, "days": m["days"]},

@@ -360,13 +360,26 @@ def load_caps(path: Path | None = None) -> dict[str, float]:
     return {s.role: s.spend_cap_usd for s in sessions if s.spend_cap_usd is not None}
 
 
+def load_watch_interval(path: Path | None = None) -> float | None:
+    """swarm watch's interval_minutes from the committed swarm.toml's [watch] table, which
+    says when the watcher's published state is stale (#459). None if it can't be read."""
+    try:
+        sys.path.insert(0, str(HERE.parent / "launcher"))
+        import manifest
+        limits = manifest.load_watch(path or manifest.DEFAULT_PATH)
+    except Exception:   # ImportError (no tomllib), ManifestError: no stale line
+        return None
+    return limits.interval_minutes if limits else None
+
+
 def over_cap(cost: float | None, cap: float | None) -> bool:
     """Warn-only (GOV-0008): this flags a session; nothing stops it."""
     return cost is not None and cap is not None and cost > cap
 
 
 def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
-          caps: dict[str, float] | None = None, window: int = DAYS) -> dict:
+          caps: dict[str, float] | None = None, window: int = DAYS,
+          watch_interval: float | None = None) -> dict:
     repo = data["repo"]
     issues = {i["number"]: i for i in data["issues"]}
     open_issues = {n for n, i in issues.items() if i.get("state") == "open"}
@@ -418,6 +431,7 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
          "issue_titles": {n: i["title"] for n, i in issues.items()},
          "sessions": sessions, "prs": prs,
          "floor": floor.build([(s, events_of[s["session_id"]]) for s in sessions], now), "gov": gov, "days": window,
+         "watcher": floor.watcher(data["issues"], owner, now, watch_interval),   # #459
          "governance": governance.build(data.get("index"), gov, data["issues"], now,
                                         now - dt.timedelta(days=window), parse_ts,
                                         time_to_live, ttl_date),
@@ -649,7 +663,7 @@ def desk_panels(m: dict) -> dict[str, str]:
     `data-panel` box that the live refresh redraws from state.json (#411), so an empty one
     still gets its box. #397's later panels join here."""
     repo = m["repo"]
-    return {"floor": floor.render(m.get("floor"), repo),
+    return {"floor": floor.render(m.get("floor"), repo, m.get("watcher")),
             "wire": wire.render(m.get("wire")),
             "committee_desk": committees.desk(m.get("committees"), repo),
             "trends": trends.render(m.get("trends")),
@@ -873,7 +887,7 @@ def main(argv: list[str]) -> int:
         print(f"generate.py: {e}", file=sys.stderr)
         return 1
     model = build(data, now, dt.timedelta(minutes=args.idle_minutes), caps=load_caps(),
-                  window=args.days)
+                  window=args.days, watch_interval=load_watch_interval())
     import state   # here, not at the top: state imports this module
     data_json = json.dumps(state.state(model), indent=1) + "\n"
     out = Path(args.out)

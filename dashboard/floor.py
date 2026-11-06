@@ -11,12 +11,20 @@ as a per-event tool-call count, is a GOV-0002 `security` question, not something
 Idle sessions share one quiet line ("idle: docs 40 min, reviewer 2 h"). Stopped ones aren't on
 the floor, and nor are sessions that never acted (generate.derive()'s `never_acted`, #454). Nothing here carries tokens or cost (GOV-0014; #397).
 
-Reads only the events generate.build() already parsed: no API calls.
+Under the cards, the watcher's state (#459): what `swarm watch` is running, holding and
+skipping, and its recent failures, from the `[watch]` issue's body (#458, GOV-0025).
+
+Reads only the events and open issues generate.build() already has: no API calls.
 """
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import html
+import json
+import re
+import sys
+from pathlib import Path
 
 SLOT = dt.timedelta(minutes=5)
 SLOTS = 6                   # 30 minutes of 5-minute slots
@@ -143,7 +151,7 @@ def sparkline(counts: list[int]) -> str:
             f'viewBox="0 0 {width} {h}">{"".join(bars)}</svg>')
 
 
-def render(floor: dict | None, repo: str) -> str:
+def render(floor: dict | None, repo: str, watch: dict | None = None) -> str:
     esc = lambda x: html.escape("" if x is None else str(x))  # noqa: E731
 
     def ref(kind: str, n: int) -> str:
@@ -171,4 +179,170 @@ def render(floor: dict | None, repo: str) -> str:
         out.append('<p class="muted">No session is working.</p>')
     if floor["idle"]:
         out.append(f'<p class="muted idle">{esc(idle_line(floor["idle"]))}</p>')
+    out.append(render_watcher(watch, repo))
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------- the watcher (#459)
+# `swarm watch` publishes its public state (launcher/watch.py's public_state(), #456) into the
+# body of one `[watch]` issue the owner opened (#458, GOV-0025). The floor reads that body from
+# the open issues generate.fetch() already lists, so it adds no API calls. It keeps only the
+# fields #456 defines, each checked by type and shape; anything else is dropped. A reason is
+# kept only if it is one of watch.REASONS' sentences, so no text from another issue gets in.
+
+WATCH_MARKER = "<!-- productswarm-watch -->"    # launcher/watch.py's WATCH_MARKER
+STALE_CHECKS = 2       # as `swarm status`: older than two intervals is stale (watch.STALE_CHECKS)
+LISTS = ("running", "held", "skipped", "failed")
+ENDING_WORDS = {"at_cap": "at its cap", "error": "error", "limited": "usage limit",
+                "no_result": "no result"}
+
+_ROLE = re.compile(r"[a-z0-9-]{1,40}")
+_KIND = re.compile(r"[a-z-]{1,20}")
+_CODE = re.compile(r"[a-z_]{1,20}")
+_REF = re.compile(r"(?:PR )?#\d{1,7}")
+
+
+@functools.cache
+def reasons() -> dict[str, re.Pattern]:
+    """watch.REASONS as patterns, each sentence's {fields} as integers: the only reasons
+    the floor shows. Empty if launcher/watch.py can't be imported (reasons are then dropped)."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "launcher"))
+        import watch
+        table = watch.REASONS
+    except Exception:
+        return {}
+    return {code: re.compile(re.sub(r"\\\{\w+\\\}", r"\\d{1,4}", re.escape(s)))
+            for code, s in table.items()}
+
+
+def _ts(v) -> dt.datetime | None:
+    if not isinstance(v, str) or len(v) > 40:
+        return None
+    try:
+        t = dt.datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t.astimezone(dt.timezone.utc) if t.tzinfo else None
+
+
+def _str(v, pattern: re.Pattern) -> str | None:
+    return v if isinstance(v, str) and pattern.fullmatch(v) else None
+
+
+def _entry(name: str, x, known: dict[str, re.Pattern]) -> dict | None:
+    """One list entry with only #456's fields, or None if any is missing or the wrong shape."""
+    if not isinstance(x, dict):
+        return None
+    out = {"ref": _str(x.get("ref"), _REF), "kind": _str(x.get("kind"), _KIND)}
+    if name == "running":
+        out |= {"role": _str(x.get("role"), _ROLE), "started": _ts(x.get("started"))}
+    elif name == "failed":
+        ending = x.get("ending")
+        out |= {"ending": ending if ending in ENDING_WORDS else None, "ended": _ts(x.get("ended"))}
+    else:
+        code, reason = _str(x.get("code"), _CODE), x.get("reason")
+        ok = code in known and isinstance(reason, str) and known[code].fullmatch(reason)
+        out |= {"code": code, "reason": reason if ok else None, "since": _ts(x.get("since"))}
+        # A reason that isn't a known sentence is dropped, not the entry.
+        return None if None in (out["ref"], out["kind"], code, out["since"]) else out
+    return out if None not in out.values() else None
+
+
+def parse_watch(body: str | None) -> dict | None:
+    """The [watch] issue body's state, or None if it has no readable json block with a
+    `checked` time. Each list keeps its well-formed entries; other keys are dropped."""
+    m = re.search(r"```json\n(.*?)\n```", (body or "").replace("\r\n", "\n"), re.S)
+    try:
+        got = json.loads(m.group(1)) if m else None
+    except ValueError:
+        return None
+    if not isinstance(got, dict) or (checked := _ts(got.get("checked"))) is None:
+        return None
+    known = reasons()
+    out = {"checked": checked}
+    for name in LISTS:
+        items = got.get(name)
+        items = items if isinstance(items, list) else []
+        out[name] = [e for e in (_entry(name, x, known) for x in items[:50]) if e]
+    return out
+
+
+def watcher(issues: list[dict], owner: str | None, now: dt.datetime,
+            interval: float | None) -> dict:
+    """The watcher's state for the floor, from the open issues generate.fetch() lists.
+    `status` is "ok", "missing" (no open [watch] issue), "not_owner" (marked issues exist,
+    but the owner opened none of them; GOV-0025), "several" (the owner opened more than one,
+    which the watcher won't publish to either) or "malformed" (no readable state).
+    `checked` is when the state last changed: the watcher publishes only on a change (#458).
+    `stale` is True when that is older than STALE_CHECKS intervals."""
+    marked = [i for i in issues if i.get("state") == "open" and "pull_request" not in i
+              and (i.get("body") or "").lstrip().startswith(WATCH_MARKER)]
+    mine = [i for i in marked if owner and
+            ((i.get("user") or {}).get("login") or "").lower() == owner.lower()]
+    if not marked:
+        return {"status": "missing"}
+    if not mine:
+        return {"status": "not_owner"}
+    if len(mine) > 1:
+        return {"status": "several"}
+    got = parse_watch(mine[0].get("body"))
+    if got is None:
+        return {"status": "malformed", "issue": mine[0]["number"]}
+    age = int((now - got["checked"]).total_seconds() // 60)
+    return {"status": "ok", "issue": mine[0]["number"], **got, "age_minutes": max(age, 0),
+            "stale": interval is not None and age > STALE_CHECKS * interval}
+
+
+def watcher_lines(w: dict, ref=lambda r: r) -> list[str]:
+    """One plain line per item: "builder on #405 since 11:09", "held: #407, 2 of 2 running",
+    "skipped: #439, the role isn't in swarm.toml", "failed: #51 build, at its cap, 10:02".
+    `ref(r)` formats a ref ("#405" or "PR #405"); the default is plain text."""
+    hm = lambda t: t.strftime("%H:%M")  # noqa: E731
+    out = [f"{r['role']} on {ref(r['ref'])} since {hm(r['started'])}" for r in w.get("running", [])]
+    for name in ("held", "skipped"):
+        for h in w.get(name, []):
+            why = (h["reason"] or "").split(": ", 1)[-1] if h["reason"] else h["code"]
+            out.append(f"{name}: {ref(h['ref'])}, {why}" if why != name else f"{name}: {ref(h['ref'])}")
+    out += [f"failed: {ref(f['ref'])} {f['kind']}, {ENDING_WORDS[f['ending']]}, {hm(f['ended'])}"
+            for f in w.get("failed", [])]
+    return out
+
+
+WATCHER_NOTES = {
+    "missing": "No [watch] issue: swarm watch's state isn't published (launcher/README.md).",
+    "not_owner": "The [watch] issue wasn't opened by the owner, so the floor doesn't show it (GOV-0025).",
+    "several": "The owner has more than one open [watch] issue; close all but one.",
+    "malformed": "Can't read swarm watch's state from the [watch] issue.",
+}
+
+
+def render_watcher(w: dict | None, repo: str) -> str:
+    esc = lambda x: html.escape("" if x is None else str(x))  # noqa: E731
+    w = w or {"status": "missing"}
+    out = ['<div class="watcher"><h3>The watcher</h3>']
+    if w["status"] != "ok":
+        out.append(f'<p class="muted">{esc(WATCHER_NOTES[w["status"]])}</p></div>')
+        return "\n".join(out)
+
+    def ref(r: str) -> str:
+        n = r.rsplit("#", 1)[1]
+        path = "pull" if r.startswith("PR ") else "issues"
+        return (f'{"PR " if path == "pull" else ""}'
+                f'<a href="https://github.com/{esc(repo)}/{path}/{n}">#{n}</a>')
+
+    when = f'{span(w["age_minutes"])} ago, at {w["checked"].strftime("%H:%M")} UTC'
+    if w["stale"]:
+        # The watcher publishes only when its state changes (#458), so an old time can mean a
+        # quiet loop or a stopped one: the lists are shown as of then, not as current.
+        out.append(f'<p class="stale">watcher last published {esc(when)}: these lists are as '
+                   f'of then, and it may have stopped (it publishes only when they change)</p>')
+    else:
+        out.append(f'<p class="muted">as of {esc(when)}</p>')
+    lines = watcher_lines(w, ref)
+    if lines:
+        out.append("<ul>" + "".join(f"<li>{line}</li>" for line in lines) + "</ul>")
+    else:
+        out.append('<p class="muted">Nothing running, held, skipped or failed.</p>')
+    out.append("</div>")
     return "\n".join(out)

@@ -77,6 +77,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `owner_last_acted` | the [header](#header)'s owner line: `status` (`acted`, `none` or `unknown`); with `acted`, `kind` (the event's action, e.g. `labeled`, `closed`, `pushed`), `text` (`labelled #411 ready`), `time` and `link`; with `none`, `days` |
 | `needs_you` | the needs-you list below, without over-cap items |
 | `floor` | [on the floor](#on-the-floor): `cards`, each with `session_id`, `role`, `model`, `status`, `started_ts`, `run_minutes`, `issue`, `pr`, `gov_question`, `activity` (the plain words), `events_per_slot` (six counts, oldest first) and `slots_used` (`editing`, `reading`, `commands`); and `idle`, each with `session_id`, `role` and `idle_minutes` |
+| `watcher` | [the watcher](#the-watcher): `status` (`ok`, `missing`, `not_owner`, `several` or `malformed`); when `ok`, also `issue`, `checked` (when its state last changed), `age_minutes`, `stale`, and `running`, `held`, `skipped` and `failed` with #456's fields only. No cost |
 | `sessions` | each session's `session_id`, `role`, `model`, `status`, `issue`, `pr`, `gov_question`, `last_event`, `last_ts`, `started_ts` and `tracking_issue` |
 | `prs` | open PRs: `number`, `title`, `url`, `author`, `draft`, `review`, `created_ts`, `closes`, `needs_owner` |
 | `gov_questions` | open `gov:question`s with their fields, time to live and the `session_id`s waiting on them |
@@ -127,6 +128,19 @@ The plain words come from the session's latest event and its tool names, through
 "on #392" is the session's issue, or "on PR #391" if it has only a PR, or nothing.
 
 What today's events can't give: words like "Running tests" or "Checking the diff of PR #391", and counts of files read, edited or tests run. An event lists only the distinct tool names used since the previous one (heartbeat/SCHEMA.md), never commands, paths or counts (GOV-0002). Showing those needs a new captured field, which is a `security` question for the owner; once one is ruled, it adds rows to `TEMPLATES`, not new logic.
+
+### The watcher
+
+Under the cards, the floor shows what `swarm watch` is doing (`floor.watcher()`, #459, part 3c of #444), from the `[watch]` issue the watcher keeps current (#458, GOV-0025). The issue comes with the open issues `generate.py` already lists, so it adds **no API calls** per build.
+
+- builder on #405 since 11:09
+- held: #407, 2 of 2 running
+- skipped: #439, the role has no spend_cap_usd in swarm.toml
+- failed: #51 build, at its cap, 10:02
+
+**What it accepts.** Only the open issue whose body starts with `<!-- productswarm-watch -->` and that the owner opened (`humans.owner` in `jurisdictions.yml`; GOV-0025). Marked issues anyone else opened are ignored; if the owner opened none, the floor says so, and if they opened more than one, it says to close all but one. From the body's fenced `json` it keeps only #456's fields, each checked by shape (a ref is `#N` or `PR #N`, times are RFC 3339 with an offset, an ending is one of `watch.ENDINGS`' codes), and drops any entry that fails. A held or skipped reason is kept only if it is one of `watch.REASONS`' sentences; any other text is dropped and the line shows the code. No cost (#456).
+
+**When it's stale.** The watcher edits the issue only when its state changes (#458), so `checked` is when that last happened, not its last check. Once it is older than two `[watch] interval_minutes` (from the committed `swarm.toml`), the floor says "watcher last published 40 min ago" and shows the lists as of then, not as current: the loop may be quiet or stopped, and the issue can't tell which.
 
 ## Needs you
 
