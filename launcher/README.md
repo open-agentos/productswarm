@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, and `swarm status` (#457) prints what the loop is doing now, with cost. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
 
 ## swarm up / ls / stop
 
@@ -124,6 +124,36 @@ Limits. These are stated in the output too, and this command doesn't fix them:
 - **The cost is Claude Code's local estimate** (`total_cost_usd`).
 
 **It stays local.** `swarm cost` only prints. Nothing is written to GitHub or the repo, and no cost figure goes into `evals/` or a PR. GOV-0014 keeps run costs local, and GOV-0002, GOV-0003 and GOV-0004 govern what reaches GitHub. Publishing cost would need a `security` question.
+
+## swarm status: the watcher's state with cost (local, instant)
+
+```bash
+launcher/swarm status [--manifest swarm.toml]
+```
+
+What `swarm watch` is doing now, for when the desk's minute or two is too slow (#457). It reads local files only and makes no GitHub call, so it returns at once and works offline. It is `watch.public_state()` (#456, below) plus cost, one line per item:
+
+```
+swarm watch: running (pid 71224) · last check 1m ago
+
+running (1):
+- [build] #457 builder · 1h 05m · $2.25 so far (est.)
+
+held (1):
+- [build] #459 · held: waits on an open issue · since 2h ago
+
+skipped: none
+
+failed in the last 7 days (1):
+- [build] #454 · at cap · ended 3h ago · $3.50 (est.)
+```
+
+- **The first line** says whether a `swarm watch` holds `watch.lock` (from the pid in the file, counted only while that process is still a `swarm watch`; the lock is never taken) and when it last checked. That check is marked `stale` once it is more than twice `interval_minutes` old.
+- **Running** sessions are the loop's runs that are still live, with their run time. Their cost so far is the dashboard's list-price estimate (`dashboard/spend.py`) from the token counts on the last event in the session's local heartbeat spool, `~/.productswarm/events/<session id>.jsonl`. It shows `-` until the spool names a model and its tokens.
+- **Held** and **skipped** triggers show the reason sentence from `watch.REASONS`.
+- **Failed** runs are those that ended at cap, in error, with no result or limited in the last `RUNS_DAYS`, with Claude Code's `total_cost_usd` from `watch.json`.
+
+Like `swarm cost`, it only prints: no cost leaves this machine.
 
 ## swarm watch: the wake-up loop
 

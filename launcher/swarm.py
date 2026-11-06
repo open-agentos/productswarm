@@ -9,6 +9,7 @@
                                     responds to requested changes on PR M (GOV-0011)
     launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
     launcher/swarm cost             cost per PR of the runs swarm watch recorded (#176; local only)
+    launcher/swarm status           swarm watch's state with cost, from local files only (#457)
     launcher/swarm watch [--dry-run]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
@@ -705,6 +706,24 @@ def cost(launcher: Launcher, repo: str, get_prs: Callable | None = None) -> int:
     return 0
 
 
+def status(launcher: Launcher, manifest_path: Path | str = manifest.DEFAULT_PATH) -> int:
+    """`swarm status` (#457): what swarm watch is running, holding, skipping and has seen
+    fail, with cost, at once. Local files only: no GitHub call, so it works offline. It
+    reads sessions without touching them (Launcher.running(), not live())."""
+    import watch
+    try:
+        limits = manifest.load_watch(manifest_path)
+    except manifest.ManifestError:
+        limits = None
+    interval = limits.interval_minutes if limits else watch.DEFAULT_INTERVAL
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    launcher.out(watch.status_text(watch.load_state(launcher), launcher.running(), now,
+                                   holder=watch.lock_holder(launcher), interval=interval,
+                                   cost_of=lambda sid: watch.spool_cost(launcher.home, sid),
+                                   ago=dashboard().ago))
+    return 0
+
+
 # ---------------------------------------------------------------- launch (L3)
 
 JURISDICTIONS = ROOT / "governance" / "jurisdictions.yml"
@@ -836,6 +855,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_inbox.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_cost = sub.add_parser("cost", help="cost per PR of the runs swarm watch recorded (local only)")
     p_cost.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_status = sub.add_parser("status", help="swarm watch's state with cost, from local files only")
+    p_status.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
     p_launch.add_argument("role")
     p_launch.add_argument("--issue", type=int, required=True, help="the issue to work on")
@@ -893,6 +914,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return inbox(launcher, repo, args.idle_minutes, args.manifest)
         if args.cmd == "cost":
             return cost(launcher, repo)
+        if args.cmd == "status":
+            return status(launcher, args.manifest)
         if args.cmd == "watch":
             import watch
             try:
