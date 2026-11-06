@@ -81,7 +81,7 @@ To log one, add a decision record (`shape: autonomous`, `status: in-force`) to t
 
 ## 6. Ratification
 
-- **A ruling is a PR** that adds `governance/decisions/GOV-NNNN-<slug>.md` (copied from `GOV-0000-template.md`), updates `governance/INDEX.md`, and closes the question issue.
+- **A ruling that needs a record is a PR** that adds governance/decisions/GOV-NNNN-<slug>.md (copied from GOV-0000-template.md), updates governance/INDEX.md, and closes the question issue. A question needs a record when it is in the governance domain, rated one-way or external, in a domain governance/jurisdictions.yml marks always_one_way, or when the owner says so in the answer with a Record: yes line (GOV-0007). Any other answer is direction for that question only (GOV-0006), and the owner closes the question.
 - **Merge is ratification.** In Phase 0, only humans listed under `ratify` may merge to `governance/`. CODEOWNERS enforces this.
 - **In practice:** the owner answers on the question and adds `gov:ruled`, which is direction for that question only (GOV-0006). Docs drafts the record PR (GOV-0007), and its merge is the ruling. The record's ID goes in a one-line comment on the question.
 - **Expiry.** Every ruling carries `review_by`. Once that date has passed it is **not precedent** until someone re-affirms it in a new PR that bumps the date.
