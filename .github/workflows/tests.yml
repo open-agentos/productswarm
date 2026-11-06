@@ -1,0 +1,30 @@
+# GOV-0022 stage 1 (#521): the test check that the merger will require. Runs every
+# test_*.py under launcher/, dashboard/, evals/ and heartbeat/ through run_tests.py.
+# Committed by the owner: the Apps have no `workflows` permission (#32). After committing,
+# add the `tests` check to the `main` ruleset's required status checks.
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the tests
+        run: |
+          python3 --version
+          python3 run_tests.py
