@@ -17,6 +17,7 @@ it has none (for example, the role has no spend_cap_usd).
 | record | gov:question whose most recent `gov:ruled` was added by the owner, that | docs on the question |
 |        | needs a record (GOV-0007), with no open PR closing it                   |                      |
 | answer | gov:question whose most recent `ready` was added by the owner           | its "Raised by" role |
+|        |                                                                         | (planner if owner)   |
 | respond| open, non-draft PR the builder App opened, whose latest reviewer review | builder on the PR    |
 |        | at its head is CHANGES_REQUESTED, with Authority not `fail`, for at     | (GOV-0011)           |
 |        | most 2 rounds                                                           |                      |
@@ -190,20 +191,25 @@ def needs_record(body: str | None) -> str | None:
     return None
 
 
-def raised_by(body: str | None, roles: set[str]) -> tuple[str | None, str]:
+def raised_by(body: str | None, roles: set[str], owner: str | None = None) -> tuple[str | None, str]:
     """(role, "") from the "Raised by" field, or (None, why not).
 
     The asker is the field's first word, optionally in the `-- role` signature form, as
     the planner, builder and docs write it ("planner, on #167 (...)"). A role named later
     in the text isn't the asker (#271): "owner, after the first Actions reviewer test"
-    starts nothing."""
+    doesn't start the reviewer. A question the owner raised ("owner", or the owner's login,
+    with or without "@") starts the planner, which reads the answer and does what it
+    directs (#455)."""
     text = template_field(body, "Raised by")
     if not text:
         return None, 'it has no "Raised by" field'
-    m = re.match(r"(?:--\s*)?([a-z][a-z0-9-]*)", text.lower())
-    if m and m.group(1) in roles:
-        return m.group(1), ""
-    return None, f'"Raised by" doesn\'t start with a known role ({text!r})'
+    m = re.match(r"(?:--\s*)?@?([a-z0-9][a-z0-9-]*)(?![a-z0-9'’])", text.lower())
+    asker = m.group(1) if m else None
+    if asker in roles:
+        return asker, ""
+    if asker in {"owner", (owner or "owner").lower()} and "planner" in roles:
+        return "planner", ""
+    return None, f'"Raised by" doesn\'t start with a known role or the owner ({text!r})'
 
 
 # ---------------------------------------------------------------- triggers (pure)
@@ -275,7 +281,7 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
                                role="docs", command=launch_cmd("docs", n), issue=n))
         ready = owner_label(events, "ready", owner) if "ready" in labels else None
         if ready and not busy(n):
-            role, why_not = raised_by(body, roles)
+            role, why_not = raised_by(body, roles, owner)
             out.append(Trigger(key=f"answer:{n}:{ready.get('id')}", kind="answer", ref=f"#{n}",
                                why="ready by the owner", role=role,
                                command=launch_cmd(role, n) if role else None,
