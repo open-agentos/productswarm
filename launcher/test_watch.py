@@ -308,6 +308,27 @@ class WatchTest(unittest.TestCase):
         self.assertIn("[record] #87 gov:ruled by the owner, needs a record (the owner asked in the answer) "
                       "-> would start `launcher/swarm launch docs --issue 87`", self.lines)
 
+    def test_record_for_an_always_one_way_domain_rated_two_way(self):
+        # #519 (#491's case): a security question rated two-way, repo in its body.
+        self.scene.issues[2]["body"] = question_body(domain="security", rev="two-way", blast="repo")
+        (t,) = [t for t in self.w.tick(NOW) if t.kind == "record"]
+        self.assertEqual((t.key, t.role), ("record:87:13", "docs"))
+        self.assertIn("[record] #87 gov:ruled by the owner, needs a record (domain security is always "
+                      "one-way) -> would start `launcher/swarm launch docs --issue 87`", self.lines)
+
+    def test_record_for_a_domain_the_owner_marks_later(self):
+        # #519: spend isn't always_one_way today; once the file marks it, it counts next tick.
+        self.scene.issues[2]["body"] = question_body(domain="spend")
+        self.assertNotIn("record", [t.kind for t in self.w.tick(NOW)])
+        self.w.jurisdictions = jurisdictions_marking(self.home, "spend")
+        self.assertEqual([t.kind for t in self.w.tick(NOW)], ["record"])
+
+    def test_unreadable_jurisdictions_says_so_and_keeps_the_body_ratings(self):
+        self.w.jurisdictions = self.home / "missing.yml"
+        self.assertIn("record", [t.kind for t in self.w.tick(NOW)])     # #87 is domain governance
+        self.assertIn("swarm watch: can't read governance/jurisdictions.yml (FileNotFoundError); "
+                      "only a question's own ratings count for [record]", self.lines)
+
     def test_record_line_from_anyone_else_starts_nothing(self):
         for login in ("productswarm-planner[bot]", "someone-else"):
             self.w.seen.clear()
@@ -462,6 +483,38 @@ class HelpersTest(unittest.TestCase):
         self.assertIsNone(watch.needs_record(question_body(), said("Record: yes", "bot[bot]"), OWNER))
         self.assertIsNone(watch.needs_record(question_body(), said("I'd say Record: yes here"), OWNER))
         self.assertIsNone(watch.needs_record(question_body(), said("Record: no"), OWNER))
+
+
+    def test_needs_record_for_an_always_one_way_domain(self):
+        # #519: the domain's rating in jurisdictions.yml counts, whatever the body says.
+        body = question_body(domain="Security", rev="two-way", blast="repo")
+        self.assertIsNone(watch.needs_record(body))
+        self.assertEqual(watch.needs_record(body, one_way=frozenset({"security"})),
+                         "domain security is always one-way")
+        self.assertIsNone(watch.needs_record(question_body(domain="spend"), one_way=frozenset({"security"})))
+
+    def test_one_way_domains_come_from_jurisdictions(self):
+        # #519: read from the file, not a hard-coded list.
+        domains, why = watch.one_way_domains()
+        self.assertIsNone(why)
+        self.assertLessEqual({"security", "external"}, domains)
+        self.assertNotIn("spend", domains)
+        with tempfile.TemporaryDirectory() as d:
+            path = jurisdictions_marking(Path(d), "spend")
+            self.assertEqual(watch.one_way_domains(path), (domains | {"spend"}, None))
+            missing, why = watch.one_way_domains(Path(d) / "nope.yml")
+            self.assertEqual(missing, frozenset())
+            self.assertIn("can't read governance/jurisdictions.yml (FileNotFoundError)", why)
+
+
+def jurisdictions_marking(d: Path, domain: str) -> Path:
+    """A copy of the repo's jurisdictions.yml with `domain` marked always_one_way too."""
+    text = swarm.JURISDICTIONS.read_text()
+    head = f"\n  {domain}:\n"
+    assert head in text
+    path = d / "jurisdictions.yml"
+    path.write_text(text.replace(head, f"{head}    always_one_way: true\n", 1))
+    return path
 
 
 def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = True,

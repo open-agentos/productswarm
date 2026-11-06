@@ -140,6 +140,7 @@ import fcntl
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 import uuid
@@ -214,17 +215,37 @@ def template_field(body: str | None, label: str) -> str | None:
 RECORD_LINE = re.compile(r"^\s*record:\s*yes\s*$", re.I | re.M)
 
 
-def needs_record(body: str | None, comments: list[dict] = (), owner: str | None = None) -> str | None:
+def one_way_domains(path: Path = swarm.JURISDICTIONS) -> tuple[frozenset[str], str | None]:
+    """(the domains jurisdictions.yml marks `always_one_way: true`, why none) (#519).
+
+    Read through the dashboard's reader, not a second parser. If the file can't be read,
+    no domain counts and the reason says why; the body's own ratings still apply."""
+    if str(swarm.ROOT / "dashboard") not in sys.path:
+        sys.path.insert(0, str(swarm.ROOT / "dashboard"))
+    import authority   # jurisdictions.yml's reader
+    try:
+        ds = authority.domains(authority.read(Path(path).read_text()))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        return frozenset(), f"can't read {authority.JURISDICTIONS_PATH} ({e.__class__.__name__})"
+    return frozenset(d["name"].lower() for d in ds if d["always_one_way"]), None
+
+
+def needs_record(body: str | None, comments: list[dict] = (), owner: str | None = None,
+                 one_way: frozenset[str] = frozenset()) -> str | None:
     """Why a question needs a record under GOV-0007, else None.
 
-    The body's ratings cover the governance domain, one-way and external. GOV-0007's other
-    case, "the owner says so in the answer", is a comment by the owner with a line
-    `Record: yes` on its own (#501). Nobody else's comment counts, agents included."""
+    The body's ratings cover the governance domain, one-way and external. A domain in
+    one_way (jurisdictions.yml's `always_one_way`, from one_way_domains()) counts as rated
+    one-way whatever the body says (#519). GOV-0007's other case, "the owner says so in the
+    answer", is a comment by the owner with a line `Record: yes` on its own (#501). Nobody
+    else's comment counts, agents included."""
     domain = (template_field(body, "Domain") or "").strip().lower()
     rev = (template_field(body, "Reversibility") or "").strip().lower()
     blast = (template_field(body, "Blast radius") or "").strip().lower()
     if domain == "governance":
         return "domain governance"
+    if domain in one_way:
+        return f"domain {domain} is always one-way"
     if rev == "one-way":
         return "one-way"
     if blast == "external":
@@ -323,12 +344,14 @@ def held_by(n: int, m: dict, started: list, now: dt.datetime | None,
 
 def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Callable,
              is_tracking: Callable, review_in_actions: bool = False,
-             now: dt.datetime | None = None, stale_minutes: int = DEFAULT_STALE) -> list[Trigger]:
+             now: dt.datetime | None = None, stale_minutes: int = DEFAULT_STALE,
+             one_way: frozenset[str] = frozenset()) -> list[Trigger]:
     """Every trigger present now, in needs-you order then issue order. Nothing is filtered
     for novelty here; Watch does that. With review_in_actions, each [review] trigger is
     skipped as left to Actions (GOV-0019). A [record], [answer], [build] or [respond]
     trigger on an issue a live session holds comes back with `held` set, saying who holds
-    it and whether that session is stale (#488); Watch starts nothing for it."""
+    it and whether that session is stale (#488); Watch starts nothing for it. A question in
+    a domain in one_way needs a record whatever its body rates it (#519)."""
     m, out = w.model, []
     items = needs_you(m)
     heads = {p["number"]: p.get("head") for p in m["prs"]}
@@ -371,7 +394,7 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         body, events = (raw.get(n) or {}).get("body"), w.events.get(n, [])
         labels = {lb.get("name") for lb in (raw.get(n) or {}).get("labels") or []}
         ruled = owner_label(events, "gov:ruled", owner) if "gov:ruled" in labels else None
-        why_record = needs_record(body, w.comments.get(n, []), owner)
+        why_record = needs_record(body, w.comments.get(n, []), owner, one_way)
         record = None
         if ruled and why_record and n not in closing:
             record = hold(Trigger(key=f"record:{n}:{ruled.get('id')}", kind="record", ref=f"#{n}",
@@ -802,6 +825,7 @@ class Watch:
     get_heartbeat: Callable[[str, int, dt.datetime], dict] = swarm.heartbeat
     seen: set[str] = field(default_factory=set)                      # dry-run memory
     roles_from: Path | None = None    # repo root whose roles/ is re-read every tick (#487)
+    jurisdictions: Path = swarm.JURISDICTIONS   # always_one_way domains, re-read every tick (#519)
 
     def tick(self, now: dt.datetime | None = None) -> list[Trigger]:
         """One check. Returns the triggers it acted on or printed for the first time."""
@@ -822,6 +846,15 @@ class Watch:
         for p in problems:
             self.launcher.out(f"{self.manifest_path.name}: {p}")
 
+    def one_way(self) -> frozenset[str]:
+        """jurisdictions.yml's always_one_way domains, read now so a domain the owner marks
+        later counts on the next check (#519). If the file can't be read it says so, every
+        tick, and only the body's ratings count."""
+        domains, why = one_way_domains(self.jurisdictions)
+        if why:
+            self.launcher.out(f"swarm watch: {why}; only a question's own ratings count for [record]")
+        return domains
+
     def dry_tick(self, now: dt.datetime) -> list[Trigger]:
         """Print and return the triggers not seen before. Starts nothing, writes nothing.
         A held trigger (#488, #490) is printed once per reason and not returned; it prints
@@ -832,7 +865,7 @@ class Watch:
         new = []
         for t in triggers(w, self.owner, self.launcher.running(), self.roles, g.needs_you,
                           g.is_tracking, bool(limits and limits.review_in_actions), now,
-                          limits.stale_minutes if limits else DEFAULT_STALE):
+                          limits.stale_minutes if limits else DEFAULT_STALE, self.one_way()):
             key = f"{t.key}|held|{t.once}" if t.held else t.key
             if key in self.seen:
                 continue
@@ -903,7 +936,8 @@ class Watch:
         if limited and not any(x.get("reason") == limited for x in st["waiting"]):
             out(f"swarm watch: a run hit the account's usage limit; {limited}, for every start (#489)")
         todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
-                                    limits.review_in_actions, now, limits.stale_minutes)
+                                    limits.review_in_actions, now, limits.stale_minutes,
+                                    self.one_way())
                 if t.key not in acted]
         todo.sort(key=lambda t: before.get(t.key, {}).get("since", iso(now)))  # held longest first
         held, done, reviewer = [], [], None
