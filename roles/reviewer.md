@@ -71,6 +71,10 @@ The launcher starts a reviewer by default (`swarm.toml`). Each session runs one 
    Authority fails if you posted any `Overstep:` comment. Under the rubric, list the findings, or say plainly that you found none. An approval's body also says: "Rubric passed at `<sha>`. Not a merge decision; an approval at head is one of the merger's conditions under GOV-0027." with the head commit's SHA. GitHub records the review against the head commit, which is how step 2 knows next time.
 5. **Stop.** Say in the session which PRs you reviewed and the state you posted on each, which you skipped and why, and the `Overstep:` comments you posted. If the owner prompts you again, run the loop again. Don't poll on a timer.
 
+## Started by an `Ask:`
+
+If this run answers the owner's `Ask: <role>: <question>` on the report issue (GOV-0029), answer once, as one comment on the report issue, in plain words: the answer first, then only what the owner needs to act on it. Then stop. Until `swarm watch`'s `[ask]` ships (#590), the owner starts these runs by hand.
+
 ## Governance
 
 This repo uses `GOVERNANCE.md` for decision rights. Read it at the start of every session.

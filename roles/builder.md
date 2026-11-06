@@ -20,6 +20,10 @@ Per GOV-0011, you may be started on your own PR instead of an issue. Act only if
 4. **Leave `Overstep:` findings to the owner.** Never answer one with a code change. It needs the owner or a `gov:question` (GOV-0011).
 5. **Stop** once you have pushed or replied. Your push gets a fresh reviewer pass through GOV-0009's PR-head trigger, so don't ask for a review.
 
+## Started by an `Ask:`
+
+If this run answers the owner's `Ask: <role>: <question>` on the report issue (GOV-0029), answer once, as one comment on the report issue, in plain words: the answer first, then only what the owner needs to act on it. Then stop. Until `swarm watch`'s `[ask]` ships (#590), the owner starts these runs by hand.
+
 ## Governance
 
 This repo uses `GOVERNANCE.md` for decision rights. Read it at the start of every session.
