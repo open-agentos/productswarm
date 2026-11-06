@@ -499,3 +499,40 @@ Why: #384's log line showed the reviewer token is granted only `issues: read`, y
 Per GOV-0016, claude's stdout and stderr go to files in a fresh directory under `$RUNNER_TEMP`, with the heartbeat's local spool, and the job log gets only `result`, `subtype`, `num_turns` and `total_cost_usd`, one JSON-encoded line each. Exit 0 is done, 3 ended at its budget or turn ceiling, 1 an error, 2 refused. `--dry-run` prints the command and starts nothing, anywhere:
 
     python3 launcher/actions_review.py run --pr 70 --dry-run
+
+## merger.py: merge or miss per PR (GOV-0022, GOV-0027)
+
+`python3 launcher/merger.py plan [--pr N] [--manifest PATH] [--repo OWNER/NAME]` (#589) is the merger's decision, read-only. It is a reconciler like `actions_review.py plan` (GOV-0020): it reads repo state from GitHub and the checkout of `main` it runs from, never takes PR text as instructions, and writes nothing to GitHub. Posting "would merge", merging, the workflow and the `productswarm-merger` App come in later issues.
+
+It prints one line per open PR: `#N <head sha> merge (standing grant)`, `merge (approved ask)` or `miss: <first failed condition>`. Drafts, fork heads and closed PRs get a `skip:` line. A PR is judged as a standing grant unless it touches a protected path; then it is judged as an approved ask.
+
+**Standing grant** (GOV-0027, keeping GOV-0022's other conditions), checked in this order:
+
+- the author is `productswarm-builder[bot]` and the base is `main`;
+- it closes exactly one issue in this repo, and that issue is go by its milestone: `swarm.milestone_refusal()`, the check `swarm launch` uses (GOV-0026, #582). The owner's `ready` alone doesn't count, since GOV-0027 says "under an approved milestone", and a `gov:question` never counts;
+- the reviewer approved at the current head (a dismissed approval doesn't count), and no one's latest review requests changes;
+- no line starting `Overstep:` in any PR comment, review or review comment;
+- the newest `tests` check run from GitHub Actions at the current head succeeded;
+- it touches no protected path: `ops/`, `.github/`, `governance/`, `GOVERNANCE.md`, `roles/`, `CLAUDE.md` (anywhere), `swarm.toml`, or a dependency file (`requirements*.txt`, `pyproject.toml`, `package.json`, lock files and the like). Renamed files count by their old path too;
+- additions plus deletions are at most `[merger] max_changed_lines`.
+
+**Approved ask** (GOV-0027), for a PR that touches a protected path:
+
+- it touches none of `GOVERNANCE.md`, `governance/jurisdictions.yml` or `.github/workflows/`: the owner merges those;
+- the author is a swarm App (`identities.agents`) and the base is `main`;
+- the owner (`humans.owner`) approved at the current head, and no one's latest review requests changes;
+- no `Overstep:` line, and `tests` passed at the current head.
+
+GOV-0027 states only the owner's approval at head for asks; the other conditions are a stricter reading that fails closed (docs' note 2 on #585).
+
+A head pushed after an approval is a miss in both kinds, since the approval isn't at the head.
+
+**The switch** is a `[merger]` table in `swarm.toml`, which is the owner's to set:
+
+```toml
+[merger]
+mode = "shadow"            # off, shadow or live
+max_changed_lines = 300    # a whole number of at least 1
+```
+
+If the table or either key is missing or bad, the merger is off and every PR is a miss with that reason. `manifest.py` allows the table but doesn't check it. Exit 0 when it decided, even if nothing merges. If GitHub or a file (`swarm.toml`, `jurisdictions.yml`) can't be read, every PR is a miss and it exits 1.
