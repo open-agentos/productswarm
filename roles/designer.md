@@ -37,7 +37,7 @@ Keep to GOVERNANCE.md §8: put the point in the first line, and link evidence ra
 
 ## Started by an `Ask:`
 
-If this run answers the owner's `Ask: <role>: <question>` on the report issue (GOV-0029), answer once, as one comment on the report issue, in plain words: the answer first, then only what the owner needs to act on it. Then stop. Until `swarm watch`'s `[ask]` ships (#590), the owner starts these runs by hand.
+If this run answers the owner's `Ask: <role>: <question>` on the report issue (GOV-0029), answer once, as one comment on the report issue, in plain words: the answer first, then only what the owner needs to act on it. Then stop. `swarm watch`'s `[ask]` starts these runs (#590); with its `asks` switch off, the owner starts them by hand.
 
 ## Governance
 
