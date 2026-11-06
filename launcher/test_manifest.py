@@ -237,11 +237,43 @@ class ReviewInActionsTest(Base):
             out = io.StringIO()
             with redirect_stdout(out), unittest.mock.patch.object(m, "ROOT", self.dir):
                 self.assertEqual(m.main(["manifest.py", str(path)]), 0)
-            self.assertTrue(out.getvalue().splitlines()[-1].endswith(shown))
+            self.assertIn(f"\t{shown}\t", out.getvalue().splitlines()[-1])
 
     def test_repo_manifest_parses_it(self):
         # The owner turns it on or off (#260), so check only that the repo's value parses (#285).
         self.assertIsInstance(m.load_watch().review_in_actions, bool)
+
+
+class CallInsTest(Base):
+    """[watch] call_ins (#520, GOV-0023): optional, default false, true or false only."""
+    WATCH = "[watch]\ninterval_minutes = 5\nmax_live = 2\nmax_turns = 200\n"
+
+    def limits(self, extra=""):
+        return m.parse_all(self.WATCH + extra + session(), Path("swarm.toml"), self.roles)[1]
+
+    def test_missing_is_false(self):
+        self.assertIs(self.limits().call_ins, False)
+
+    def test_true_and_false(self):
+        self.assertIs(self.limits("call_ins = true\n").call_ins, True)
+        self.assertIs(self.limits("call_ins = false\n").call_ins, False)
+
+    def test_wrong_type(self):
+        for bad in ('"true"', "1", "[]"):
+            with self.subTest(value=bad):
+                with self.assertRaises(m.ManifestError) as cm:
+                    self.limits(f"call_ins = {bad}\n")
+                self.assertEqual(len(cm.exception.problems), 1)
+                self.assertIn("watch: call_ins must be true or false", cm.exception.problems[0])
+
+    def test_cli_shows_it(self):
+        path = self.dir / "swarm.toml"
+        for value, shown in (("true", "call-ins on"), ("false", "call-ins off")):
+            path.write_text(self.WATCH + f"call_ins = {value}\n" + session())
+            out = io.StringIO()
+            with redirect_stdout(out), unittest.mock.patch.object(m, "ROOT", self.dir):
+                self.assertEqual(m.main(["manifest.py", str(path)]), 0)
+            self.assertTrue(out.getvalue().splitlines()[-1].endswith(f"\t{shown}"))
 
 
 class ActionsMaxReviewsTest(Base):

@@ -519,7 +519,7 @@ def jurisdictions_marking(d: Path, domain: str) -> Path:
 
 def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = True,
                    max_turns: int | None = 50, review_in_actions: bool | None = None,
-                   stale_minutes: int | None = None) -> Path:
+                   stale_minutes: int | None = None, call_ins: bool | None = None) -> Path:
     """A swarm.toml with every role, the given caps, and a [watch] table."""
     text = ""
     if watch_table:
@@ -529,6 +529,8 @@ def write_manifest(d: Path, caps: dict, max_live: int = 10, watch_table: bool = 
             text += f"review_in_actions = {str(review_in_actions).lower()}\n"
         if stale_minutes is not None:
             text += f"stale_minutes = {stale_minutes}\n"
+        if call_ins is not None:
+            text += f"call_ins = {str(call_ins).lower()}\n"
         text += "\n"
     for role in sorted(ROLES):
         text += f'[[session]]\nrole = "{role}"\ncount = 1\nmodel = "m-{role}"\n'
@@ -1036,7 +1038,7 @@ class ManifestWatchTest(unittest.TestCase):
             manifest.parse_all(text)
         self.assertEqual(c.exception.problems, [
             "watch: unknown key 'ceiling' (allowed: interval_minutes, max_live, max_turns, "
-            "review_in_actions, actions_max_reviews, stale_minutes)",
+            "review_in_actions, actions_max_reviews, stale_minutes, call_ins)",
             "watch: interval_minutes must be a positive number, got 0",
             "watch: max_live must be a whole number of at least 1, got 1.5"])
         with self.assertRaises(manifest.ManifestError) as c:
@@ -1936,3 +1938,192 @@ class HeldTest(unittest.TestCase):
                 manifest.parse_all(base % f"stale_minutes = {v}")
             self.assertEqual(c.exception.problems,
                              [f"watch: stale_minutes must be a whole number of at least 1, got {manifest.tomllib.loads('v = ' + v)['v']!r}"])
+
+
+BUILDER_APP, PLANNER_APP = "productswarm-builder[bot]", "productswarm-planner[bot]"
+
+
+def call(cid, body, who=BUILDER_APP, at=None):
+    """A comment on an issue, posted 5 minutes ago unless `at` says when."""
+    return {"id": cid, "body": body, "user": {"login": who}, "created_at": at or ts(5)}
+
+
+class CallInTest(unittest.TestCase):
+    """GOV-0023's [call-in] trigger (#520). In the Scene, a builder is live on ready #60."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        (self.home / "launcher").mkdir()
+        self.fake = Fake(self.home / "launcher")
+        self.lines = []
+        self.l = swarm.Launcher(self.home, run=self.fake.run, proc=self.fake.proc, kill=self.fake.kill,
+                                clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append,
+                                root=self.home / "repo", git=FakeGit())
+        self.scene = Scene()
+        self.manifest(ALL_CAPPED, call_ins=True)
+
+    def manifest(self, caps, max_live=10, **kw):
+        self.path = write_manifest(self.home, caps, max_live, **kw)
+
+    def watcher(self, dry_run=False):
+        return watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=dry_run, manifest_path=self.path,
+                           read=self.scene.read, get_issue=self.scene.get_issue,
+                           get_heartbeat=self.scene.heartbeat)
+
+    def tick(self, dry_run=False):
+        """The [call-in] triggers one check acted on or printed for the first time."""
+        return [t for t in self.watcher(dry_run).tick(NOW) if t.kind == "call-in"]
+
+    def called(self):
+        return [(e.name, e.role, e.issue, e.called_by, e.call_why) for e in self.l.load()
+                if e.called_by]
+
+    def say(self, *comments, n=60):
+        self.scene.comments[n] = list(comments)
+
+    def call_lines(self):
+        return [x for x in self.lines if x.startswith("[call-in]")]
+
+    def test_a_call_starts_each_named_role_once_beside_the_live_caller(self):
+        self.say(call(501, "Need a second view.\nCall in: docs, planner: check the wording\nThanks"))
+        self.assertEqual([t.key for t in self.tick()], ["call-in:60:501:docs", "call-in:60:501:planner"])
+        who = "the builder (productswarm-builder[bot])"
+        self.assertEqual(self.called(), [("docs-issue-60", "docs", 60, who, "check the wording"),
+                                         ("planner-issue-60", "planner", 60, who, "check the wording")])
+        cmd = [c for c in self.fake.commands if "docs-issue-60" in c or "roles/docs.md" in c][-1]
+        self.assertIn("answer a call-in on issue #60: the builder (productswarm-builder[bot]) called "
+                      "you in (GOV-0023) because: check the wording.", cmd)
+        self.assertIn("post one comment on it", cmd)
+        argv = headless_argv(cmd)          # GOV-0012's budget and turns, GOV-0013's denies
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "10")
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "50")
+        self.assertIn("Bash(gh pr merge *)", argv)
+        n = len(self.fake.commands)
+        self.assertEqual(self.tick(), [])                 # keyed on the comment: once per call
+        for name in ("docs-issue-60", "planner-issue-60"):
+            (e,) = [e for e in self.l.load() if e.name == name]
+            self.fake.procs.pop(self.l.pid(e))
+        self.assertEqual(self.tick(), [])                 # and not again once they stop
+        self.assertEqual(len(self.fake.commands), n)
+
+    def test_the_owner_may_call_and_anyone_else_is_skipped(self):
+        self.say(call(501, "Call in: docs: drive-by", who="stranger"),
+                 call(502, "call in: planner: please plan", who=OWNER))
+        done = self.tick()
+        self.assertEqual([(t.key, t.skipped) for t in done], [
+            ("call-in:60:501", "stranger isn't a swarm App or the owner, so the call doesn't count (GOV-0023)"),
+            ("call-in:60:502:planner", None)])
+        self.assertEqual([c[:4] for c in self.called()], [("planner-issue-60", "planner", 60, "the owner")])
+        self.assertIn("[call-in] #60 call in by stranger (comment 501) -> skipped: stranger isn't a swarm "
+                      "App or the owner, so the call doesn't count (GOV-0023)", self.lines)
+
+    def test_a_role_cant_call_itself_and_unknown_names_are_skipped(self):
+        self.say(call(501, "Call in: builder, designer, docs: x"))
+        done = self.tick()
+        self.assertEqual([(t.key, t.skipped) for t in done], [
+            ("call-in:60:501:builder", "a role can't call itself in (GOV-0023)"),
+            ("call-in:60:501:designer", "'designer' isn't a role with a prompt in roles/"),
+            ("call-in:60:501:docs", None)])
+        self.assertEqual([c[0] for c in self.called()], ["docs-issue-60"])
+
+    def test_at_most_two_calls_count_per_issue_per_utc_day(self):
+        self.say(call(500, "Call in: builder: only myself", at="2026-11-03T08:00:00Z"),  # doesn't count
+                 call(501, "Call in: docs: one", at="2026-11-03T09:00:00Z"),
+                 call(502, "Call in: reviewer: two", who=PLANNER_APP, at="2026-11-03T10:00:00Z"),
+                 call(503, "Call in: planner: three", at="2026-11-03T11:00:00Z"),
+                 call(504, "Call in: planner: next day", at="2026-11-04T00:00:00Z"))
+        done = {t.key: t.skipped for t in self.tick()}
+        self.assertEqual(done["call-in:60:503"], "#60 already has 2 calls on 2026-11-03 (UTC), the most "
+                                                 "that count per issue per day (GOV-0023)")
+        self.assertEqual(sorted(c[0] for c in self.called()),
+                         ["docs-issue-60", "planner-issue-60", "reviewer-issue-60"])
+        self.assertEqual([c[4] for c in self.called() if c[1] == "planner"], ["next day"])
+
+    def test_the_switch_off_starts_nothing_records_nothing_and_on_starts_it(self):
+        self.manifest(ALL_CAPPED)                         # no call_ins: off by default
+        self.say(call(501, "Call in: docs: x"))
+        w = self.watcher()
+        self.assertEqual([t for t in w.tick(NOW) if t.kind == "call-in"], [])
+        self.assertEqual(self.called(), [])
+        off = f"[call-in] #60 call in by {BUILDER_APP} (comment 501): docs -> skipped: {watch.CALL_INS_OFF}"
+        self.assertEqual(self.call_lines(), [off])
+        w.tick(NOW)
+        self.assertEqual(self.call_lines(), [off])       # said once
+        self.assertFalse(any(k.startswith("call-in") for k in watch.load_state(self.l)["acted"]))
+        self.manifest(ALL_CAPPED, call_ins=False)
+        self.assertEqual(self.tick(), [])
+        self.manifest(ALL_CAPPED, call_ins=True)
+        self.assertEqual([t.key for t in self.tick()], ["call-in:60:501:docs"])
+
+    def test_a_live_session_of_the_called_role_holds_it(self):
+        self.scene.prs.append(pr(72, SHA2, closes=(60,)))  # no [build] on #60 to take the slot
+        self.say(call(501, "Call in: builder: a second pair of hands", who=PLANNER_APP))
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.called(), [])
+        (held,) = [x for x in watch.waiting(self.l)[1] if x["kind"] == "call-in"]
+        self.assertEqual(held["reason"], "held: builder session busy-sid is live on #60 (active)")
+        self.scene.tracking, self.scene.comments[200] = [], []     # the builder stops
+        self.assertEqual([t.key for t in self.tick()], ["call-in:60:501:builder"])
+
+    def test_a_call_from_before_the_owners_ready_doesnt_count(self):
+        self.scene.events[60] = [{**ev("ready", eid=12), "created_at": ts(10)}]
+        self.say(call(501, "Call in: docs: old", at=ts(20)), call(502, "Call in: planner: new", at=ts(5)))
+        self.assertEqual([t.key for t in self.tick()], ["call-in:60:502:planner"])
+
+    def test_a_ready_question_counts_too(self):
+        self.say(call(502, "Call in: docs: x", who=PLANNER_APP), n=88)
+        self.assertEqual([t.key for t in self.tick()], ["call-in:88:502:docs"])
+
+    def test_not_ready_or_not_the_owners_ready_starts_nothing(self):
+        self.scene.events[60] = [ev("ready", actor="someone", eid=12)]
+        self.say(call(501, "Call in: docs: x"))
+        self.scene.issues.append(issue(90))
+        self.say(call(503, "Call in: docs: x"), n=90)
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.call_lines(), [])
+
+    def test_runs_stay_inside_gov_0010(self):
+        self.manifest({r: 10 for r in ROLES if r != "docs"}, call_ins=True)
+        self.say(call(501, "Call in: docs: x"))
+        self.tick()
+        (held,) = [x for x in watch.waiting(self.l)[1] if x["kind"] == "call-in"]
+        self.assertIn("docs has no spend_cap_usd", held["reason"])
+        self.manifest(ALL_CAPPED, max_live=4, call_ins=True)     # the other four triggers fill it
+        self.tick()
+        (held,) = [x for x in watch.waiting(self.l)[1] if x["kind"] == "call-in"]
+        self.assertEqual(held["reason"], "held: 4 of 4 sessions swarm watch started are live (GOV-0010)")
+
+    def test_dry_run_prints_it_with_the_headless_command(self):
+        self.say(call(501, "Call in: docs: x"))
+        self.assertEqual([t.key for t in self.tick(dry_run=True)], ["call-in:60:501:docs"])
+        i = self.lines.index(f"[call-in] #60 call in by {BUILDER_APP} (comment 501): docs -> would start "
+                             f"docs on #60, called in")
+        self.assertIn("answer a call-in on issue #60", self.lines[i + 1])
+        self.assertEqual(self.l.load(), [])
+
+    def test_gather_reads_the_comments_of_ready_issues(self):
+        self.say(call(501, "Call in: docs: x"))
+
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, self.scene.gh(argv), "")
+        with mock.patch.object(G, "subprocess", types.SimpleNamespace(
+                run=run, SubprocessError=subprocess.SubprocessError)):
+            w = watch.gather(REPO, 15, NOW)
+        self.assertEqual([c["id"] for c in w.comments[60]], [501])
+        self.assertNotIn(200, w.comments)                 # not tracking issues
+
+    def test_call_line(self):
+        self.assertEqual(watch.call_line("hi\n  CALL IN: Docs , `planner`, docs:  why  this \nbye"),
+                         (["docs", "planner"], "why this"))
+        self.assertEqual(watch.call_line("Call in: docs"), (["docs"], ""))
+        self.assertEqual(watch.call_line("Call in: docs: a: b"), (["docs"], "a: b"))
+        self.assertIsNone(watch.call_line("Recall in: docs: x"))
+        self.assertIsNone(watch.call_line("We could `Call in: docs: x` here"))
+        self.assertEqual(len(watch.call_line("Call in: docs: " + "x" * 999)[1]), watch.WHY_MAX)
+
+    def test_swarm_apps_come_from_jurisdictions(self):
+        apps, why = watch.swarm_apps()
+        self.assertIsNone(why)
+        self.assertEqual(apps[BUILDER_APP], "builder")
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(watch.swarm_apps(Path(d) / "nope.yml")[0], {})

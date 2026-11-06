@@ -21,6 +21,24 @@ it has none (for example, the role has no spend_cap_usd).
 | respond| open, non-draft PR the builder App opened, whose latest reviewer review | builder on the PR    |
 |        | at its head is CHANGES_REQUESTED, with Authority not `fail`, for at     | (GOV-0011)           |
 |        | most 2 rounds                                                           |                      |
+| call-in| a `Call in: <role>, <role>: <why>` line in a comment on an issue whose  | each named role on   |
+|        | most recent `ready` was added by the owner, posted since that label, by | the issue, once per  |
+|        | a swarm App or the owner (GOV-0023, #520)                               | call                 |
+
+[call-in] (#520, GOV-0023): a comment counts as a call when a line of it starts `Call in:`
+(any case). The roles are the comma-separated names before the next colon; the why is the
+rest of that line. A call by anyone but the owner or a swarm App (identities.agents in
+jurisdictions.yml, as GOV-0024 reads it) is skipped with a reason. Each named role gets
+its own trigger, keyed on the comment id and the role, so it starts once. A role naming
+itself, or a name with no prompt in roles/, is skipped with a reason. At most MAX_CALLS
+calls count per issue per UTC day, by the comment's created_at; a call that names no role
+it could start doesn't count, and later calls that day are skipped with a reason. A call-in
+waits only while a session of the same role is live on the issue: the caller (often a live
+builder) doesn't hold it. Its run is headless like any other (GOV-0010, GOV-0012,
+GOV-0013); its prompt names the caller and the why, says the call asks it in (§8) and that
+it posts one comment, and stophook.py lets it stop whenever it likes. `call_ins = true` in
+[watch] turns call-ins on; while it is off (the default) each call is listed as off and
+never recorded, so turning it on starts the calls still on `ready` issues.
 
 [respond] counts the reviewer's CHANGES_REQUESTED reviews on the PR from GitHub's review
 history, so the count holds across restarts. A third request starts nothing, and an
@@ -162,6 +180,14 @@ WAITS_RE = re.compile(r"^\s*\*\*Waits on:\*\*(.*)$", re.MULTILINE | re.IGNORECAS
 LEFT_TO_ACTIONS = ("left to Actions: review_in_actions = true in swarm.toml, so the GitHub "
                    "Actions reviewer reviews this head (GOV-0019)")
 DEFAULT_STALE = 60            # [watch] stale_minutes when swarm.toml doesn't set it (#488)
+CALL_IN = "call-in"           # GOV-0023's trigger (#520)
+CALL_RE = re.compile(r"^[ \t]*Call in:[ \t]*([^:\n]*?)[ \t]*(?::[ \t]*([^\n]*?))?[ \t]*$",
+                     re.IGNORECASE | re.MULTILINE)
+MAX_CALLS = 2                 # calls that count per issue per UTC day (GOV-0023)
+WHY_MAX = 300                 # characters of a call's why that go into the prompt
+CALL_INS_OFF = ("call-ins are off: call_ins = true in swarm.toml's [watch] turns them on "
+                "(GOV-0023)")
+NOT_RECORDED = (LEFT_TO_ACTIONS, CALL_INS_OFF)   # listed once, never kept in watch.json
 RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and watch.json keeps it
 
 # How a headless run ended, from the `subtype` of its --output-format json result: the
@@ -178,7 +204,7 @@ CAPS = {"error_max_budget_usd": "budget (--max-budget-usd)",
 @dataclass(frozen=True)
 class Trigger:
     key: str                  # identity: a new key is a new trigger
-    kind: str                 # review | build | record | answer | respond
+    kind: str                 # review | build | record | answer | respond | call-in
     ref: str                  # "PR #12" or "#49"
     why: str
     role: str | None = None
@@ -190,6 +216,8 @@ class Trigger:
     held: str | None = None   # why it is held: a live session on the issue (#488), or [build]'s
                               # open Waits-on issues (#490); a held trigger starts nothing
     once: str | None = None   # what changes the held reason enough to log it again (#488)
+    called_by: str | None = None  # [call-in]: who called the role in, for its prompt (#520)
+    call_why: str | None = None   # [call-in]: the why from the `Call in:` line
 
     def line(self) -> str:
         if self.held:
@@ -304,20 +332,21 @@ def later(events: list[dict], a: dict | None, b: dict) -> bool:
 
 
 def held_by(n: int, m: dict, started: list, now: dt.datetime | None,
-            stale_minutes: int = DEFAULT_STALE) -> tuple[str, str] | None:
+            stale_minutes: int = DEFAULT_STALE, role: str | None = None) -> tuple[str, str] | None:
     """Why a live session on issue n holds its trigger (#488), as (reason, once), or None.
 
     The same sessions as swarm.holders(): heartbeat sessions on n that aren't stopped, and
     launcher entries on n with no heartbeat yet. A holder idle on the heartbeat for longer
     than stale_minutes makes the reason `stale:` and names the `swarm stop` that frees n;
     the watcher still never stops it (GOV-0008, #132). `once` changes only when a holder's
-    status does, so the reason is logged once per state, not once per tick."""
+    status does, so the reason is logged once per state, not once per tick. With role, only
+    sessions of that role count ([call-in], #520)."""
     g = swarm.dashboard()
     names = {e.session_id: e.name for e in started}
     seen = {s["session_id"] for s in m["sessions"]}
     held, stale, once = [], [], []
     for s in m["sessions"]:
-        if s["status"] == "stopped" or s["issue"] != n:
+        if s["status"] == "stopped" or s["issue"] != n or role not in (None, s["role"]):
             continue
         name = names.get(s["session_id"])
         who = name or f"{s['role']} session {s['session_id']}"
@@ -333,7 +362,7 @@ def held_by(n: int, m: dict, started: list, now: dt.datetime | None,
         held.append(f"{who} is live on #{n} ({state})")
         once.append(f"{who}:{status}")
     for e in started:
-        if e.issue == n and e.session_id not in seen:
+        if e.issue == n and e.session_id not in seen and role in (None, e.role):
             held.append(f"{e.name} is live on #{n} (starting, no heartbeat yet)")
             once.append(f"{e.name}:starting")
     if not held and not stale:
@@ -345,13 +374,16 @@ def held_by(n: int, m: dict, started: list, now: dt.datetime | None,
 def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Callable,
              is_tracking: Callable, review_in_actions: bool = False,
              now: dt.datetime | None = None, stale_minutes: int = DEFAULT_STALE,
-             one_way: frozenset[str] = frozenset()) -> list[Trigger]:
+             one_way: frozenset[str] = frozenset(), apps: dict[str, str] | None = None,
+             call_ins: bool = False) -> list[Trigger]:
     """Every trigger present now, in needs-you order then issue order. Nothing is filtered
     for novelty here; Watch does that. With review_in_actions, each [review] trigger is
     skipped as left to Actions (GOV-0019). A [record], [answer], [build] or [respond]
     trigger on an issue a live session holds comes back with `held` set, saying who holds
     it and whether that session is stale (#488); Watch starts nothing for it. A question in
-    a domain in one_way needs a record whatever its body rates it (#519)."""
+    a domain in one_way needs a record whatever its body rates it (#519). apps maps each
+    swarm App login to its role, for [call-in] (#520); with call_ins off, each [call-in]
+    comes back skipped as off."""
     m, out = w.model, []
     items = needs_you(m)
     heads = {p["number"]: p.get("head") for p in m["prs"]}
@@ -427,7 +459,103 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
                              command=launch_cmd("builder", n), issue=n), n)
             waits = None if t.held else blocked(it.get("body"), w)
             out.append(replace(t, held=waits, once=waits) if waits else t)
+
+    # Call-ins (#520, GOV-0023): `Call in:` lines on ready issues, questions included.
+    for it in sorted(w.issues, key=lambda i: i["number"]):
+        n = it["number"]
+        labels = {lb.get("name") for lb in it.get("labels") or []}
+        if it.get("state") != "open" or "pull_request" in it or "ready" not in labels or is_tracking(it):
+            continue
+        ready = owner_label(w.events.get(n, []), "ready", owner)
+        if not ready:
+            continue
+        for t in calls(n, w.comments.get(n, []), ready, owner, apps or {}, roles):
+            if t.skipped:
+                out.append(t)
+            elif not call_ins:
+                out.append(replace(t, skipped=CALL_INS_OFF))
+            else:
+                h = held_by(n, m, started, now, stale_minutes, t.role)
+                out.append(replace(t, held=h[0], once=h[1]) if h else t)
     return out
+
+
+def call_line(body: str | None) -> tuple[list[str], str] | None:
+    """(the roles, the why) from a comment's first `Call in: <role>, <role>: <why>` line,
+    or None if it has none (#520). Roles are lower-cased, each once, in order; the why is
+    one line, at most WHY_MAX characters."""
+    m = CALL_RE.search(body or "")
+    if not m:
+        return None
+    names = [r.strip(" `*@").lower() for r in m.group(1).split(",")]
+    why = " ".join((m.group(2) or "").split())
+    return list(dict.fromkeys(r for r in names if r)), why[:WHY_MAX]
+
+
+def calls(n: int, comments: list[dict], ready: dict, owner: str, apps: dict[str, str],
+          roles: set[str]) -> list[Trigger]:
+    """GOV-0023's [call-in] triggers on ready issue n, from its comments (#520): one per
+    named role per call, keyed on the comment id, or a skipped one saying why it doesn't
+    count. ready is the owner's `ready` event: a call posted before it doesn't count."""
+    since, out, per_day = ready.get("created_at") or "", [], {}
+    for c in sorted(comments, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)):
+        parsed = call_line(c.get("body"))
+        at = c.get("created_at") or ""
+        if not parsed or (since and at and at < since):
+            continue
+        names, why = parsed
+        cid, login = c.get("id"), (c.get("user") or {}).get("login") or "unknown"
+        caller = "owner" if login == owner else apps.get(login)
+        key, what = f"call-in:{n}:{cid}", f"call in by {login} (comment {cid})"
+        call = dict(kind=CALL_IN, ref=f"#{n}", issue=n)
+        if caller is None:
+            out.append(Trigger(key=key, why=what, **call,
+                               skipped=f"{login} isn't a swarm App or the owner, so the call doesn't "
+                                       f"count (GOV-0023)"))
+            continue
+        ok = []
+        for r in names:
+            bad = ("a role can't call itself in (GOV-0023)" if r == caller else
+                   f"{r!r} isn't a role with a prompt in roles/" if r not in roles else None)
+            if bad:
+                out.append(Trigger(key=f"{key}:{r}", why=f"{what}: {r}", skipped=bad, **call))
+            else:
+                ok.append(r)
+        if not ok:
+            if not names:
+                out.append(Trigger(key=key, why=what, skipped="the line names no role", **call))
+            continue
+        day = at[:10]
+        if per_day.get(day, 0) >= MAX_CALLS:
+            out.append(Trigger(key=key, why=what, **call,
+                               skipped=f"#{n} already has {MAX_CALLS} calls on {day or 'that day'} "
+                                       f"(UTC), the most that count per issue per day (GOV-0023)"))
+            continue
+        per_day[day] = per_day.get(day, 0) + 1
+        who = "the owner" if caller == "owner" else f"the {caller} ({login})"
+        for r in ok:
+            out.append(Trigger(key=f"{key}:{r}", why=f"{what}: {r}", role=r,
+                               command=f"{r} on #{n}, called in", called_by=who,
+                               call_why=why or None, **call))
+    return out
+
+
+def swarm_apps(path: Path = swarm.JURISDICTIONS) -> tuple[dict[str, str], str | None]:
+    """({swarm App login: role}, why none) from identities.agents in jurisdictions.yml, the
+    list GOV-0024 trusts (#520). If it can't be read, no App counts: only the owner's calls
+    do, and the reason says why."""
+    if str(swarm.ROOT / "dashboard") not in sys.path:
+        sys.path.insert(0, str(swarm.ROOT / "dashboard"))
+    import authority   # jurisdictions.yml's reader
+    try:
+        doc = authority.read(Path(path).read_text())
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        return {}, f"can't read {authority.JURISDICTIONS_PATH} ({e.__class__.__name__})"
+    ids = doc.get("identities")
+    agents = ids.get("agents") if isinstance(ids, dict) else None
+    if not isinstance(agents, dict) or not agents:
+        return {}, f"{authority.JURISDICTIONS_PATH} has no identities.agents mapping"
+    return {v: k for k, v in agents.items() if isinstance(k, str) and isinstance(v, str)}, None
 
 
 def waits_on(body: str | None) -> list[int]:
@@ -538,7 +666,8 @@ def gather(repo: str, idle_minutes: int, now: dt.datetime) -> World:
         labels = {lb.get("name") for lb in it.get("labels") or []}
         if labels & {"ready", "gov:ruled"} and not g.is_tracking(it):
             w.events[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/events?per_page=100")
-        if {"gov:question", "gov:ruled"} <= labels:     # the owner's `Record: yes` (#501)
+        if {"gov:question", "gov:ruled"} <= labels or ("ready" in labels and not g.is_tracking(it)):
+            # the owner's `Record: yes` (#501), and `Call in:` lines on ready issues (#520)
             w.comments[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/comments?per_page=100")
     for n, reviews in (data.get("reviews") or {}).items():    # fetch() read them for build()
         w.reviewed[n] = reviewed_heads(reviews)
@@ -855,6 +984,15 @@ class Watch:
             self.launcher.out(f"swarm watch: {why}; only a question's own ratings count for [record]")
         return domains
 
+    def apps(self) -> dict[str, str]:
+        """The swarm Apps whose `Call in:` lines count (#520), read now from
+        jurisdictions.yml. If it can't be read it says so, every tick, and only the owner's
+        calls count."""
+        apps, why = swarm_apps(self.jurisdictions)
+        if why:
+            self.launcher.out(f"swarm watch: {why}; only the owner's `Call in:` lines count")
+        return apps
+
     def dry_tick(self, now: dt.datetime) -> list[Trigger]:
         """Print and return the triggers not seen before. Starts nothing, writes nothing.
         A held trigger (#488, #490) is printed once per reason and not returned; it prints
@@ -865,7 +1003,8 @@ class Watch:
         new = []
         for t in triggers(w, self.owner, self.launcher.running(), self.roles, g.needs_you,
                           g.is_tracking, bool(limits and limits.review_in_actions), now,
-                          limits.stale_minutes if limits else DEFAULT_STALE, self.one_way()):
+                          limits.stale_minutes if limits else DEFAULT_STALE, self.one_way(),
+                          self.apps(), bool(limits and limits.call_ins)):
             key = f"{t.key}|held|{t.once}" if t.held else t.key
             if key in self.seen:
                 continue
@@ -912,7 +1051,8 @@ class Watch:
         return swarm.Started(name=self.name(t, live), role=t.role, model=s.model,
                              session_id=str(uuid.uuid4()), started=self.launcher.clock(),
                              issue=t.issue, pr=t.pr, by="watch",
-                             budget_usd=s.spend_cap_usd, max_turns=limits.max_turns)
+                             budget_usd=s.spend_cap_usd, max_turns=limits.max_turns,
+                             called_by=t.called_by, call_why=t.call_why)
 
     def start_tick(self, now: dt.datetime) -> list[Trigger]:
         """Start a session for each new trigger, within the [watch] limits (GOV-0010)."""
@@ -937,7 +1077,7 @@ class Watch:
             out(f"swarm watch: a run hit the account's usage limit; {limited}, for every start (#489)")
         todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
                                     limits.review_in_actions, now, limits.stale_minutes,
-                                    self.one_way())
+                                    self.one_way(), self.apps(), limits.call_ins)
                 if t.key not in acted]
         todo.sort(key=lambda t: before.get(t.key, {}).get("since", iso(now)))  # held longest first
         held, done, reviewer = [], [], None
@@ -959,8 +1099,8 @@ class Watch:
                 out(f"[{t.kind}] {t.ref} {t.why} -> {reason}")
 
         for t in todo:
-            if t.kind == "review" and t.skipped == LEFT_TO_ACTIONS:
-                # Not recorded in watch.json: switch it off and the loop reviews this head again.
+            if t.skipped in NOT_RECORDED:
+                # Not recorded in watch.json: flip the switch and the loop acts on it again.
                 if t.key not in self.seen:
                     self.seen.add(t.key)
                     out(t.line())
@@ -989,7 +1129,7 @@ class Watch:
                 out(f"[review] {t.ref} {t.why} -> covered by {reviewer}")
                 finish(t, f"covered by {reviewer}")
                 continue
-            if t.issue is not None and swarm.holders(t.issue, w.model, live):
+            if t.issue is not None and swarm.holders(t.issue, w.model, live, own_role(t)):
                 continue      # a session started this check is on it; it fires again once that stops
             if t.held:
                 # #490: not acted on, so it starts on the first check after its blockers close.
@@ -1070,7 +1210,7 @@ class Watch:
         refused = swarm.issue_refusals(t.issue, issue, events, self.owner, label)
         if refused:
             return refused[0], False
-        taken = swarm.holders(t.issue, hb, live)
+        taken = swarm.holders(t.issue, hb, live, own_role(t))
         if taken:
             return f"#{t.issue} already has a live session: {'; '.join(taken)}", False
         return None, False
@@ -1118,6 +1258,11 @@ class Watch:
         except KeyboardInterrupt:
             self.launcher.out("swarm watch: stopped")
         return 0
+
+
+def own_role(t: Trigger) -> str | None:
+    """The role whose live sessions hold t: only its own for a [call-in] (#520), else any."""
+    return t.role if t.kind == CALL_IN else None
 
 
 def roles_in(root: Path) -> set[str]:
