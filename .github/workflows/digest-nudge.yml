@@ -6,6 +6,9 @@
 # `issues` and `discussion`/`discussion_comment` events fire for anyone who can open an
 # issue or comment on a Discussion here; all that does is start runs that read repo state.
 # Fork PRs get a read-only token, so their jobs are skipped.
+# Session state changes (#452): a swarm App's `working_on`, `pr_opened` or `blocked`
+# comment on a `[heartbeat]` tracking issue rebuilds the dashboard only. The comment is
+# read only in `if:`, never in `run:`. Every other comment skips the job.
 # The token's actions: write can also start, cancel or re-run workflows in this repo, as
 # with reviewer-nudge.yml (#261).
 # Committed by the owner: the Apps have no `workflows` permission (#32).
@@ -23,35 +26,56 @@ on:
     types: [created, edited]
   discussion_comment:
     types: [created, edited]
+  # Session state changes on heartbeat tracking issues (#452); filtered in the job's `if:`.
+  issue_comment:
+    types: [created]
 
 permissions: {}
 
 jobs:
   nudge:
-    # Issue and Discussion events, or same-repo PRs. No secrets, no checkout, no environment.
+    # Issue and Discussion events, same-repo PRs, or a swarm App's state-change comment on
+    # a tracking issue. No secrets, no checkout, no environment.
     if: >-
       (github.event_name == 'issues' && github.event.action != 'edited') ||
       github.event_name == 'discussion' ||
       github.event_name == 'discussion_comment' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository ||
+      (github.event_name == 'issue_comment' &&
+       startsWith(github.event.issue.title, '[heartbeat] ') &&
+       startsWith(github.event.comment.user.login, 'productswarm-') &&
+       endsWith(github.event.comment.user.login, '[bot]') &&
+       (contains(github.event.comment.body, '"event":"working_on"') ||
+        contains(github.event.comment.body, '"event":"pr_opened"') ||
+        contains(github.event.comment.body, '"event":"blocked"')))
     runs-on: ubuntu-latest
     timeout-minutes: 2
     concurrency:
-      # One group for every event: a burst (several labels at once) cancels the waiting
-      # and running nudges, so only the last one dispatches. The digest's and dashboard's
-      # own groups collapse dispatches that still overlap. Job-level, so a skipped fork-PR
-      # run never joins the group and cancels a real nudge.
-      group: digest-nudge
+      # A burst cancels the waiting and running nudges, so only the last one dispatches.
+      # Session comments get their own group, so one can't cancel an issue or PR nudge
+      # before it has dispatched the digest. The digest's and dashboard's own groups
+      # collapse dispatches that still overlap. Job-level, so a skipped run (a fork PR,
+      # any other comment) never joins a group and cancels a real nudge.
+      group: digest-nudge${{ github.event_name == 'issue_comment' && '-session' || '' }}
       cancel-in-progress: true
     permissions:
       actions: write   # gh workflow run
     steps:
       - name: Dispatch a digest update and a dashboard rebuild
+        if: github.event_name != 'issue_comment'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           gh workflow run digest.yml --ref main
+          gh workflow run dashboard.yml --ref main
+      - name: Dispatch a dashboard rebuild after a pause (session events)
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sleep 60   # a burst of state changes cancels this run, so it ends in one rebuild
           gh workflow run dashboard.yml --ref main
   watch:
     # #458: swarm watch replaced the [watch] issue's body. Rebuild the dashboard only.
