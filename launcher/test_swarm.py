@@ -4,6 +4,7 @@ Run: python3 -m unittest discover -s launcher
 """
 import datetime as dt
 import json
+import shlex
 import os
 import signal
 import subprocess
@@ -39,8 +40,14 @@ class Fake:
         self.t = 1_000_000.0
         self.exit_on_term = True
         self.fail_for: set[str] = set()
+        self.typed: list[str] = []
 
     def run(self, command: str) -> None:
+        # The typed line runs the window's script (#550): record what the window runs.
+        self.typed.append(command)
+        assert len(command.encode()) < swarm.MAX_CANON, command
+        if command.startswith("exec /bin/sh "):
+            command = Path(shlex.split(command)[2]).read_text().strip()
         if any(f" {r} --model" in command for r in self.fail_for):
             raise RuntimeError("osascript failed: not allowed")
         self.commands.append(command)
@@ -242,6 +249,22 @@ class CommandTest(Base):
             "--disallowedTools", *swarm.DENY,
             "--max-budget-usd", "15", "--max-turns", "200",               # GOV-0012
             "--output-format", "json"])
+
+    def test_the_window_types_a_short_line_and_runs_the_long_command_from_a_file(self):
+        # #550: Terminal types the command into a shell that may still be starting, and the
+        # tty keeps only MAX_CANON bytes of a line. A watch run's command() is longer, and
+        # cut there it never wrote a pid or a result file.
+        e = self.watch_entry()
+        self.assertGreater(len(self.l.command(e).encode()), swarm.MAX_CANON)
+        self.assertTrue(self.l.start(e, []))
+        (typed,) = self.fake.typed
+        self.assertEqual(typed, f"exec /bin/sh {self.home}/launcher/{e.session_id}.window.sh "
+                                f"--session-id {e.session_id}")
+        self.assertEqual(self.l.window_file(e.session_id).read_text(), self.l.command(e) + "\n")
+        self.fake.procs.clear()                                   # it exits
+        self.fake.t += swarm.START_GRACE + 1
+        self.assertEqual(self.l.live(), [])
+        self.assertFalse(self.l.window_file(e.session_id).exists())
 
     def test_headless_budget_and_turns_come_from_the_entry(self):
         argv = swarm.Launcher.headless_args(self.watch_entry(budget_usd=2.5, max_turns=7))
@@ -799,7 +822,10 @@ class RealShellTest(unittest.TestCase):
                 wt = root / ".worktrees" / e.session_id
                 self.wait_running(l, e)
                 self.assertEqual(l.pid(e), procs[0].pid)       # both exec's kept the pid
-                self.assertIn(f"cd {wt} && ", procs[0].args[2])
+                # #550: the typed line is short and runs the window's script, which is command().
+                self.assertEqual(procs[0].args[2], l.typed(e))
+                self.assertLess(len(l.typed(e).encode()), swarm.MAX_CANON)
+                self.assertEqual(l.window_file(e.session_id).read_text(), l.command(e) + "\n")
                 settings = json.loads((wt / ".claude" / "settings.local.json").read_text())
                 self.assertIn(f"{home}/runtime/heartbeat/hook.py", json.dumps(settings["hooks"]["SessionStart"]))
                 rev = lambda d, r: subprocess.run(["git", "-C", str(d), "rev-parse", r],

@@ -161,7 +161,7 @@ class WatchTest(unittest.TestCase):
         self.lines = []
         self.l = swarm.Launcher(self.home, run=self.fake.run, proc=self.fake.proc, kill=self.fake.kill,
                                 clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append,
-                                root=self.home / "repo", git=FakeGit())
+                                root=self.home / "repo", git=FakeGit(), claude_dir=self.home / "claude")
         self.scene = Scene()
         # A fixture manifest, not the repo's: the owner's review_in_actions switch (#260)
         # mustn't change what these tests check (#285).
@@ -555,7 +555,7 @@ class StartTest(unittest.TestCase):
         self.lines = []
         self.l = swarm.Launcher(self.home, run=self.fake.run, proc=self.fake.proc, kill=self.fake.kill,
                                 clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append,
-                                root=self.home / "repo", git=FakeGit())
+                                root=self.home / "repo", git=FakeGit(), claude_dir=self.home / "claude")
         self.scene = Scene()
         self.manifest(ALL_CAPPED)
 
@@ -570,9 +570,13 @@ class StartTest(unittest.TestCase):
     def started(self):
         return [(e.name, e.role, e.model, e.issue, e.by) for e in self.l.load()]
 
-    def exit(self, name):
-        """The session called `name` exits by itself."""
+    def exit(self, name, ran=True):
+        """The session called `name` exits by itself. With ran, it leaves a done result if
+        it left none: a run with no result file never started, and is tried again (#550)."""
         (e,) = [e for e in self.l.load() if e.name == name]
+        result = self.l.result_file(e.session_id)
+        if ran and not result.exists():
+            result.write_text(BANNER + CANNED["success"])
         self.fake.procs.pop(self.l.pid(e))
 
     def inbox(self):
@@ -1541,6 +1545,19 @@ class WaitsOnTest(unittest.TestCase):
         self.assertEqual([s[0] for s in self.started()], ["builder-issue-49"])
         self.assertEqual(self.inbox(), "Nothing is waiting on you.")
 
+    def test_an_open_blocker_with_an_open_pr_closing_it_still_holds(self):
+        # #550, 6 Nov 12:33: #457 waited on #456, and PR #546 (open) closed #456.
+        self.scene.prs, self.scene.reviewed = [pr(546, closes=[456])], {546: {SHA1}}
+        w = self.watcher()
+        for minutes in (0, 5):
+            self.assertEqual(w.tick(NOW + dt.timedelta(minutes=minutes)), [])
+        self.assertEqual(self.started(), [])
+        self.assertEqual(watch.load_state(self.l)["acted"], {})
+        self.assertIn("- [build] #49 ready by the owner · held: waits on #456", self.inbox())
+        self.close(456)
+        self.scene.prs = []                                     # PR #546 merged
+        self.assertEqual([t.ref for t in w.tick(NOW + dt.timedelta(minutes=10))], ["#49"])
+
     def test_no_line_or_nothing_starts_as_usual(self):
         for body in ("", "**Waits on:** nothing.\n"):
             self.setUp()
@@ -1659,11 +1676,17 @@ class RunRecordTest(unittest.TestCase):
         e = self.entry(name)
         if text is not None:
             self.l.result_file(e.session_id).write_text(text)
-        self.exit(name)
+        self.exit(name, ran=False)
         return e
 
     def state(self):
         return json.loads((self.home / "launcher" / "watch.json").read_text())
+
+    def transcript(self, sid):
+        """Claude Code wrote a transcript for sid: it got as far as starting (#550)."""
+        p = self.home / "claude" / "projects" / "-repo-.worktrees-x" / f"{sid}.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}\n")
 
     def inbox(self, now=NOW):
         return swarm.inbox_text([], now, G, watch.waiting(self.l), watch.runs(self.l))
@@ -1671,8 +1694,9 @@ class RunRecordTest(unittest.TestCase):
     def test_each_ending_is_recorded_against_its_trigger_and_nothing_restarts(self):
         self.watcher().tick(NOW)
         ends = {"builder-issue-49": BANNER + CANNED["budget"], "docs-issue-87": BANNER + CANNED["success"],
-                "planner-issue-88": BANNER + CANNED["error"], "reviewer-watch": None}
+                "planner-issue-88": BANNER + CANNED["error"], "reviewer-watch": BANNER}
         sids = {name: self.end(name, text).session_id for name, text in ends.items()}
+        self.transcript(sids["reviewer-watch"])     # it ran, so it isn't tried again (#550)
         later = NOW + dt.timedelta(minutes=5)
         self.assertEqual(self.watcher().tick(later), [])
         self.assertEqual(len(self.fake.commands), 4)               # the triggers stay done
@@ -1958,7 +1982,7 @@ class CallInTest(unittest.TestCase):
         self.lines = []
         self.l = swarm.Launcher(self.home, run=self.fake.run, proc=self.fake.proc, kill=self.fake.kill,
                                 clock=self.fake.clock, sleep=lambda s: None, out=self.lines.append,
-                                root=self.home / "repo", git=FakeGit())
+                                root=self.home / "repo", git=FakeGit(), claude_dir=self.home / "claude")
         self.scene = Scene()
         self.manifest(ALL_CAPPED, call_ins=True)
 
@@ -2001,8 +2025,7 @@ class CallInTest(unittest.TestCase):
         n = len(self.fake.commands)
         self.assertEqual(self.tick(), [])                 # keyed on the comment: once per call
         for name in ("docs-issue-60", "planner-issue-60"):
-            (e,) = [e for e in self.l.load() if e.name == name]
-            self.fake.procs.pop(self.l.pid(e))
+            StartTest.exit(self, name)
         self.assertEqual(self.tick(), [])                 # and not again once they stop
         self.assertEqual(len(self.fake.commands), n)
 
@@ -2127,6 +2150,229 @@ class CallInTest(unittest.TestCase):
         self.assertEqual(apps[BUILDER_APP], "builder")
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(watch.swarm_apps(Path(d) / "nope.yml")[0], {})
+
+
+class RetryTest(unittest.TestCase):
+    """#550: a run that never started is tried again, at most MAX_RETRIES times, then
+    `swarm inbox` lists it as failed with its session ids."""
+
+    setUp_start = StartTest.setUp
+    manifest, watcher, exit = StartTest.manifest, StartTest.watcher, StartTest.exit
+    end, entry, state, transcript, inbox = (RunRecordTest.end, RunRecordTest.entry, RunRecordTest.state,
+                                            RunRecordTest.transcript, RunRecordTest.inbox)
+
+    def setUp(self):
+        self.setUp_start()
+        sc = self.scene
+        sc.issues, sc.events = [sc.issues[0]], {49: sc.events[49]}          # just the build on #49
+        sc.prs, sc.reviewed, sc.tracking, sc.comments = [], {}, [], {}
+
+    def test_no_result_file_is_retried_twice_once_per_check_then_listed_as_failed(self):
+        w, t = self.watcher(), NOW
+        w.tick(t)
+        sids = []
+        for attempt in range(1, watch.MAX_RETRIES + 2):
+            sids.append(self.end("builder-issue-49").session_id)            # no result file
+            t += dt.timedelta(minutes=5)
+            done = w.tick(t)
+            run = self.state()["runs"]["build:49:11"]
+            if attempt <= watch.MAX_RETRIES:
+                self.assertEqual([x.ref for x in done], ["#49"])             # started again this check
+                self.assertEqual(len(self.fake.commands), attempt + 1)
+                self.assertEqual(run["tries"], attempt + 1)
+                self.assertEqual(run["never_started"], sids)
+                self.assertIn(f"-> recorded; it never started, so trying again (retry {attempt} of "
+                              f"{watch.MAX_RETRIES})", self.lines[-3])
+            else:
+                self.assertEqual(done, [])
+                self.assertTrue(run["gave_up"])
+                self.assertIn("build:49:11", self.state()["acted"])
+        self.assertEqual(len(self.fake.commands), watch.MAX_RETRIES + 1)
+        self.assertEqual(w.tick(t + dt.timedelta(minutes=5)), [])            # and never again
+        self.assertEqual(len(self.fake.commands), watch.MAX_RETRIES + 1)
+        text = self.inbox(t)
+        failed = text.split("swarm watch runs that failed: they never started, after 2 retries "
+                            "(#550; re-add the label to try again):\n")[1].splitlines()[0]
+        self.assertTrue(failed.startswith("- [build] #49 builder-issue-49 · no result (no result file)"))
+        self.assertTrue(failed.endswith(f" · sessions {', '.join(sids)}"))
+        self.assertNotIn("Nothing is waiting on you.", text)
+
+    def test_no_json_and_no_transcript_is_retried_but_with_a_transcript_it_is_not(self):
+        w = self.watcher()
+        w.tick(NOW)
+        self.end("builder-issue-49", BANNER)                                # no JSON, no transcript
+        self.assertEqual([x.ref for x in w.tick(NOW + dt.timedelta(minutes=5))], ["#49"])
+        e = self.end("builder-issue-49", BANNER)
+        self.transcript(e.session_id)                                       # claude ran, then died
+        self.assertEqual(w.tick(NOW + dt.timedelta(minutes=10)), [])
+        self.assertEqual(len(self.fake.commands), 2)
+
+    def test_a_run_that_ran_is_not_retried(self):
+        w = self.watcher()
+        w.tick(NOW)
+        self.end("builder-issue-49", BANNER + CANNED["error"])
+        self.assertEqual(w.tick(NOW + dt.timedelta(minutes=5)), [])
+        self.assertEqual(len(self.fake.commands), 1)
+
+
+class ReholdTest(unittest.TestCase):
+    """#550: a [build] whose builder says it waits on an open issue goes back to held, and
+    starts again once that issue closes, with no new label."""
+
+    setUp_start = StartTest.setUp
+    manifest, watcher, exit, started, inbox = (StartTest.manifest, StartTest.watcher, StartTest.exit,
+                                               StartTest.started, StartTest.inbox)
+    end, entry, state = RunRecordTest.end, RunRecordTest.entry, RunRecordTest.state
+
+    def setUp(self):
+        self.setUp_start()
+        sc = self.scene
+        sc.issues = [issue(457, ["ready"], body="**Waits on:** nothing.\n"), issue(456, title="blocker")]
+        sc.events = {457: [ev("ready", eid=11)]}
+        sc.prs, sc.reviewed, sc.tracking, sc.comments = [], {}, [], {}
+
+    def say(self, body, who=watch.BUILDER_APP, minutes=1):
+        self.scene.comments.setdefault(457, []).append(
+            {"user": {"login": who}, "body": body,
+             "created_at": (NOW + dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")})
+
+    def test_said_waits_reads_the_builders_last_comment_since_the_run_started(self):
+        c = lambda body, who=watch.BUILDER_APP, at="2026-11-06T12:40:00Z": {
+            "user": {"login": who}, "body": body, "created_at": at}
+        since, me = "2026-11-06T12:33:00+00:00", {watch.BUILDER_APP}
+        self.assertEqual(watch.said_waits([c("This waits on #456, which is still open. See #12.")],
+                                          since, me), [456])
+        self.assertEqual(watch.said_waits([c("Waiting for #456 and #458: PR #546 closes #456.")],
+                                          since, me), [456, 458])
+        self.assertEqual(watch.said_waits([c("Opened PR #600.")], since, me), [])
+        self.assertEqual(watch.said_waits([c("waits on #456"), c("Done: PR #600.")], since, me), [])
+        self.assertEqual(watch.said_waits([c("waits on #456", who=OWNER)], since, me), [])
+        self.assertEqual(watch.said_waits([c("waits on #456", at="2026-11-06T12:00:00Z")], since, me), [])
+
+    def test_a_build_that_waits_is_held_then_starts_when_the_issue_closes(self):
+        w = self.watcher()
+        self.assertEqual([t.ref for t in w.tick(NOW)], ["#457"])
+        self.say("#457 waits on #456, which is still open (PR #546 closes it). Stopping.\n"
+                 "-- builder (claude-opus-5-5)")
+        self.end("builder-issue-457", BANNER + CANNED["success"])
+        later = NOW + dt.timedelta(minutes=5)
+        self.assertEqual(w.tick(later), [])
+        self.assertEqual(len(self.fake.commands), 1)
+        st = self.state()
+        self.assertEqual(st["runs"]["build:457:11"]["waits_on"], [456])
+        self.assertNotIn("build:457:11", st["acted"])
+        self.assertIn("-> recorded; the builder says it waits on #456: held until it closes", self.lines[-2])
+        self.assertEqual(self.lines[-1], "[build] #457 ready by the owner -> held: waits on #456 "
+                                         "(the builder said so on #457)")
+        self.assertIn("- [build] #457 ready by the owner · held: waits on #456 (the builder said so on #457)",
+                      self.inbox())
+        self.assertEqual(w.tick(later + dt.timedelta(minutes=5)), [])     # still held, said once
+        self.assertEqual(sum("held: waits on #456" in x for x in self.lines), 1)
+        self.scene.issues = [i for i in self.scene.issues if i["number"] != 456]
+        self.assertEqual([t.ref for t in w.tick(later + dt.timedelta(minutes=10))], ["#457"])
+        self.assertEqual(len(self.fake.commands), 2)
+
+    def test_a_build_that_opened_a_pr_or_said_nothing_stays_done(self):
+        for case in ("pr", "nothing", "closed"):
+            self.setUp()
+            w = self.watcher()
+            w.tick(NOW)
+            if case == "nothing":
+                self.say("Opened PR #600.")
+            else:
+                self.say("This waits on #456.")
+            if case == "pr":
+                self.scene.prs, self.scene.reviewed = [pr(600, closes=[457])], {600: {SHA1}}
+            if case == "closed":
+                self.scene.issues = self.scene.issues[:1]                   # #456 closed meanwhile
+            self.end("builder-issue-457", BANNER + CANNED["success"])
+            self.watcher().tick(NOW + dt.timedelta(minutes=5))
+            self.assertIn("build:457:11", self.state()["acted"], case)
+            self.assertNotIn("waits_on", self.state()["runs"]["build:457:11"], case)
+            self.assertEqual(len(self.fake.commands), 1, case)
+
+
+class CodeCheckTest(unittest.TestCase):
+    """#550: swarm watch says when origin/main has new launcher code, and restarts on it
+    between checks once nothing it started is still starting."""
+
+    setUp_start = StartTest.setUp
+    manifest, watcher = StartTest.manifest, StartTest.watcher
+
+    def setUp(self):
+        self.setUp_start()
+        self.git_calls, self.answers = [], {}
+        self.l.git = self.git
+        self.set(tree="new", branch="main", status="", merge=(0, ""), count="3")
+        self.w = self.watcher()
+        self.w.loaded = "old"
+
+    def set(self, tree=None, branch=None, status=None, merge=None, count=None):
+        for k, v in (("origin/main:launcher", tree), ("symbolic-ref", branch), ("status", status),
+                     ("merge", merge), ("rev-list", count)):
+            if v is not None:
+                self.answers[k] = v if isinstance(v, tuple) else (0, v)
+
+    def git(self, args):
+        self.git_calls.append(args)
+        for k, v in self.answers.items():
+            if k in args:
+                return v
+        return 0, ""
+
+    def merged(self):
+        return any("merge" in a for a in self.git_calls)
+
+    def test_same_code_does_nothing(self):
+        self.set(tree="old")
+        self.assertFalse(self.w.code_check())
+        self.assertEqual(self.lines, [])
+        self.assertTrue(any("fetch" in a for a in self.git_calls))          # every check
+
+    def test_new_code_is_said_once_and_waits_while_a_run_is_starting(self):
+        self.l.add(swarm.Started("builder-issue-49", "builder", "m", "s1", self.fake.t, issue=49,
+                                 by="watch", budget_usd=1, max_turns=5))     # no pid yet: starting
+        self.assertFalse(self.w.code_check())
+        self.assertFalse(self.w.code_check())
+        self.assertEqual(self.lines, ["swarm watch: origin/main has 3 new commits under launcher/; restarting "
+                                      "on them once nothing it started is still starting (#550)"])
+        self.assertFalse(self.merged())
+        self.fake.t += swarm.START_GRACE + 1                                   # it never started
+        self.assertTrue(self.w.code_check())
+        self.assertTrue(self.merged())
+
+    def test_a_checkout_off_main_or_with_changes_is_left_alone(self):
+        for kw, why in (({"branch": "feature"}, "is on feature, not main"),
+                        ({"status": " M launcher/watch.py"}, "has changes to tracked files"),
+                        ({"merge": (1, "fatal: Not possible to fast-forward")}, "can't fast-forward")):
+            self.setUp()
+            self.set(**kw)
+            self.assertFalse(self.w.code_check())
+            self.assertIn(why, self.lines[-1])
+            self.assertIn("Pull and restart swarm watch by hand", self.lines[-1])
+            self.assertEqual(self.merged(), "merge" in kw)
+
+    def test_run_restarts_between_checks_after_releasing_the_lock(self):
+        restarted = []
+
+        def restart():
+            fd, _ = watch.take_lock(self.l)             # the old process has let go of it
+            restarted.append(fd is not None)
+            os.close(fd)
+        self.answers["HEAD:launcher"] = (0, "old")
+        w = self.watcher()
+        w.restart = restart
+        self.scene.issues, self.scene.prs, self.scene.tracking = [], [], []
+        self.assertEqual(w.run(5, ticks=3, sleep=lambda s: None), 0)
+        self.assertEqual(restarted, [True])
+        self.assertEqual(self.scene.reads, 1)                                  # after the first check
+        self.assertEqual(self.lines[-1], "swarm watch: restarting on origin/main's launcher code (#550)")
+
+    def test_dry_run_never_restarts(self):
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, read=self.scene.read, manifest_path=self.path,
+                        loaded="old", restart=lambda: self.fail("restarted"))
+        w.run(5, ticks=2, sleep=lambda s: None)
+        self.assertFalse(self.merged())
 
 
 class PublicStateTest(unittest.TestCase):

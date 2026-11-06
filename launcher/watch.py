@@ -190,6 +190,9 @@ CALL_INS_OFF = ("call-ins are off: call_ins = true in swarm.toml's [watch] turns
 NOT_RECORDED = (LEFT_TO_ACTIONS, CALL_INS_OFF)   # listed once, never kept in watch.json
 RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and watch.json keeps it
 PUBLIC_FILE = "watch-public.json"   # watch.json's no-cost form, beside it (#456)
+MAX_RETRIES = 2               # times a run that never started is started again (#550)
+WAIT_RE = re.compile(r"\bwait(?:s|ing)?\s+(?:on|for)\b([^\n]*)", re.IGNORECASE)
+BUILDER_APP = "productswarm-builder[bot]"
 
 # How a headless run ended, from the `subtype` of its --output-format json result: the
 # SDKResultMessage type in the Claude Code Agent SDK reference (#149). Any other subtype,
@@ -591,11 +594,31 @@ def waits_on(body: str | None) -> list[int]:
     return sorted({int(x) for x in REF_RE.findall(first)})
 
 
+def open_issues(w: World) -> set[int]:
+    return {i["number"] for i in w.issues if i.get("state") == "open" and "pull_request" not in i}
+
+
+def said_waits(comments: list[dict], since: str, builders: set[str]) -> list[int]:
+    """The issues a builder's last comment on an issue, posted at or after `since`, says it
+    waits on (#550): the #N refs in the rest of each sentence that says "waits on" or
+    "waiting for". None if the builder hasn't commented since then."""
+    start = dt.datetime.fromisoformat(since)
+    mine = [c for c in comments if (c.get("user") or {}).get("login") in builders
+            and c.get("created_at") and dt.datetime.fromisoformat(c["created_at"]) >= start]
+    if not mine:
+        return []
+    out = set()
+    for m in WAIT_RE.finditer(mine[-1].get("body") or ""):
+        sentence = re.split(r"[.;:](?:\s|$)", m.group(1), maxsplit=1)[0]
+        out |= {int(x) for x in REF_RE.findall(sentence)}
+    return sorted(out)
+
+
 def blocked(body: str | None, w: World) -> str | None:
     """Why a [build] is held because an issue its `**Waits on:**` line names is still open
     (#490), or None. Open means an open issue in this tick's reading; anything else counts
     as closed."""
-    open_ = {i["number"] for i in w.issues if i.get("state") == "open" and "pull_request" not in i}
+    open_ = open_issues(w)
     still = [n for n in waits_on(body) if n in open_]
     return f"held: waits on {', '.join(f'#{n}' for n in still)}" if still else None
 
@@ -912,21 +935,28 @@ def runs(launcher: "swarm.Launcher") -> list[dict]:
         return []
 
 
-def runs_text(runs: list[dict], now: dt.datetime, ago: Callable) -> tuple[list[str], list[str]]:
-    """(lines for runs that ended at cap, lines for every ended run, newest first), within
-    RUNS_DAYS. runs is watch.runs(): every record, including runs still live.
+def runs_text(runs: list[dict], now: dt.datetime,
+              ago: Callable) -> tuple[list[str], list[str], list[str]]:
+    """(lines for runs that ended at cap, lines for every ended run, newest first, lines for
+    runs that never started after MAX_RETRIES retries), within RUNS_DAYS. runs is
+    watch.runs(): every record, including runs still live.
 
-    A run that ended at cap is listed until a later run on the same ref has started (the
-    owner restarted it with a fresh label, or the loop moved on), or RUNS_DAYS pass."""
+    A run that ended at cap, or never started (#550), is listed until a later run on the
+    same ref has started (the owner restarted it with a fresh label, or the loop moved on),
+    or RUNS_DAYS pass. One that never started names every session id it was tried as."""
     since = now - dt.timedelta(days=RUNS_DAYS)
     recent = sorted((r for r in runs if r.get("ending") and r.get("ended")
                      and dt.datetime.fromisoformat(r["ended"]) >= since),
                     key=lambda r: r["ended"], reverse=True)
     capped = [r for r in recent if r["ending"] == AT_CAP
               and not any(o["ref"] == r["ref"] and o["started"] > r["started"] for o in runs)]
+    gave_up = [r for r in recent if r.get("gave_up")
+               and not any(o["ref"] == r["ref"] and o["started"] > r["started"] for o in runs)]
     when = lambda r: f" · ended {ago(dt.datetime.fromisoformat(r['ended']), now)}"
+    sessions = lambda r: ", ".join(r.get("never_started", []) + [r["session_id"]])
     return ([f"- {run_line(r)}{when(r)}" for r in capped],
-            [f"- {run_line(r)}{when(r)}" for r in recent])
+            [f"- {run_line(r)}{when(r)}" for r in recent],
+            [f"- {run_line(r)}{when(r)} · sessions {sessions(r)}" for r in gave_up])
 
 
 def iso(t: dt.datetime) -> str:
@@ -1010,6 +1040,17 @@ def cost_text(runs: list[dict], prs: list[dict]) -> str:
 
 # ---------------------------------------------------------------- the loop
 
+class Restart(Exception):
+    """Raised between checks to re-exec swarm watch on new launcher code (#550)."""
+
+
+def reexec() -> None:
+    """Replace this process with a fresh `swarm watch`, same arguments (#550)."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, [sys.executable, str(Path(sys.argv[0]).resolve()), *sys.argv[1:]])
+
+
 @dataclass
 class Watch:
     launcher: "swarm.Launcher"
@@ -1025,6 +1066,52 @@ class Watch:
     seen: set[str] = field(default_factory=set)                      # dry-run memory
     roles_from: Path | None = None    # repo root whose roles/ is re-read every tick (#487)
     jurisdictions: Path = swarm.JURISDICTIONS   # always_one_way domains, re-read every tick (#519)
+    loaded: str | None = None         # the launcher/ tree this process runs, for code_check (#550)
+    restart: Callable[[], None] = reexec
+    said: set[str] = field(default_factory=set)   # code_check's lines, each said once
+
+    def once(self, line: str) -> None:
+        if line not in self.said:
+            self.said.add(line)
+            self.launcher.out(line)
+
+    def code_check(self) -> bool:
+        """Whether to restart now on new launcher code (#550). Fetches origin/main, and if
+        its launcher/ tree isn't the one this process loaded, says so once. It restarts only
+        when nothing it started is still starting, and only after fast-forwarding the
+        checkout it runs from to origin/main: that needs the checkout on main, with no
+        changes to tracked files and no commits of its own. Otherwise it says why once and
+        carries on with the code it has."""
+        l, root = self.launcher, str(self.launcher.root)
+        if not self.loaded:
+            return False
+        try:
+            l.refetch()
+        except RuntimeError as e:
+            self.once(f"swarm watch: can't look for new launcher code on origin/main: {e}")
+            return False
+        rc, tree = l.git(["-C", root, "rev-parse", "origin/main:launcher"])
+        if rc or not tree or tree == self.loaded:
+            return False
+        rc, n = l.git(["-C", root, "rev-list", "--count", "HEAD..origin/main", "--", "launcher"])
+        commits = (f"{n} new commit{'s' * (n != '1')}" if rc == 0 and n.isdigit() else "new commits")
+        self.once(f"swarm watch: origin/main has {commits} under launcher/; "
+                  f"restarting on them once nothing it started is still starting (#550)")
+        if any(e.by == "watch" and l.state(e) == "starting" for e in l.running()):
+            return False
+        rc, branch = l.git(["-C", root, "symbolic-ref", "--short", "-q", "HEAD"])
+        rc2, changed = l.git(["-C", root, "status", "--porcelain", "--untracked-files=no"])
+        why = (f"{root} is on {branch or 'a detached HEAD'}, not main" if rc or branch != "main" else
+               f"{root} has changes to tracked files" if rc2 or changed else None)
+        if why is None:
+            rc, out = l.git(["-C", root, "merge", "--ff-only", "-q", "origin/main"])
+            why = f"can't fast-forward {root} to origin/main: {out[:200]}" if rc else None
+        if why:
+            self.once(f"swarm watch: not restarting on the new launcher code: {why}. Pull and "
+                      f"restart swarm watch by hand")
+            return False
+        l.out("swarm watch: restarting on origin/main's launcher code (#550)")
+        return True
 
     def tick(self, now: dt.datetime | None = None) -> list[Trigger]:
         """One check. Returns the triggers it acted on or printed for the first time."""
@@ -1141,7 +1228,7 @@ class Watch:
         live = self.launcher.live()
         st = load_state(self.launcher)
         acted, before = st["acted"], {x["key"]: x for x in st["waiting"]}
-        runs = self.record_ended(st["runs"], live, now, acted)
+        runs = self.record_ended(st["runs"], live, now, acted, w)
         limited = limit_reason(runs, now)
         if limited and not any(x.get("reason") == limited for x in st["waiting"]):
             out(f"swarm watch: a run hit the account's usage limit; {limited}, for every start (#489)")
@@ -1205,6 +1292,13 @@ class Watch:
                 continue
             if t.issue is not None and swarm.holders(t.issue, w.model, live, own_role(t)):
                 continue      # a session started this check is on it; it fires again once that stops
+            prev = runs.get(t.key) or {}
+            still = [n for n in prev.get("waits_on") or [] if n in open_issues(w)]
+            if still:
+                # #550: its last run's builder said it waits on these; it starts once they close.
+                hold(t, f"held: waits on {', '.join(f'#{n}' for n in still)} (the builder said so "
+                        f"on {t.ref})", code="waits_on")
+                continue
             if t.held:
                 # #490: not acted on, so it starts on the first check after its blockers close.
                 hold(t, t.held, code=held_code(t.held))
@@ -1243,6 +1337,9 @@ class Watch:
                     reviewer = entry.name
                 runs[t.key] = {"session_id": entry.session_id, "name": entry.name, "kind": t.kind,
                                "ref": t.ref, "started": iso(now)}
+                if prev.get("retry"):     # #550: the same trigger again, after a run that never started
+                    runs[t.key]["tries"] = prev.get("tries", 1) + 1
+                    runs[t.key]["never_started"] = prev.get("never_started", []) + [prev["session_id"]]
                 finish(t, f"started {entry.name}")
             else:
                 hold(t, "failed to start (see above); trying again next check", code="error")
@@ -1251,29 +1348,75 @@ class Watch:
         save_state(self.launcher, public_state(st, self.launcher.live(), now), PUBLIC_FILE)
         return done
 
-    def record_ended(self, runs: dict, live: list, now: dt.datetime, acted: dict) -> dict:
+    def record_ended(self, runs: dict, live: list, now: dt.datetime, acted: dict,
+                     w: World | None = None) -> dict:
         """Record how each run this loop started ended, once it is no longer live (#149):
         read its result file and log one line. Records older than RUNS_DAYS are dropped.
         Its trigger stays done in "acted", so the loop never starts it again by itself,
-        unless the run was limited (#489): then it records when the hold ends and takes the
-        trigger, and any review triggers its pass covered, out of "acted" to fire again."""
+        unless:
+        - the run was limited (#489): it records when the hold ends;
+        - the run never started (#550): no result file, or no result and no transcript.
+          It is tried again, at most MAX_RETRIES times; after that `swarm inbox` lists it;
+        - a [build] ended with no open PR for its issue, and the builder's last comment says
+          it waits on an issue that is open (#550): the run keeps those issues in
+          "waits_on", and start_tick() holds the trigger until they close.
+        In each case the trigger, and any review triggers its pass covered, come out of
+        "acted" to fire again."""
         alive = {e.session_id for e in live}
         since = iso(now - dt.timedelta(days=RUNS_DAYS))
         kept = {}
+
+        def again(key: str, r: dict) -> None:
+            for k in [k for k, v in acted.items() if k == key or v == f"covered by {r['name']}"]:
+                del acted[k]
+
         for key, r in runs.items():
             if r.get("ended") and r["ended"] < since:
                 continue
             if not r.get("ending") and r["session_id"] not in alive:
                 r = {**r, **read_result(self.launcher.result_file(r["session_id"])), "ended": iso(now)}
+                waits = self.said_waits(r, w) if w is not None and r["kind"] == "build" else []
                 if r["ending"] == LIMITED:
                     r["until"] = iso(limit_until(r["detail"], now))
-                    for k in [k for k, v in acted.items() if k == key or v == f"covered by {r['name']}"]:
-                        del acted[k]
+                    again(key, r)
                     self.launcher.out(f"{run_line(r)} -> recorded; trying again after the hold")
+                elif self.never_started(r) and r.get("tries", 1) <= MAX_RETRIES:
+                    r["retry"] = True
+                    again(key, r)
+                    self.launcher.out(f"{run_line(r)} -> recorded; it never started, so trying again "
+                                      f"(retry {r.get('tries', 1)} of {MAX_RETRIES})")
+                elif self.never_started(r):
+                    r["gave_up"] = True
+                    self.launcher.out(f"{run_line(r)} -> recorded; it never started, after "
+                                      f"{MAX_RETRIES} retries: listed in swarm inbox")
+                elif waits:
+                    r["waits_on"] = waits
+                    again(key, r)
+                    self.launcher.out(f"{run_line(r)} -> recorded; the builder says it waits on "
+                                      f"{', '.join(f'#{n}' for n in waits)}: held until "
+                                      f"{'they close' if len(waits) > 1 else 'it closes'}")
                 else:
                     self.launcher.out(f"{run_line(r)} -> recorded")
             kept[key] = r
         return kept
+
+    def never_started(self, r: dict) -> bool:
+        """Whether an ended run never got as far as Claude Code (#550): no result file, or no
+        JSON result and no transcript."""
+        return r["ending"] == NO_RESULT and (r.get("detail") == "no result file"
+                                             or self.launcher.transcript(r["session_id"]) is None)
+
+    def said_waits(self, r: dict, w: World) -> list[int]:
+        """The open issues a [build] run's builder said it waits on (#550), if it ended with
+        its issue still open and no open PR closing it."""
+        m = REF_RE.search(r["ref"])
+        n = int(m.group(1)) if m else None
+        open_ = open_issues(w)
+        if n not in open_ or any(c["number"] == n for p in w.model.get("prs", []) for c in p["closes"]):
+            return []
+        builders = {login for login, role in self.apps().items() if role == "builder"} | {BUILDER_APP}
+        return [x for x in said_waits(w.comments.get(n, []), r["started"], builders)
+                if x in open_ and x != n]
 
     def refusal(self, t: Trigger, live: list, now: dt.datetime) -> tuple[str | None, bool]:
         """`swarm launch`'s refusal checks, run again on fresh GitHub data just before a
@@ -1308,6 +1451,8 @@ class Watch:
                               f"starts nothing; Ctrl-C to stop")
             return self.loop(interval_minutes, ticks, sleep)
         fd, holder = take_lock(self.launcher)
+        rc, tree = self.launcher.git(["-C", str(self.launcher.root), "rev-parse", "HEAD:launcher"])
+        self.loaded = self.loaded or (tree if rc == 0 else None)
         if fd is None:
             self.launcher.out(f"swarm watch: refused: another swarm watch is already running "
                               f"(pid {holder or 'unknown'}; lock {self.launcher.dir / LOCK_FILE}). "
@@ -1318,8 +1463,12 @@ class Watch:
                               f"within swarm.toml's [watch] limits and only for roles with a "
                               f"spend_cap_usd (GOV-0010); never stops one; Ctrl-C to stop")
             return self.loop(interval_minutes, ticks, sleep)
+        except Restart:
+            pass
         finally:
-            os.close(fd)
+            os.close(fd)      # before a restart, so the new process takes the lock
+        self.restart()
+        return 0
 
     def loop(self, interval_minutes: float, ticks: int | None, sleep: Callable[[float], None]) -> int:
         n = 0
@@ -1332,6 +1481,8 @@ class Watch:
                 except RuntimeError as e:      # GitHub unreachable, bad swarm.toml: try again next tick
                     self.launcher.out(f"swarm watch: {e}; trying again next tick")
                 n += 1
+                if not self.dry_run and self.code_check():
+                    raise Restart
         except KeyboardInterrupt:
             self.launcher.out("swarm watch: stopped")
         return 0
