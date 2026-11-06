@@ -137,6 +137,8 @@ class Scene:
     def gh(self, argv):
         if argv[1] == "pr":
             return json.dumps(self.prs)
+        if argv[2] == "graphql":                 # #392's batched comments: none returned, so
+            return json.dumps({"data": {"repository": {}}})   # each issue falls back to REST
         path = argv[3] if argv[2] == "--paginate" else argv[2]
         path = path.split(f"repos/{REPO}/", 1)[1].split("?")[0]
         parts = path.split("/")
@@ -897,7 +899,7 @@ class StartTest(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, self.scene.gh(argv), "")
         fake_sub = types.SimpleNamespace(run=run, SubprocessError=subprocess.SubprocessError)
         w = watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=False, manifest_path=self.path)
-        with mock.patch.object(G, "subprocess", fake_sub):
+        with mock.patch.object(G, "subprocess", fake_sub), mock.patch.object(G.ghql, "subprocess", fake_sub):
             w.run(1, ticks=3, sleep=lambda s: None)
             (e,) = [e for e in self.l.load() if e.name == "builder-issue-49"]
             self.l.result_file(e.session_id).write_text(
@@ -914,7 +916,9 @@ class StartTest(unittest.TestCase):
         writes = {"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"}
         for argv in calls:
             self.assertEqual(argv[0], "gh")
-            if argv[1] == "api":
+            if argv[1:3] == ["api", "graphql"]:          # its -f flags carry a query, not a write
+                self.assertTrue(argv[4].startswith("query=query("), argv)
+            elif argv[1] == "api":
                 self.assertFalse(writes & set(argv), argv)
             else:
                 self.assertEqual(argv[1:3], ["pr", "list"], argv)
@@ -2129,8 +2133,8 @@ class CallInTest(unittest.TestCase):
 
         def run(argv, **kw):
             return subprocess.CompletedProcess(argv, 0, self.scene.gh(argv), "")
-        with mock.patch.object(G, "subprocess", types.SimpleNamespace(
-                run=run, SubprocessError=subprocess.SubprocessError)):
+        fake_sub = types.SimpleNamespace(run=run, SubprocessError=subprocess.SubprocessError)
+        with mock.patch.object(G, "subprocess", fake_sub), mock.patch.object(G.ghql, "subprocess", fake_sub):
             w = watch.gather(REPO, 15, NOW)
         self.assertEqual([c["id"] for c in w.comments[60]], [501])
         self.assertNotIn(200, w.comments)                 # not tracking issues
