@@ -673,11 +673,26 @@ class Watch:
     get_issue: Callable[[str, int], tuple] = swarm.gh_issue           # refusal re-checks
     get_heartbeat: Callable[[str, int, dt.datetime], dict] = swarm.heartbeat
     seen: set[str] = field(default_factory=set)                      # dry-run memory
+    roles_from: Path | None = None    # repo root whose roles/ is re-read every tick (#487)
 
     def tick(self, now: dt.datetime | None = None) -> list[Trigger]:
         """One check. Returns the triggers it acted on or printed for the first time."""
         now = now or dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        if self.roles_from is not None:
+            self.roles = roles_in(self.roles_from)
+        self.report_manifest_problems()
         return self.dry_tick(now) if self.dry_run else self.start_tick(now)
+
+    def report_manifest_problems(self) -> None:
+        """Print each bad [[session]] entry in swarm.toml, every tick (#487): the loop
+        carries on with the valid ones. A file it can't use at all is reported where it's
+        read (start_tick raises, headless() says so)."""
+        try:
+            problems = manifest.load_all(self.manifest_path)[2]
+        except manifest.ManifestError:
+            return
+        for p in problems:
+            self.launcher.out(f"{self.manifest_path.name}: {p}")
 
     def dry_tick(self, now: dt.datetime) -> list[Trigger]:
         """Print and return the triggers not seen before. Starts nothing, writes nothing."""
@@ -706,7 +721,7 @@ class Watch:
         """For --dry-run: the full command a real start would run for t (#147), or why
         there isn't one. Reads swarm.toml as a real start would; never raises."""
         try:
-            sessions, limits = manifest.load_all(self.manifest_path)
+            sessions, limits, _ = manifest.load_all(self.manifest_path)
         except manifest.ManifestError as e:
             return f"(no headless command: {e})"
         s = {x.role: x for x in sessions}.get(t.role)
@@ -728,8 +743,8 @@ class Watch:
     def start_tick(self, now: dt.datetime) -> list[Trigger]:
         """Start a session for each new trigger, within the [watch] limits (GOV-0010)."""
         g, out = swarm.dashboard(), self.launcher.out
-        try:
-            sessions, limits = manifest.load_all(self.manifest_path)
+        try:   # a bad entry is skipped, and reported by tick(); a bad [watch] starts nothing
+            sessions, limits, _ = manifest.load_all(self.manifest_path)
         except manifest.ManifestError as e:
             raise RuntimeError(str(e)) from None
         if limits is None:
@@ -903,4 +918,5 @@ class Watch:
 
 
 def roles_in(root: Path) -> set[str]:
+    """The roles with a prompt in root/roles/."""
     return {p.stem for p in (root / "roles").glob("*.md")}
