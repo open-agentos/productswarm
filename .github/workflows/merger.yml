@@ -1,12 +1,22 @@
-# The merger (GOV-0022, GOV-0027, #592): on a schedule or a dispatch, from main, run
-# launcher/merger.py run. It comments "would merge" in shadow and merges in live, per
-# swarm.toml's [merger] mode. App and token rights: GOV-0028. No PR code runs here.
+# The merger (GOV-0022, GOV-0027, #592): run launcher/merger.py run from main. It comments
+# "would merge" in shadow and merges in live, per swarm.toml's [merger] mode. App and token
+# rights: GOV-0028. No PR code runs here.
+# Runs when the answer can change: a PR's Tests run finishes, or a review approves a PR, plus
+# the schedule as a fallback (GitHub runs it best-effort, hours apart) and a manual dispatch.
+# The job holding MERGER_APP_KEY runs only from main's copy of this file: schedule,
+# workflow_dispatch and workflow_run all use main. An approval runs on the PR's merge ref, so
+# it only dispatches this workflow on main, with no secrets.
 # Committed by the owner: the Apps have no `workflows` permission (#32).
 name: Merger
 
 on:
   schedule:
     - cron: "*/5 * * * *"
+  workflow_run:
+    workflows: [Tests]
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
   workflow_dispatch:
     inputs:
       pr:
@@ -22,7 +32,32 @@ on:
 permissions: {}
 
 jobs:
+  nudge:
+    # A review approved a PR: start a sweep from main. No secrets in this job.
+    if: >-
+      github.event_name == 'pull_request_review' &&
+      github.event.review.state == 'approved' &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    concurrency:
+      group: merger-nudge
+      cancel-in-progress: true
+    permissions:
+      actions: write   # gh workflow run
+    steps:
+      - name: Dispatch the merger on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF: ${{ github.event.repository.default_branch }}
+        run: gh workflow run merger.yml --ref "$REF"
+
   merge:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
