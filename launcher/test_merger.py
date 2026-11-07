@@ -290,9 +290,9 @@ class Paths(unittest.TestCase):
         for p in ("ops/x", ".github/CODEOWNERS", "governance/INDEX.md", "GOVERNANCE.md",
                   "roles/builder.md", "CLAUDE.md", "launcher/CLAUDE.md", "swarm.toml",
                   "requirements.txt", "dashboard/requirements-dev.txt", "package.json",
-                  "pyproject.toml"):
+                  "pyproject.toml", "PLAN.md"):
             self.assertTrue(merger.is_protected(p), p)
-        for p in ("launcher/merger.py", "PLAN.md", "PRODUCT.md", "launcher/swarm.toml.md",
+        for p in ("launcher/merger.py", "docs/PLAN.md", "PRODUCT.md", "launcher/swarm.toml.md",
                   "opsx/y", "dashboard/static/app.js"):
             self.assertFalse(merger.is_protected(p), p)
 

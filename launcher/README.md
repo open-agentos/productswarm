@@ -586,7 +586,7 @@ It prints one line per open PR: `#N <head sha> merge (standing grant)`, `merge (
 - the reviewer approved at the current head (a dismissed approval doesn't count), and no one's latest review requests changes;
 - no line starting `Overstep:` in any PR comment, review or review comment;
 - the newest `tests` check run from GitHub Actions at the current head succeeded;
-- it touches no protected path: `ops/`, `.github/`, `governance/`, `GOVERNANCE.md`, `roles/`, `CLAUDE.md` (anywhere), `swarm.toml`, or a dependency file (`requirements*.txt`, `pyproject.toml`, `package.json`, lock files and the like). Renamed files count by their old path too;
+- it touches no protected path: `ops/`, `.github/`, `governance/`, `GOVERNANCE.md`, `roles/`, `CLAUDE.md` (anywhere), `swarm.toml`, `PLAN.md` (until it is deleted), or a dependency file (`requirements*.txt`, `pyproject.toml`, `package.json`, lock files and the like). Renamed files count by their old path too;
 - additions plus deletions are at most `[merger] max_changed_lines`.
 
 **Approved ask** (GOV-0027), for a PR that touches a protected path:
