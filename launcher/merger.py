@@ -86,8 +86,10 @@ MODES = ("off", "shadow", "live")
 GRANT, ASK = "merge (standing grant)", "merge (approved ask)"
 
 # GOV-0022's protected paths. CLAUDE.md counts anywhere, since a nested one also instructs agents.
+# PLAN.md is protected until it is deleted: an agent PR adding a milestone there would make its own
+# issues go under GOV-0026 (operating model v2).
 PROTECTED_DIRS = ("ops/", ".github/", "governance/", "roles/")
-PROTECTED_FILES = ("GOVERNANCE.md", "CLAUDE.md", "swarm.toml")
+PROTECTED_FILES = ("GOVERNANCE.md", "CLAUDE.md", "swarm.toml", "PLAN.md")
 DEPENDENCY_FILES = frozenset({
     "requirements.txt", "requirements-dev.txt", "constraints.txt", "pyproject.toml", "setup.py",
     "setup.cfg", "Pipfile", "Pipfile.lock", "poetry.lock", "uv.lock", "package.json",
