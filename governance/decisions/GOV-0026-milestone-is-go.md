@@ -1,7 +1,7 @@
 ---
 id: GOV-0026
 title: An approved milestone in PLAN.md is the go for its issues, with the owner's veto
-status: in-force
+status: superseded
 kind: ruling
 question: "#575"
 domain: governance
