@@ -1079,9 +1079,16 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_watch.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_watch.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_watch.add_argument("--idle-minutes", type=int, default=15)
+    p_hooks = sub.add_parser("webhooks", help="receive GitHub webhooks and nudge the watcher (engine host)")
+    p_hooks.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (Caddy in front)")
+    p_hooks.add_argument("--port", type=int, default=8081)
     args = ap.parse_args(argv)
 
     launcher = launcher or Launcher(home())
+    if args.cmd == "webhooks":
+        import webhooks
+        return webhooks.serve(launcher.dir, os.environ.get("WEBHOOK_SECRET", ""), args.host,
+                              args.port, out=launcher.out)
     if args.cmd == "watch" and not args.dry_run and args.interval is not None:
         launcher.out("swarm watch: --interval works only with --dry-run; the interval for real "
                      "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")

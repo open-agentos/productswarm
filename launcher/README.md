@@ -512,6 +512,15 @@ If the checkout is on another branch, has changes, or can't fast-forward, it say
 
 It never stops a session itself (GOV-0008): a headless run ends at its budget or turn ceiling because Claude Code ends it (GOV-0012). It never adds or removes labels, and never comments, approves or merges. Its only GitHub calls are reads. Sessions it starts are recorded with `by: watch` in `sessions.json`, and `swarm ls` shows them as `running, by watch`. To end one, run `swarm stop <name>` yourself. If GitHub can't be read, or `swarm.toml` is invalid, it says so and tries again on the next check.
 
+## swarm webhooks: the receiver on the engine host (v2, #651)
+
+`swarm webhooks [--host 127.0.0.1] [--port 8081]` receives the role Apps' GitHub webhooks behind Caddy (`ops/vps`). A webhook only nudges: the receiver checks `X-Hub-Signature-256` against `WEBHOOK_SECRET`, records the delivery in `~/.productswarm/launcher/swarm.db` (delivery id, event, action, repo, number and time; never the payload body), and touches `~/.productswarm/launcher/nudge`. It never starts a session or trusts a payload for who did what; the watcher re-reads GitHub when nudged, as the reconciler does under GOV-0020.
+
+- A bad, missing or non-`sha256` signature gets 401, and nothing is recorded. It refuses to start without `WEBHOOK_SECRET`.
+- A body over 1 MB gets 413 without being read. Unusual delivery or event headers, or a body that isn't JSON, get 400.
+- A repeated `X-GitHub-Delivery` is recorded and nudges once. `ping` is recorded but doesn't nudge.
+- `GET /healthz` answers 200. Nothing is logged per request.
+
 ## The swarm manifest
 
 `swarm.toml` at the repo root lists the sessions to run. It is TOML, read with stdlib `tomllib` (Python 3.11+), per the owner's answer on #44.
@@ -586,7 +595,7 @@ It prints one line per open PR: `#N <head sha> merge (standing grant)`, `merge (
 - the reviewer approved at the current head (a dismissed approval doesn't count), and no one's latest review requests changes;
 - no line starting `Overstep:` in any PR comment, review or review comment;
 - the newest `tests` check run from GitHub Actions at the current head succeeded;
-- it touches no protected path: `ops/`, `.github/`, `governance/`, `GOVERNANCE.md`, `roles/`, `CLAUDE.md` (anywhere), `swarm.toml`, or a dependency file (`requirements*.txt`, `pyproject.toml`, `package.json`, lock files and the like). Renamed files count by their old path too;
+- it touches no protected path: `ops/`, `.github/`, `governance/`, `GOVERNANCE.md`, `roles/`, `CLAUDE.md` (anywhere), `swarm.toml`, `PLAN.md` (until it is deleted), or a dependency file (`requirements*.txt`, `pyproject.toml`, `package.json`, lock files and the like). Renamed files count by their old path too;
 - additions plus deletions are at most `[merger] max_changed_lines`.
 
 **Approved ask** (GOV-0027), for a PR that touches a protected path:
