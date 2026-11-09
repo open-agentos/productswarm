@@ -173,6 +173,28 @@ failed in the last 7 days (1):
 
 Like `swarm cost`, it only prints: no cost leaves this machine.
 
+## swarm merges: who merged this week, and its reverts (#710)
+
+```bash
+launcher/swarm merges [--last] [--repo owner/name]
+```
+
+This week's merges into `main`, split into the merger App's and the owner's. That split is M2's done test, and it feeds the daily report's section 4. Each revert is listed with whether it was reviewed. `--last` gives the week before. A week runs from Monday 00:00 to the next Monday 00:00, UTC. For example, `--last` on 2026-11-09:
+
+```
+Merges into main, week of 2026-11-02 to 2026-11-08 (UTC): 169
+  by the merger (productswarm-merger[bot]): 0
+  by the owner (@mattmcalister): 169
+Reverts: 1, 1 unreviewed
+  #646 reverts #640, merged by @mattmcalister: not reviewed (no approval at head by the reviewer or the owner)
+```
+
+- **Who merged** is each PR's `merged_by` on GitHub. The owner is `humans.owner` in `jurisdictions.yml`. Anyone else gets a `by anyone else` line with their logins.
+- **A revert** is a merged PR whose body has GitHub's `Reverts owner/repo#N` line or git's `This reverts commit` line, or whose title starts with `Revert`.
+- **Reviewed** means GOV-0027's test at the merged head: the latest approve or request-changes review on that commit by the reviewer App or the owner is an approval, and neither has changes requested there.
+
+It reads GitHub through one `gh pr list` search, which returns at most 1000 PRs, and it writes nothing.
+
 ## swarm watch: the wake-up loop
 
 ```bash

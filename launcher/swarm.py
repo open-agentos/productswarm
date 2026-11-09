@@ -11,6 +11,9 @@
     launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
     launcher/swarm cost             cost per PR of the runs swarm watch recorded (#176; local only)
     launcher/swarm status           swarm watch's state with cost, from local files only (#457)
+    launcher/swarm merges [--last]  this UTC week's merges into main by the merger and by the
+                                    owner, and each revert and whether it was reviewed (#710);
+                                    --last for the week before
     launcher/swarm watch [--dry-run] [--serve]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
@@ -820,6 +823,101 @@ def status(launcher: Launcher, manifest_path: Path | str = manifest.DEFAULT_PATH
     return 0
 
 
+# ---------------------------------------------------------------- merges (#710)
+
+MERGER_LOGIN = "productswarm-merger[bot]"     # merger.MERGER; not imported, merger imports swarm
+REVIEWER_LOGIN = "productswarm-reviewer[bot]"
+REVERT_TITLE_RE = re.compile(r'^\s*Revert\b', re.IGNORECASE)
+REVERTS_RE = re.compile(r'^\s*(?:Reverts\s+(?:[\w.-]+/[\w.-]+)?#(\d+)|This reverts commit\b)',
+                        re.IGNORECASE | re.MULTILINE)
+MERGE_FIELDS = "number,title,body,mergedAt,mergedBy,headRefOid,reviews"
+
+
+def bare(login: str | None) -> str:
+    """A login without GitHub's `[bot]` suffix: GraphQL (and so `gh pr list`) drops it, REST
+    keeps it, and the two must compare equal."""
+    return (login or "").removesuffix("[bot]")
+
+
+def week_of(now: dt.datetime, last: bool = False) -> tuple[dt.datetime, dt.datetime]:
+    """The UTC week (Monday 00:00 to the next Monday 00:00) holding now, or the one before."""
+    monday = (now.astimezone(dt.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+              - dt.timedelta(days=now.astimezone(dt.timezone.utc).weekday()))
+    if last:
+        monday -= dt.timedelta(days=7)
+    return monday, monday + dt.timedelta(days=7)
+
+
+def reverted(pr: dict) -> int | None | bool:
+    """False if pr isn't a revert; else the PR number it reverts (GitHub's Revert button
+    writes `Reverts owner/repo#N`), or None when it reverts by commit or names no PR."""
+    m = REVERTS_RE.search(pr.get("body") or "")
+    if m:
+        return int(m.group(1)) if m.group(1) else None
+    return None if REVERT_TITLE_RE.match(pr.get("title") or "") else False
+
+
+def reviewed_at_head(pr: dict, owner: str) -> bool:
+    """Whether the reviewer App or the owner approved at the merged head: their latest
+    approve-or-request-changes review on that commit is an approval (GOV-0027's test)."""
+    head, who = pr.get("headRefOid"), {bare(REVIEWER_LOGIN), bare(owner)}
+    latest: dict[str, str] = {}
+    for r in pr.get("reviews") or []:
+        login = bare((r.get("author") or {}).get("login"))
+        if (login in who and (r.get("commit") or {}).get("oid") == head
+                and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")):
+            latest[login] = r["state"]
+    return "APPROVED" in latest.values() and "CHANGES_REQUESTED" not in latest.values()
+
+
+def merges_text(prs: list[dict], owner: str, start: dt.datetime, end: dt.datetime) -> str:
+    """`swarm merges`' report: the week's merges into main split by who clicked merge, then
+    each revert and whether it was reviewed at head. PRs merged outside [start, end) are
+    dropped, so the caller's search may be loose."""
+    def merged_at(p):
+        return dt.datetime.fromisoformat((p.get("mergedAt") or "").replace("Z", "+00:00"))
+    week = sorted((p for p in prs if p.get("mergedAt") and start <= merged_at(p) < end),
+                  key=lambda p: (p["mergedAt"], p["number"]))
+    by = [bare((p.get("mergedBy") or {}).get("login")) for p in week]
+    n_merger, n_owner = by.count(bare(MERGER_LOGIN)), by.count(bare(owner))
+    others = sorted({b or "unknown" for b in by} - {bare(MERGER_LOGIN), bare(owner)})
+    last_day = (end - dt.timedelta(days=1)).date()
+    out = [f"Merges into main, week of {start.date()} to {last_day} (UTC): {len(week)}",
+           f"  by the merger ({MERGER_LOGIN}): {n_merger}",
+           f"  by the owner (@{owner}): {n_owner}"]
+    if others:
+        out.append(f"  by anyone else: {len(week) - n_merger - n_owner} "
+                   f"({', '.join('@' + o for o in others)})")
+    reverts = [(p, reverted(p)) for p in week if reverted(p) is not False]
+    unreviewed = sum(not reviewed_at_head(p, owner) for p, _ in reverts)
+    out.append(f"Reverts: {len(reverts)}" + (f", {unreviewed} unreviewed" if reverts else ""))
+    for p, of in reverts:
+        who = bare((p.get("mergedBy") or {}).get("login")) or "unknown"
+        what = f"reverts #{of}" if of else "reverts a commit"
+        state = ("reviewed (approved at head)" if reviewed_at_head(p, owner)
+                 else "not reviewed (no approval at head by the reviewer or the owner)")
+        out.append(f"  #{p['number']} {what}, merged by @{who}: {state}")
+    return "\n".join(out)
+
+
+def gh_merged(repo: str, start: dt.datetime, end: dt.datetime) -> list[dict]:
+    """PRs merged into main in [start, end), from GitHub search (at most 1000)."""
+    span = f"{start:%Y-%m-%dT%H:%M:%SZ}..{end:%Y-%m-%dT%H:%M:%SZ}"
+    return dashboard().gh_json("pr", "list", "--repo", repo, "--state", "merged", "--base", "main",
+                               "--search", f"merged:{span}", "--limit", "1000",
+                               "--json", MERGE_FIELDS) or []
+
+
+def merges(launcher: Launcher, repo: str, last: bool = False, now: dt.datetime | None = None,
+           get_merged: Callable | None = None, owner: Callable[[], str] | None = None) -> int:
+    """`swarm merges` (#710): this week's (or last week's) merges by the merger and by the
+    owner, and its reverts. Reads GitHub; writes nothing."""
+    start, end = week_of(now or dt.datetime.now(dt.timezone.utc), last)
+    prs = (get_merged or gh_merged)(repo, start, end)
+    launcher.out(merges_text(prs, (owner or owner_login)(), start, end))
+    return 0
+
+
 # ---------------------------------------------------------------- launch (L3)
 
 JURISDICTIONS = ROOT / "governance" / "jurisdictions.yml"
@@ -1200,6 +1298,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_inbox.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_cost = sub.add_parser("cost", help="cost per PR of the runs swarm watch recorded (local only)")
     p_cost.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_merges = sub.add_parser("merges", help="this week's merges by the merger and by the owner, and reverts")
+    p_merges.add_argument("--last", action="store_true", help="last week (Monday to Sunday, UTC) instead")
+    p_merges.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_status = sub.add_parser("status", help="swarm watch's state with cost, from local files only")
     p_status.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
@@ -1256,7 +1357,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                      "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")
         return 2
     repo = None
-    if args.cmd in ("ls", "launch", "inbox", "watch", "cost"):
+    if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges"):
         repo = args.repo or dashboard().default_repo()
         if not repo:
             launcher.out(f"swarm {args.cmd}: can't tell the repo; pass --repo owner/name")
@@ -1286,6 +1387,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return inbox(launcher, repo, args.idle_minutes, args.manifest)
         if args.cmd == "cost":
             return cost(launcher, repo)
+        if args.cmd == "merges":
+            return merges(launcher, repo, args.last)
         if args.cmd == "status":
             return status(launcher, args.manifest)
         if args.cmd == "watch":
