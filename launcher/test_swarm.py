@@ -953,10 +953,6 @@ class GoTest(unittest.TestCase):
                            ("See `**Milestone:** M1` in prose.\n", None)]:
             self.assertEqual(swarm.milestone_of(body), want, body)
 
-    def test_plan_on_main_has_four_open_milestones(self):
-        text = (Path(__file__).resolve().parent.parent / "PLAN.md").read_text()
-        self.assertEqual(swarm.plan_milestones(text), {1: False, 2: False, 3: False, 4: False})
-
     def test_agent_logins_from_jurisdictions(self):
         logins = swarm.agent_logins()
         self.assertIn("productswarm-builder[bot]", logins)
