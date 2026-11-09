@@ -36,6 +36,26 @@ ACTED_249 = {"daily:249:2026-11-06": "started planner-issue-249",
              "ask:249:6696612087": "started builder-issue-249"}
 
 
+def who(login, bot=False):
+    return {"login": login, "__typename": "Bot" if bot else "User"}
+
+
+def edit(at, login, bot=False):
+    return {"editedAt": at, "editor": who(login, bot)}
+
+
+def ev(kind, at, login, bot=False):
+    return {"__typename": kind, "createdAt": at, "actor": who(login, bot)}
+
+
+def goal(n, kind="Goal", author=OWNER, bot=False, repo="o/r", edits=(), events=()):
+    """A search node as SCOPE_EDITS_QUERY returns it."""
+    return {"number": n, "title": "M1", "repository": {"nameWithOwner": repo},
+            "author": who(author, bot), "issueType": {"name": kind},
+            "userContentEdits": {"totalCount": len(edits), "nodes": list(edits)},
+            "timelineItems": {"totalCount": len(events), "nodes": list(events)}}
+
+
 class DailyTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -48,10 +68,16 @@ class DailyTest(unittest.TestCase):
         self.lines: list[str] = []
         self.l = swarm.Launcher(self.home, root=self.home / "repo", out=self.lines.append)
 
-    def run_daily(self, comments, acted, now=NOW):
+    def run_daily(self, comments, acted, now=NOW, scopes=()):
         statedb.save(self.home / "launcher", {"acted": acted})
+        self.since = None
+
+        def get_scopes(repo, since):
+            self.since = since
+            return list(scopes)
         rc = swarm.daily(self.l, "o/r", self.toml, get_comments=lambda repo, n: comments, now=now,
-                         tz=UTC, owner=OWNER, agents={PLANNER, "productswarm-builder[bot]"})
+                         tz=UTC, owner=OWNER, agents={PLANNER, "productswarm-builder[bot]"},
+                         get_scopes=get_scopes)
         self.assertEqual(rc, 0)
         return self.lines[-1]
 
@@ -63,9 +89,11 @@ class DailyTest(unittest.TestCase):
         self.assertIn("  Thu 2026-11-05  missed", out)
         self.assertNotIn("Sat", out)
         self.assertNotIn("Sun", out)
-        self.assertEqual(sum(1 for line in out.splitlines() if line.startswith("  ")), 10)
+        days = out.split("\n\n")[0]
+        self.assertEqual(sum(1 for line in days.splitlines() if line.startswith("  ")), 10)
         self.assertIn("  Tue 2026-10-27  missed", out)                              # 10th working day
-        self.assertTrue(out.endswith("Streak: 2 working days in a row with a report [daily] started."))
+        self.assertIn("Streak: 2 working days in a row with a report [daily] started.\n"
+                      "M1: day 2 of 5\n", out)
 
     def test_missed_day_breaks_the_streak(self):
         comments = [c("2026-11-04T08:35:00Z", "**Daily report, Wed 2026-11-04**"),
@@ -103,6 +131,66 @@ class DailyTest(unittest.TestCase):
         self.assertEqual(swarm.daily(self.l, "o/r", self.toml, get_comments=lambda r, n: [],
                                      owner=OWNER, agents=set()), 1)
         self.assertIn("no [watch] report_issue", self.lines[-1])
+
+    # ---- #709: the report's "M1: day N of 5", and Goal and Area edits not by the owner
+
+    def test_m1_day_counts_todays_report_once_daily_started_it(self):
+        early = dt.datetime(2026, 11, 9, 8, 31, tzinfo=UTC)          # [daily] run under way
+        out = self.run_daily(COMMENTS_249[:3], ACTED_249, now=early)
+        self.assertIn("Streak: 1 working day", out)
+        self.assertIn("M1: day 2 of 5 (counting today's report, which [daily] started)", out)
+
+    def test_m1_day_leaves_out_a_report_no_daily_run_started(self):
+        early = dt.datetime(2026, 11, 9, 8, 0, tzinfo=UTC)
+        acted = {"daily:249:2026-11-06": "started planner-issue-249"}
+        out = self.run_daily(COMMENTS_249[:3], acted, now=early)
+        self.assertIn("M1: day 1 of 5 (today isn't counted: no [daily] run has started its report)", out)
+
+    def test_m1_day_by_hand_today_is_day_0_and_five_meets_the_done_test(self):
+        self.assertEqual(swarm.m1_day([{"day": dt.date(2026, 11, 9), "posted": NOW, "by": "by hand",
+                                        "ran": False}], dt.date(2026, 11, 9)), "M1: day 0 of 5")
+        days = swarm.working_days(dt.date(2026, 11, 9))
+        rows = [{"day": d, "posted": NOW, "by": "[daily]", "ran": True} for d in days]
+        self.assertEqual(swarm.m1_day(rows, days[0]), "M1: day 10 of 5 (done test met)")
+
+    def test_goal_edits_by_an_app_show_and_the_owners_dont(self):
+        out = self.run_daily(COMMENTS_249, ACTED_249, scopes=[
+            goal(683, edits=[edit("2026-11-09T10:00:00Z", "productswarm-planner", bot=True),
+                             edit("2026-11-09T09:00:00Z", OWNER),
+                             edit("2026-11-05T09:00:00Z", "productswarm-builder", bot=True)],
+                 events=[ev("RenamedTitleEvent", "2026-11-08T12:00:00Z", "productswarm-builder", True),
+                         ev("ClosedEvent", "2026-11-09T11:00:00Z", OWNER)]),
+            goal(690, author="productswarm-planner", bot=True,           # not the owner's: doesn't count
+                 edits=[edit("2026-11-09T10:00:00Z", "productswarm-planner", bot=True)]),
+            goal(691, kind="Area", repo="o/other",
+                 events=[ev("ClosedEvent", "2026-11-09T12:00:00Z", "someone")])])
+        self.assertEqual(self.since, dt.date(2026, 11, 6))
+        self.assertIn("Goal and Area edits not made by @mattmcalister since Fri 2026-11-06 00:00 "
+                      "(GOV-0031):\n"
+                      "  Sun 2026-11-08 12:00  productswarm-builder[bot] renamed it: Goal #683 M1\n"
+                      "  Mon 2026-11-09 10:00  productswarm-planner[bot] edited the body: Goal #683 M1\n"
+                      "  Mon 2026-11-09 12:00  someone closed it: Area o/other#691 M1", out)
+        self.assertNotIn("#690", out)
+        self.assertNotIn("2026-11-05 09:00", out)               # before the window
+
+    def test_no_goal_edits_says_none_and_a_long_history_says_check(self):
+        out = self.run_daily(COMMENTS_249, ACTED_249)
+        self.assertTrue(out.endswith("(GOV-0031):\n  none"))
+        g = goal(683, edits=[edit("2026-11-09T10:00:00Z", OWNER)])
+        g["userContentEdits"]["totalCount"] = 80
+        out = self.run_daily(COMMENTS_249, ACTED_249, scopes=[g])
+        self.assertIn("  Goal #683: history too long to read whole; check it by hand", out)
+
+    def test_goal_edits_read_failure_is_one_line(self):
+        statedb.save(self.home / "launcher", {"acted": ACTED_249})
+
+        def boom(repo, since):
+            raise RuntimeError("gh api graphql failed: rate limited")
+        self.assertEqual(swarm.daily(self.l, "o/r", self.toml, get_comments=lambda r, n: COMMENTS_249,
+                                     now=NOW, tz=UTC, owner=OWNER, agents={PLANNER},
+                                     get_scopes=boom), 0)
+        self.assertIn("Goal and Area edits couldn't be read: gh api graphql failed: rate limited",
+                      self.lines[-1])
 
     def test_working_days(self):
         days = swarm.working_days(dt.date(2026, 11, 9))

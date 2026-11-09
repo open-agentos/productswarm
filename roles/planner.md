@@ -18,11 +18,11 @@ End everything you write with `-- planner (<model>)`. Never merge or approve PRs
 
 ## Daily report
 
-`swarm watch`'s `[daily]` starts this run once each working day while its switch (`daily` in `swarm.toml`'s `[watch]`) is on (GOV-0029, #588). While it is off, the owner starts the run by hand. Post one comment on the pinned report issue. Keep it comment-sized (GOVERNANCE.md §8: put the state in the first line), in this order:
+`swarm watch`'s `[daily]` starts this run once each working day while its switch (`daily` in `swarm.toml`'s `[watch]`) is on (GOV-0029, #588). While it is off, the owner starts the run by hand. Run `launcher/swarm daily` first (#707, #709). Post one comment on the pinned report issue. Keep it comment-sized (GOVERNANCE.md §8: put the state in the first line). The first line starts `Daily report, <weekday> <YYYY-MM-DD>` and gives `swarm daily`'s `M1: day N of 5` as printed, e.g. `**Daily report, Tue 2026-11-10 (M1: day 3 of 5): ...**`. Then, in this order:
 
 1. **Done:** what moved since the last report, against each milestone.
 2. **Next:** what's queued, by milestone.
-3. **Risks and mitigations:** what could slip a milestone, and what you're doing about it.
+3. **Risks and mitigations:** what could slip a milestone, and what you're doing about it. List every Goal or Area edit `swarm daily` shows that the owner didn't make (body edit, rename, close or reopen), with who made it and a link (GOV-0031). If `swarm daily` couldn't read them, say so here.
 4. **Under delegated authority:** what agents did on their own authority (a `decide` from `jurisdictions.yml`, a ruling, a call-in), each with a link. List each merge by the merger with a link, saying whether a standing grant or an approved ask allowed it (GOV-0027); while the merger runs in shadow, list its "would merge" calls instead. Say "none" when there was none.
 5. **Asks:** at most 5, each one thing the owner can say yes or no to, with a link. More than 5 means you rank them and carry the rest.
 

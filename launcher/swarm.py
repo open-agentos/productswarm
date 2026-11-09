@@ -149,7 +149,9 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
                 f"on #{issue}, and stop")
     elif issue and daily:
         then = (f"write {daily} on issue #{issue}, as roles/{role}.md says. swarm watch started "
-                f"this run from its [daily] trigger (GOV-0029); post on #{issue} and stop")
+                f"this run from its [daily] trigger (GOV-0029). Run launcher/swarm daily first: its "
+                f"\"M1: day N of 5\" goes in the report's first line and its Goal and Area edits "
+                f"under Risks (#709). Post on #{issue} and stop")
     elif issue and called_by:
         # "issue #M" in the why would give the heartbeat two issues and so none: say "#M".
         safe = ISSUE_WORD_RE.sub(r"#\1", call_why) if call_why else ""
@@ -907,14 +909,100 @@ def daily_text(rows: list[dict], report_issue: int, today: dt.date) -> str:
     return "\n".join(out)
 
 
+M1_DAYS = 5                    # M1's done test: 5 working days in a row (Goal #683)
+
+
+def m1_day(rows: list[dict], today: dt.date) -> str:
+    """The daily report's "M1: day N of 5" (#709). N is the streak, counting today's report
+    once a [daily] run has started it, since the report that run writes is that day."""
+    n = daily_streak(rows, today)
+    now = rows[0] if rows and rows[0]["day"] == today else None
+    note = ""
+    if now is not None and now["posted"] is None:
+        if now["ran"]:
+            n += 1
+            note = " (counting today's report, which [daily] started)"
+        else:
+            note = " (today isn't counted: no [daily] run has started its report)"
+    return f"M1: day {n} of {M1_DAYS}" + (" (done test met)" if n >= M1_DAYS else note)
+
+
+# Goal and Area edits (#709, GOV-0031): the report flags any edit to one by anyone but the owner.
+SCOPE_EDITS_QUERY = (
+    "query($q: String!) { search(query: $q, type: ISSUE, first: 100) { issueCount nodes { "
+    "... on Issue { number title repository { nameWithOwner } author { login __typename } "
+    "issueType { name } userContentEdits(first: 50) { totalCount nodes { editedAt "
+    "editor { login __typename } } } timelineItems(last: 50, itemTypes: [RENAMED_TITLE_EVENT, "
+    "CLOSED_EVENT, REOPENED_EVENT]) { totalCount nodes { __typename "
+    "... on RenamedTitleEvent { createdAt actor { login __typename } } "
+    "... on ClosedEvent { createdAt actor { login __typename } } "
+    "... on ReopenedEvent { createdAt actor { login __typename } } } } } } } }")
+SCOPE_EDIT_WHAT = {"edit": "edited the body", "RenamedTitleEvent": "renamed it",
+                   "ClosedEvent": "closed it", "ReopenedEvent": "reopened it"}
+
+
+def scope_edits(nodes: list[dict], owner: str, since: dt.datetime) -> tuple[list[dict], list[dict]]:
+    """Edits since `since` to a Goal or Area the owner opened, by anyone but the owner (GOV-0031):
+    body edits, title renames, closes and reopens. Returns (edits oldest first, each {repo,
+    number, title, type, what, by, at}; the issues whose history was too long to read whole)."""
+    def login(a: dict | None) -> str:
+        return "ghost" if not a else a["login"] + "[bot]" if a.get("__typename") == "Bot" else a["login"]
+
+    def when(s: str) -> dt.datetime:
+        return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    out, partial = [], []
+    for n in nodes:
+        kind = ((n or {}).get("issueType") or {}).get("name")
+        if kind not in SCOPE_TYPES or login(n.get("author")) != owner:
+            continue
+        ref = {"repo": (n.get("repository") or {}).get("nameWithOwner"), "number": n.get("number"),
+               "title": n.get("title"), "type": kind}
+        edits = n.get("userContentEdits") or {}
+        items = n.get("timelineItems") or {}
+        if (edits.get("totalCount", 0) > len(edits.get("nodes") or [])
+                or items.get("totalCount", 0) > len(items.get("nodes") or [])):
+            partial.append(ref)
+        found = [("edit", e.get("editor"), e.get("editedAt")) for e in edits.get("nodes") or []]
+        found += [(t.get("__typename"), t.get("actor"), t.get("createdAt"))
+                  for t in items.get("nodes") or []]
+        for what, who, at in found:
+            if at and login(who) != owner and when(at) >= since and what in SCOPE_EDIT_WHAT:
+                out.append({**ref, "what": SCOPE_EDIT_WHAT[what], "by": login(who), "at": when(at)})
+    return sorted(out, key=lambda e: e["at"]), partial
+
+
+def gh_scope_nodes(repo: str, since: dt.date) -> list[dict]:
+    """The Goal and Area issues in the repo owner's account updated since `since`, open or closed:
+    one search per type (search can't OR two types)."""
+    g = dashboard()
+    nodes = []
+    for kind in sorted(SCOPE_TYPES):
+        q = f"user:{repo.split('/', 1)[0]} is:issue type:{kind} updated:>={since}"
+        d = g.gh_json("api", "graphql", "-f", f"query={SCOPE_EDITS_QUERY}", "-f", f"q={q}")
+        nodes += ((d or {}).get("data") or {}).get("search", {}).get("nodes") or []
+    return nodes
+
+
+def scope_edits_text(edits: list[dict], partial: list[dict], owner: str, since: dt.datetime,
+                     repo: str | None = None, tz: dt.tzinfo | None = None) -> str:
+    """The Goal and Area edits for the report's Risks, or a line saying there were none."""
+    head = f"Goal and Area edits not made by @{owner} since {since:%a %Y-%m-%d %H:%M} (GOV-0031):"
+    lines = [f"  {e['at'].astimezone(tz) if tz else e['at'].astimezone():%a %Y-%m-%d %H:%M}  "
+             f"{e['by']} {e['what']}: {e['type']} {scope_ref(e, repo)} {e['title']}" for e in edits]
+    lines += [f"  {r['type']} {scope_ref(r, repo)}: history too long to read whole; check it by hand" for r in partial]
+    return "\n".join([head, *(lines or ["  none"])])
+
+
 def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DEFAULT_PATH,
           get_comments: Callable | None = None, now: dt.datetime | None = None,
           tz: dt.tzinfo | None = None, owner: str | None = None,
-          agents: set[str] | None = None) -> int:
+          agents: set[str] | None = None, get_scopes: Callable | None = None) -> int:
     """`swarm daily` (#707): for each of the last 10 working days, whether a daily report was
     posted on the report issue, when, and who started it, so M1's streak isn't a hand count.
     Who started it comes from swarm.db; the reports and their times come from the report
-    issue's comments (swarm.db holds no comments). Only reads."""
+    issue's comments (swarm.db holds no comments). Then the report's "M1: day N of 5", and
+    the edits to a Goal or Area by anyone but the owner since the last working day began
+    (#709). Only reads."""
     import watch
     try:
         limits = manifest.load_watch(manifest_path)
@@ -927,11 +1015,21 @@ def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DE
     n = limits.report_issue
     now = now or dt.datetime.now(dt.timezone.utc)
     today = (now.astimezone(tz) if tz else now.astimezone()).date()
-    trusted = (agents if agents is not None else agent_logins()) | {owner or owner_login()}
+    owner = owner or owner_login()
+    trusted = (agents if agents is not None else agent_logins()) | {owner}
     acted = watch.load_state(launcher)["acted"]
     comments = (get_comments or watch.gh_comments)(repo, n)
-    rows = daily_rows(working_days(today), comments, acted, n, trusted, tz)
-    launcher.out(daily_text(rows, n, today))
+    days = working_days(today)
+    rows = daily_rows(days, comments, acted, n, trusted, tz)
+    # From the start of the working day before the latest one, so a weekend's edits count Monday.
+    prev = days[1] if days[0] == today else days[0]
+    since = dt.datetime.combine(prev, dt.time(), tz or now.astimezone().tzinfo)
+    try:
+        edits = scope_edits_text(*scope_edits((get_scopes or gh_scope_nodes)(repo, prev), owner, since),
+                                 owner, since, repo, tz)
+    except RuntimeError as e:
+        edits = f"Goal and Area edits couldn't be read: {e}"
+    launcher.out(f"{daily_text(rows, n, today)}\n{m1_day(rows, today)}\n\n{edits}")
     return 0
 
 
