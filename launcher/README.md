@@ -97,7 +97,7 @@ Nothing new is posted to GitHub. What the launcher started is recorded under `~/
 - `sessions.json` holds each session's name, role, model, session ID and start time. Every `swarm` process that changes it first takes a lock on `sessions.lock`, and each write goes through its own temp file, so a `swarm launch` during a `swarm watch` check isn't lost (#272). A session is recorded before its window opens. If a `.pid` file belongs to a running session that has no entry, `live()` (used by `ls`, `stop`, `launch` and `watch`) rebuilds the entry from the process's command line as `<role>-recovered-<id>` and says so once. `swarm stop` then works on it again.
 - `.worktrees/<session-id>/` in this checkout is the session's working tree (see `up`).
 - `<session-id>.pid` is written by the window's shell before it hands over to `swarm-session`, so the PID it holds is Claude Code's.
-- `watch.json` holds what `swarm watch` has acted on, what it is holding or skipping, and how each run it started ended (see below).
+- The watch state, in `swarm.db`, holds what `swarm watch` has acted on, what it is holding or skipping, and how each run it started ended (see below).
 - `watch.lock` is locked by the running `swarm watch` and holds its pid, so a second one refuses to start (see "One watcher at a time" below).
 - `<session-id>.stop.json` counts how many times the Stop hook has blocked a run `swarm watch` started, and `stophook.log` says why (see below).
 - `<session-id>.result.json` is a headless run's output (see "Headless runs" below). Its first line is `ops/swarm-session`'s banner (`swarm-session: <role> as …`), and its last line is the JSON result from `claude -p --output-format json`.
@@ -110,7 +110,7 @@ A PID counts only while that process's command line still contains `--session-id
 launcher/swarm cost [--repo owner/name]
 ```
 
-It reads the `runs` that `swarm watch` recorded in `watch.json` (see "How each run ended" below) and adds up each run's `cost_usd` by the PR the run served (#176):
+It reads the `runs` that `swarm watch` recorded in the watch state (see "How each run ended" below) and adds up each run's `cost_usd` by the PR the run served (#176):
 
 - `[review]` and `[respond]` runs count towards their trigger's PR.
 - `[build]`, `[record]` and `[answer]` runs count towards the PR that closes their issue. If more than one PR closes it, a merged PR wins, then an open one, then a closed one. If no PR closes it yet, the run gets its own `#N (no PR)` row.
@@ -132,7 +132,7 @@ Its only GitHub call is a read: `gh pr list --state all`, to find each PR's stat
 Limits. These are stated in the output too, and this command doesn't fix them:
 
 - **Only loop-started runs have a cost.** Sessions you start with `swarm up` or `swarm launch` have none, because the heartbeat's `cost_usd` is always null. A PR they worked on shows up only in the "merged … no run recorded" line, or with fewer runs than it really took.
-- **`watch.json` keeps runs for 7 days** (`watch.RUNS_DAYS`). Older runs are gone, so run `swarm cost` within a week of the work you want costed.
+- **The watch state keeps runs for 7 days** (`watch.RUNS_DAYS`). Older runs are gone, so run `swarm cost` within a week of the work you want costed.
 - **The cost is Claude Code's local estimate** (`total_cost_usd`).
 
 **It stays local.** `swarm cost` only prints. Nothing is written to GitHub or the repo, and no cost figure goes into `evals/` or a PR. GOV-0014 keeps run costs local, and GOV-0002, GOV-0003 and GOV-0004 govern what reaches GitHub. Publishing cost would need a `security` question.
@@ -163,7 +163,7 @@ failed in the last 7 days (1):
 - **The first line** says whether a `swarm watch` holds `watch.lock` (from the pid in the file, counted only while that process is still a `swarm watch`; the lock is never taken) and when it last checked. That check is marked `stale` once it is more than twice `interval_minutes` old.
 - **Running** sessions are the loop's runs that are still live, with their run time. Their cost so far is the dashboard's list-price estimate (`dashboard/spend.py`) from the token counts on the last event in the session's local heartbeat spool, `~/.productswarm/events/<session id>.jsonl`. It shows `-` until the spool names a model and its tokens.
 - **Held** and **skipped** triggers show the reason sentence from `watch.REASONS`.
-- **Failed** runs are those that ended at cap, in error, with no result or limited in the last `RUNS_DAYS`, with Claude Code's `total_cost_usd` from `watch.json`.
+- **Failed** runs are those that ended at cap, in error, with no result or limited in the last `RUNS_DAYS`, with Claude Code's `total_cost_usd` from the watch state.
 
 Like `swarm cost`, it only prints: no cost leaves this machine.
 
@@ -207,7 +207,7 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respo
 
 Each start is a fresh **headless** run in a new Terminal window (see below). The loop never re-prompts a running session. `--dry-run` prints `would start …` for each trigger, then the full headless command it would run on the next line, indented, and starts nothing. If there is no command to show (the role has no `spend_cap_usd`, or `[watch]` has no `max_turns`), that line says why. It keeps its memory only while it runs and writes nothing to disk.
 
-**One watcher at a time** (#273). Without `--dry-run`, `swarm watch` holds an exclusive lock on `~/.productswarm/launcher/watch.lock` (`fcntl.flock`, non-blocking) for as long as it runs, and writes its pid into the file. A second `swarm watch` exits at once with `refused: another swarm watch is already running (pid N; …)`. Two watchers would both act on the same triggers, because `watch.json`'s once-per-trigger memory assumes one. The kernel releases the lock when the process ends, on Ctrl-C, a crash or `kill`, so there is never a stale lock to clean up. Leave `watch.lock` in place: the pid in it matters only while a watcher holds the lock. `--dry-run` takes no lock and writes no `watch.json`, so it is safe to run beside a running watcher.
+**One watcher at a time** (#273). Without `--dry-run`, `swarm watch` holds an exclusive lock on `~/.productswarm/launcher/watch.lock` (`fcntl.flock`, non-blocking) for as long as it runs, and writes its pid into the file. A second `swarm watch` exits at once with `refused: another swarm watch is already running (pid N; …)`. Two watchers would both act on the same triggers, because the watch state's once-per-trigger memory assumes one. The kernel releases the lock when the process ends, on Ctrl-C, a crash or `kill`, so there is never a stale lock to clean up. Leave `watch.lock` in place: the pid in it matters only while a watcher holds the lock. `--dry-run` takes no lock and writes no state, so it is safe to run beside a running watcher.
 
 ### Headless runs
 
@@ -244,7 +244,7 @@ As GOV-0013 accepts, this is a backstop and not a complete fence. The `=` forms 
 
 ### How each run ended
 
-Once a run the loop started is no longer live, the next check reads its result file and records, against the trigger, in `"runs"` in `watch.json` (#149):
+Once a run the loop started is no longer live, the next check reads its result file and records, against the trigger, in the watch state's `"runs"` (#149):
 
 ```json
 "build:49:11": {"session_id": "…", "name": "builder-issue-49", "kind": "build", "ref": "#49",
@@ -270,13 +270,13 @@ Once a run the loop started is no longer live, the next check reads its result f
 - **A `limited` run is tried again after the hold (#489).** Claude Code reports a usage limit as `subtype` `success` with `is_error` set, after a second or two and at $0.00: the run never started work. Its trigger leaves `"acted"`, along with any review triggers its reviewer pass covered, so it fires again with no label change. The record gets an `"until"` time: the next time the result's "resets 12pm (Europe/London)" names (in that zone, or this machine's if it names none), or 30 minutes after the run ended (`watch.LIMIT_HOLD`) if there's no reset time the loop can read. The limit is account-wide, so until then the loop holds **every** start, says so once, and lists each held trigger in `swarm inbox` as `held: usage limit (until HH:MM)`, in this machine's time. Triggers that start nothing (skipped, refused, covered) are not held. Other errors behave as before.
 - **`swarm inbox` lists a run that ended at cap**, with its ref, which limit it reached and its cost, so you can decide whether to restart it, for example by adding `ready` again. It drops off the list once a later run on the same ref has started, or after 7 days (`watch.RUNS_DAYS`).
 - **`swarm inbox` lists a run that failed**: one that never started after its retries, under "swarm watch runs that failed", with every session id it was tried as. It drops off the list as a run that ended at cap does. Add the label again to try once more.
-- **`swarm inbox` lists each recorded run's cost** from the last 7 days, newest first. Records older than that are dropped from `watch.json`.
+- **`swarm inbox` lists each recorded run's cost** from the last 7 days, newest first. Records older than that are dropped from the watch state.
 - **Unpushed work is kept.** As for any session, `tidy()` keeps an exited run's worktree if it has uncommitted or unpushed work, and `swarm ls` names it.
-- **The dashboard doesn't show these.** It is built and published by a GitHub Action, which can't read this machine's `watch.json`, and publishing the costs would send them to GitHub.
+- **The dashboard doesn't show these.** It is built and published by a GitHub Action, which can't read this machine's `swarm.db`, and publishing the costs would send them to GitHub.
 
 ### The public form: `watch-public.json`
 
-After every check (not `--dry-run`), `swarm watch` also writes `watch-public.json` beside `watch.json`, atomically in the same way (#456). It is `watch.public_state()`: what the loop is doing, in a form fit to show. `swarm watch` also publishes it to the `[watch]` issue (below).
+After every check (not `--dry-run`), `swarm watch` also writes `watch-public.json` beside `swarm.db`, atomically in the same way (#456). It is `watch.public_state()`: what the loop is doing, in a form fit to show. `swarm watch` also publishes it to the `[watch]` issue (below).
 
 ```json
 {"checked": "2026-11-03T12:00:00+00:00",
@@ -302,7 +302,7 @@ After every check (not `--dry-run`), `swarm watch` also writes `watch-public.jso
 | `raised_by` | skipped | skipped: "Raised by" names no role |
 | `no_role` | skipped | skipped: the role isn't in swarm.toml |
 | `no_cap` | skipped | skipped: the role has no spend_cap_usd in swarm.toml |
-| `other` | held | held (an entry with no code, from an older `watch.json`) |
+| `other` | held | held (an entry with no code, from an older state) |
 
 - **`running`** is each run the loop started that is still live. **`failed`** is each run from the last 7 days (`watch.RUNS_DAYS`) that ended other than `done`, newest first, with `ending` as a code: `at_cap`, `error`, `limited` or `no_result`.
 - Triggers the loop acts on once and drops (refused, covered, skipped call-ins and reviews left to Actions) aren't listed, as in `swarm inbox`.
@@ -354,7 +354,7 @@ review_in_actions = true   # optional; default false
 - **On.** Every `[review]` trigger is logged once per head as `skipped: left to Actions …` and starts nothing, in `--dry-run` too (with no headless command under it). `swarm inbox` says the switch is on. `[respond]`, `[build]`, `[answer]` and `[record]` are unchanged, and still run locally.
 - **Off or missing.** `swarm watch` starts reviewer passes as before. This is the default, so the switch changes nothing until you turn it on.
 - **Re-running one PR.** To review a PR now instead of waiting for the next sweep, or to retry a head whose run failed or ended at its budget, dispatch the workflow with its number: `gh workflow run reviewer.yml -f pr=N` (or **Run workflow** in the Actions tab). See [actions_review.py](#actions_reviewpy-the-reviewer-in-github-actions-v3-c-stage-1) below.
-- **Falling back.** If the Actions reviewer is down or you want reviews local again, set `review_in_actions = false` (or delete the line) and run `swarm watch`. If you also want Actions to stop reviewing, disable the workflow (`gh workflow disable reviewer.yml`, or in the Actions tab); otherwise both review each new head. Skipped reviews are not recorded in `watch.json`, so on the next check the loop reviews any open PR whose head is still unreviewed.
+- **Falling back.** If the Actions reviewer is down or you want reviews local again, set `review_in_actions = false` (or delete the line) and run `swarm watch`. If you also want Actions to stop reviewing, disable the workflow (`gh workflow disable reviewer.yml`, or in the Actions tab); otherwise both review each new head. Skipped reviews are not recorded in the watch state, so on the next check the loop reviews any open PR whose head is still unreviewed.
 - Changing the switch is a `ci-and-workflows` call for the owner (GOV-0019), not a `spend` one. It must be `true` or `false`; anything else is an error.
 - `swarm.toml` is read on every check, so the switch applies without a restart.
 
@@ -378,7 +378,7 @@ call_ins = true   # optional; default false
 - **Limits.** A call-in run is a headless run like any other: it counts toward `max_live`, needs the role's `spend_cap_usd`, and gets the budget, turn ceiling and denies (GOV-0010, GOV-0012, GOV-0013).
 - **Beside the caller.** It waits only while a session of the **same role** is live on the issue; the caller (often a live builder) and other roles don't hold it.
 - **The run.** Its prompt says it was called in, by whom and why, that the call counts as asking it in (GOVERNANCE.md §8), and that it posts one comment and stops. The Stop hook puts no condition on it.
-- **Off or missing.** Each call is logged once as `skipped: call-ins are off …` and starts nothing. It isn't recorded in `watch.json`, so turning the switch on starts the calls still waiting on `ready` or milestone issues (within the daily limit).
+- **Off or missing.** Each call is logged once as `skipped: call-ins are off …` and starts nothing. It isn't recorded in the watch state, so turning the switch on starts the calls still waiting on `ready` or milestone issues (within the daily limit).
 - It must be `true` or `false`; anything else is an error. `swarm.toml` is read on every check, so it applies without a restart. The owner commits `swarm.toml`.
 
 ### The daily report
@@ -412,7 +412,7 @@ report_issue = 600    # the pinned report issue's number
 - **The line.** Any line of a comment on the report issue that starts `Ask:` (any case): one role, a colon, then the question, the rest of that line, up to 300 characters. Only the first such line in a comment counts. For example `Ask: builder: why is #588's PR still open?`. Asking the planner is allowed.
 - **Who.** Only the owner's comments count. Anyone else's, a swarm App's included, is skipped with a reason, and so is a name with no prompt in `roles/`, a line naming two roles, or a line with no question. A comment on any other issue is never read for asks.
 - **Once per comment.** The trigger is keyed on the comment id (`ask:<report_issue>:<comment id>`), so it starts once, and never again after its run stops. Editing the comment doesn't start it again; post a new one.
-- **Since it was turned on.** `watch.json` keeps when this watcher first saw `asks` on for the report issue (`asks_since`) and drops it on any check that finds it off. Only asks posted since then count: an ask posted while it was off, or one already answered by hand before it was turned on, is skipped once as `posted before asks was turned on …` and never starts.
+- **Since it was turned on.** The watch state keeps when this watcher first saw `asks` on for the report issue (`asks_since`) and drops it on any check that finds it off. Only asks posted since then count: an ask posted while it was off, or one already answered by hand before it was turned on, is skipped once as `posted before asks was turned on …` and never starts.
 - **Limits.** An ask run is a headless run like any other: it counts toward `max_live`, needs the role's `spend_cap_usd`, and gets the budget, turn ceiling and denies (GOV-0010, GOV-0012, GOV-0013). There is no daily limit on asks; those bound them.
 - **Holds.** It waits only while a session of the **asked role** is live on the report issue (a planner writing the daily report holds an ask to the planner, not one to the builder). Just before the start, the report issue must exist and be open; it needs no label. As with call-ins, a held ask, or one skipped because the role isn't in `swarm.toml` or has no `spend_cap_usd`, is listed in `swarm inbox`; an ask skipped for its line or its author is logged once.
 - **The run.** Its prompt quotes the question and the comment id, says `swarm watch` started it from `[ask]` (GOV-0029), and says to answer in plain words in one comment on the report issue and stop. The Stop hook puts no condition on it.
@@ -431,7 +431,7 @@ research = true       # optional; default false
 - **Who.** Only the owner's comments and `productswarm-planner[bot]`'s count. Anyone else's, another swarm App's included, is skipped with a reason, and so is a line with no question.
 - **Where.** On an open issue, and the analyst's PR closes that issue (one PR, one issue). A line on a pull request or a closed issue is skipped. So is one on the report issue (`report_issue`), which stays open, and one on a `gov:question`, which a research PR mustn't close: post the line on an issue of its own. Whether a line on the report issue should instead open a new issue for the brief waits on the owner's word (#591).
 - **Once per comment.** The trigger is keyed on the issue and comment id (`research:<issue>:<comment id>`), so it starts once, and never again after its run stops. Editing the comment doesn't start it again; post a new one.
-- **Since it was turned on.** As for asks, `watch.json` keeps when this watcher first saw `research` on (`research_since`) and drops it on any check that finds it off. A line posted before then is skipped once as `posted before research was turned on …`.
+- **Since it was turned on.** As for asks, the watch state keeps when this watcher first saw `research` on (`research_since`) and drops it on any check that finds it off. A line posted before then is skipped once as `posted before research was turned on …`.
 - **Reads.** One list call per check reads the repo's comments since `research_since`, at most 7 days back. A line held for longer than that (say the analyst has no `spend_cap_usd` for a week) drops out without starting.
 - **Limits.** A research run is a headless run like any other: it counts toward `max_live`, needs the analyst's `spend_cap_usd`, and gets the budget, turn ceiling and denies (GOV-0010, GOV-0012, GOV-0013).
 - **Holds.** It waits only while an analyst session is live on the same issue. Just before the start, the issue must exist and be open; it needs no label. A held line is listed in `swarm inbox`; a skipped one is logged once.
@@ -457,12 +457,12 @@ The planner's task issues name their blockers on a line of the body: `**Waits on
 - **The line** is the first line of the body that starts `**Waits on:**`. Only the `#N` refs in its first sentence count: `**Waits on:** #456. Then #480 can go.` waits on #456 alone. A line that starts `nothing`, one with no `#N`, or no line at all means the build waits on nothing, so `**Waits on:** nothing. Do this before #480 …` waits on nothing. Refs elsewhere in the body don't count.
 - **Open** means an open issue in that check's reading of GitHub. A closed issue, or a number that isn't an open issue, doesn't hold the build.
 - `swarm inbox` lists the hold as `held: waits on #456`, naming only the issues still open. It is logged once per reason, in `--dry-run` too.
-- The hold never goes into `acted` in `watch.json`, so the build starts on the first check after every listed issue is closed, with no need to take `ready` off and put it back.
+- The hold never goes into `acted` in the watch state, so the build starts on the first check after every listed issue is closed, with no need to take `ready` off and put it back.
 - **A builder that finds a blocker sends the build back to held (#550).** This covers a blocker that isn't on the line, or one the loop's reading missed. The `[build]` run can end with its issue still open and no open PR closing it, with the builder's last comment on the issue since the run started saying it waits on an open issue ("waits on #456", "waiting for #456"). Then the run is recorded with `"waits_on": [456]` and its trigger leaves `"acted"`. Only the `#N` refs in the rest of that sentence count, and only open issues, not PRs. Until those issues close, the trigger is held as `held: waits on #456 (the builder said so on #457)`, listed in `swarm inbox` and logged once. On the first check after they close, the build starts again with no new label. A builder that opened a PR, or whose last comment names no open issue it waits on, leaves the trigger done, as before.
 
 ### What it does on each trigger
 
-- **Once per trigger, across restarts too.** A trigger is identified by the PR and its head SHA (`[review]`, `[respond]`) or by the id of the owner's label event (`[call-in]`: the comment id and the role). What the loop has acted on is kept in `~/.productswarm/launcher/watch.json`, so restarting `swarm watch` starts nothing twice. A new push, or the owner adding the label again, is a new trigger.
+- **Once per trigger, across restarts too.** A trigger is identified by the PR and its head SHA (`[review]`, `[respond]`) or by the id of the owner's label event (`[call-in]`: the comment id and the role). What the loop has acted on is kept in `~/.productswarm/launcher/swarm.db`, so restarting `swarm watch` starts nothing twice. A new push, or the owner adding the label again, is a new trigger.
 - **No session already on it.** A `[record]`, `[answer]`, `[build]` or `[respond]` trigger on an issue or question with a live session starts nothing, by the same rule `swarm launch` refuses on (a `[call-in]` waits only for a session of its own role). It is **held** instead, with the session holding it (#488): `held: analyst-issue-480 is live on #480 (idle since 20:47 UTC)`. `swarm inbox` lists the hold, and the watch log and `--dry-run` print it once each time the holder's state changes (active, idle, blocked, starting, stale). Once that session stops, the trigger fires.
   - **Stale.** When the holder has been idle on the heartbeat for longer than `[watch] stale_minutes`, the reason says so and names the fix: `stale: analyst-issue-480 idle 10h; swarm stop analyst-issue-480 frees #480`. For a session `swarm` didn't start, it says to stop it where it runs. The loop still never stops a session and never starts a second one on the issue: stopping is the owner's act (#132, GOV-0008).
 - **Refusal checks again.** Just before each start, it runs `swarm launch`'s refusal checks on fresh GitHub data: the issue is open, the owner added the label most recently (`gov:ruled` for `[record]`, `ready` otherwise), and no live session is on it. If a check refuses, for example because someone started a session on the issue by hand, the loop logs the refusal and the trigger is done.
@@ -504,7 +504,7 @@ If the condition isn't met, the hook blocks the stop and gives a short reason na
 `swarm watch` runs the launcher code that was in its checkout when it started (#550). On every check it fetches `origin/main`. If `launcher/` there differs from what it loaded, it says so once, for example `origin/main has 3 new commits under launcher/; restarting on them once nothing it started is still starting`. Then it waits until no run it started is still starting (window opened, no pid yet). After that, between checks, it:
 
 1. fast-forwards its checkout to `origin/main` (`git merge --ff-only`), which it does only if the checkout is on `main` and has no changes to tracked files;
-2. releases its lock and re-execs itself with the same arguments, so the new code is what runs from the next check on. What it has acted on is in `watch.json`, so the restart starts nothing twice.
+2. releases its lock and re-execs itself with the same arguments, so the new code is what runs from the next check on. What it has acted on is in the watch state, so the restart starts nothing twice.
 
 If the checkout is on another branch, has changes, or can't fast-forward, it says why once and carries on with the code it has. Pull and restart it by hand. `--dry-run` never restarts itself. Because it now fetches every check, each session it starts is created at the latest `origin/main` and uses the latest pinned hook copy, not the ones from when the loop started.
 
@@ -520,6 +520,14 @@ It never stops a session itself (GOV-0008): a headless run ends at its budget or
 - A body over 1 MB gets 413 without being read. Unusual delivery or event headers, or a body that isn't JSON, get 400.
 - A repeated `X-GitHub-Delivery` is recorded and nudges once. `ping` is recorded but doesn't nudge.
 - `GET /healthz` answers 200. Nothing is logged per request.
+
+## The watch state: swarm.db and swarm backup (#659)
+
+`swarm watch` keeps its state in `~/.productswarm/launcher/swarm.db`, a SQLite database it shares with the webhook receiver. Until #659 the state was in `watch.json`. The meaning is unchanged: what the loop acted on (`watch_acted`), what it is holding or skipping (`watch_waiting`), how each run ended (`watch_runs`), and `checked`, `asks_since` and `research_since` (`watch_meta`, `watch_asks_since`). Each check replaces the whole state in one transaction, so a reader never sees half a check and a failed write keeps the old state. The database uses WAL, so `swarm status`, `swarm inbox` and `swarm cost` can read while the watcher or the receiver writes. Read-only commands never create it.
+
+- **Upgrading from watch.json.** While `watch.json` exists, it is read in place of the database, so `--dry-run` still writes nothing. The first real check writes its state to `swarm.db` and renames the file to `watch.json.bak`. Delete the `.bak` once you're happy.
+- **`swarm backup [--out PATH]`** writes a consistent copy with SQLite's online backup API, safe while the watcher and receiver run. Without `--out` it writes `backups/swarm-<UTC time>.db` (mode 0600) and keeps the newest 14. On the engine host a nightly systemd timer runs it (#660). To restore, stop the watcher and receiver and copy a backup over `swarm.db`.
+- `watch-public.json` and the `[watch]` issue (GOV-0025) are unchanged.
 
 ## The swarm manifest
 
