@@ -111,7 +111,9 @@ It adds **no API calls** per build: browser fetches hit Pages, not the API, and 
 
 ## Plan, report and grants: layout
 
-This is the spec for the desk's three M3 panels (#711, under #685). #712 builds the report and plan panels; #713 builds the grants panel. Until they merge, the desk is as the rest of this README describes.
+This is the spec for the desk's three M3 panels (#711, under #685). #712 built the report and plan panels (`report.py`, `plan.py`); #713 builds the grants panel.
+
+Two notes on #712's build. "Today" is the build machine's local time, as for `[daily]`, so a desk built in Actions needs `TZ` set to the owner's timezone. The plan panel's go is GOV-0031's scope and the owner's `ready`; it doesn't read GOV-0026's `**Milestone:**` lines, which stop counting on 2026-11-16.
 
 The owner opens the desk to answer three questions without opening Claude Code: *did today's report land, and what does it ask me?*, *where does the plan stand?* and *what did agents do on my authority?* The panels answer them in that order, above everything else on the desk:
 
