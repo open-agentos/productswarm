@@ -15,6 +15,8 @@
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
     launcher/swarm webhooks         the GitHub webhook receiver on the engine host (#658)
+    launcher/swarm desk             the live, read-only Desk on the engine host, rebuilt on
+                                    each webhook nudge (#664; desk.py)
     launcher/swarm backup [--out P] a consistent copy of swarm.db (#659; statedb.py)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
@@ -52,6 +54,7 @@ What the launcher started is recorded locally, never on GitHub:
                                              how each run it started ended (#149), and the
                                              webhook deliveries (#658); watch.json before #659
     ~/.productswarm/launcher/backups/        `swarm backup`'s copies of swarm.db (#659)
+    ~/.productswarm/launcher/desk/           `swarm desk`'s builds and the live symlink (#664)
 (PRODUCTSWARM_HOME moves ~/.productswarm, as for the heartbeat.)
 
 `stop` sends SIGTERM. Claude Code then runs its SessionEnd hook, so the heartbeat
@@ -1223,6 +1226,10 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_hooks = sub.add_parser("webhooks", help="receive GitHub webhooks and nudge the watcher (engine host)")
     p_hooks.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (Caddy in front)")
     p_hooks.add_argument("--port", type=int, default=8081)
+    p_desk = sub.add_parser("desk", help="serve the Desk read-only, rebuilt on each webhook nudge (engine host)")
+    p_desk.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (Caddy in front)")
+    p_desk.add_argument("--port", type=int, default=8080)
+    p_desk.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_backup = sub.add_parser("backup", help="copy swarm.db consistently, for the nightly timer")
     p_backup.add_argument("--out", help=f"default: backups/swarm-<UTC time>.db, keeping the newest "
                                         f"{statedb.KEEP_BACKUPS}")
@@ -1241,6 +1248,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
         import webhooks
         return webhooks.serve(launcher.dir, os.environ.get("WEBHOOK_SECRET", ""), args.host,
                               args.port, out=launcher.out)
+    if args.cmd == "desk":
+        import desk
+        return desk.serve(launcher.dir, args.host, args.port, args.repo, out=launcher.out)
     if args.cmd == "watch" and not args.dry_run and args.interval is not None:
         launcher.out("swarm watch: --interval works only with --dry-run; the interval for real "
                      "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")
