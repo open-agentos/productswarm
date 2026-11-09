@@ -52,9 +52,11 @@ import ghql
 import governance
 import grants
 import layout
+import plan
 import precedent
 import progress
 import questions
+import report
 import reviewer_runs
 import spend
 import trends
@@ -128,16 +130,17 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
           with_actions: bool = False, with_committees: bool = False,
           with_questions: bool = False, with_precedent: bool = False,
           with_activity: bool = False, with_grants: bool = False,
-          prev: Path | None = None) -> dict:
+          with_plan: bool = False, prev: Path | None = None) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
     also reads the v3 progress section's data (progress.py), `with_actions` the Actions
     reviewer section's (reviewer_runs.py), `with_committees` the committee Discussions
     (committees.py, GraphQL), `with_questions` the gov:question history the desk's trends
     read (questions.py, REST, search and GraphQL), and `with_precedent` the GOV citations
     (precedent.py), `with_activity` the repo's events for the header (activity.py), and
-    `with_grants` the merger's comments for grants in use (grants.py, #713). Only the page
-    shows them, so swarm's snapshot() and the digest leave all seven off and make none of
-    those calls; main() asks for them."""
+    `with_plan` the desk's plan and today's report (plan.py, report.py, #712), and `with_grants`
+    the merger's comments for grants in use (grants.py, #713). Only the page shows them, so
+    swarm's snapshot() and the digest leave all eight off and make none of those calls;
+    main() asks for them."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
     items: dict[int, dict] = {}   # issues and PRs, for precedent.py's bodies
@@ -173,7 +176,15 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
                         if with_activity else None,
             "grants": grants.fetch(repo, now, gh_items, gh_json,
                                    {p["number"]: p.get("title") or "" for p in prs or []})
-                      if with_grants else None}
+                      if with_grants else None,
+            "plan": plan.fetch(repo) if with_plan else None,
+            "report": fetch_report(repo, now) if with_plan else None}
+
+
+def fetch_report(repo: str, now: dt.datetime) -> dict:
+    """report.py's data: swarm.toml's report issue and daily_at, and the issue's recent comments."""
+    issue, daily_at = report.config()
+    return {"issue": issue, "daily_at": daily_at, "comments": report.fetch(repo, issue, now, gh_items)}
 
 
 def fetch_precedent(repo: str, now: dt.datetime, days: int, items: list[dict],
@@ -469,6 +480,10 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
                  if data.get("activity") is not None or data.get("questions") is not None else None,
          "grants": grants.build(data["grants"], now)   # #713: the merger's calls
                    if data.get("grants") is not None else None,
+         "report": report.build(data["report"]["comments"], now, data["report"]["issue"],   # #712
+                                data["report"]["daily_at"]) if data.get("report") else None,
+         # with_plan reads both; the plan's own None means its read failed, which the panel says
+         "plan": plan.build(data.get("plan"), owner, repo) if data.get("report") else None,
          "spend": {"per_day": per_day, "today": per_day[today],
                    "unpriced": [s for s in sessions if s["cost"] is None]}}
     m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
@@ -677,14 +692,16 @@ def rfc3339(t: dt.datetime) -> str:
 
 
 def desk_panels(m: dict) -> dict[str, str]:
-    """The desk's panels by name, in page order: on the floor (#403), grants in use (#713,
-    after the floor per #711's layout), the wire (#405), the
+    """The desk's panels by name, in page order: today's report and the plan (#712), on the
+    floor (#403) and grants in use (#713), as #711 lays them out, then the wire (#405), the
     committee desk while a committee is open (#404), what the numbers say (#406), how the
     questions went (#407), precedent in use (#408) and a card per past committee (#409). Each is drawn into a
     `data-panel` box that the live refresh redraws from state.json (#411), so an empty one
     still gets its box. #397's later panels join here."""
     repo = m["repo"]
-    return {"floor": floor.render(m.get("floor"), repo, m.get("watcher")),
+    return {"report": report.render(m.get("report"), repo),
+            "plan": plan.render(m.get("plan")),
+            "floor": floor.render(m.get("floor"), repo, m.get("watcher")),
             "grants": grants.render(m.get("grants"), repo),
             "wire": wire.render(m.get("wire")),
             "committee_desk": committees.desk(m.get("committees"), repo),
@@ -814,9 +831,10 @@ def default_repo() -> str | None:
 # rebuild made 23 REST calls and 19 GraphQL queries (before #392: 258 and 9), and the digest
 # 5 and 8. The workflow token's allowance is 1,000 an hour of each, shared with the digest.
 # precedent.py (#408) adds about 20 REST calls on a full read and 5 GraphQL queries, and the
-# header's repo events (#402, activity.py) 1 to 3 REST calls. Grants in use (#713, grants.py)
-# adds 1 or 2, plus one per merged or closed PR the merger called in the last 24 hours.
-PAGE_NEEDS = {"core": 115, "graphql": 55}
+# header's repo events (#402, activity.py) 1 to 3 REST calls. The desk's report panel (#712)
+# adds 1 or 2 REST calls and its plan panel 3 or 4 GraphQL queries. Grants in use (#713,
+# grants.py) adds 1 or 2, plus one per merged or closed PR the merger called in the last 24 hours.
+PAGE_NEEDS = {"core": 120, "graphql": 60}
 DIGEST_NEEDS = {"core": 30, "graphql": 30}
 SPACING = dt.timedelta(minutes=5)       # a nudged rebuild waits this long after a published one
 WORKFLOW = "dashboard.yml"
@@ -906,7 +924,7 @@ def main(argv: list[str]) -> int:
     try:
         data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
                      with_committees=True, with_questions=True, with_precedent=True,
-                     with_activity=True, with_grants=True,
+                     with_activity=True, with_grants=True, with_plan=True,
                      prev=Path(args.prev) if args.prev else None)
         data["records"] = precedent.load_records()
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:

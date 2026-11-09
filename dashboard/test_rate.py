@@ -267,7 +267,12 @@ class CallCountTest(unittest.TestCase):
         # Precedent (#408): one paginated read each of issue and review comments, and one
         # GraphQL query of PR reviews per 25 PRs in the window (none here). Grants in use
         # (#713): one read of the last 24 hours' issue comments, and no titles (no merger calls).
-        self.assertEqual(len([c for c in rest if "/comments?since=" in " ".join(c)]), 3)
+        self.assertEqual(len([c for c in rest if "/comments?since=" in " ".join(c)
+                              and "/issues/249/" not in " ".join(c)]), 3)
+        # Today's report (#712): one read of the report issue's last 4 days of comments.
+        self.assertEqual(len([c for c in rest if f"repos/{REPO}/issues/249/comments?since=" in " ".join(c)]), 1)
+        # The plan (#712): one query searching for Goals and Areas (none here, so no more).
+        self.assertEqual(sum("type:Goal" in q and "type:Area" in q for q in queries), 1)
         # 15 reviewed PRs: one GraphQL query, no REST reviews or commits per PR. Open PRs'
         # reviews stay one REST call each (generate.fetch() needs their bodies).
         self.assertEqual(sum("pullRequest(" in q for q in queries), 1)
@@ -283,9 +288,9 @@ class CallCountTest(unittest.TestCase):
         # #402's header: the repo's events, one page here (fewer than 100, so the last).
         self.assertEqual([c for c in rest if "/events?" in " ".join(c)],
                          [["api", f"repos/{REPO}/events?per_page=100&page=1"]])
-        # The whole rebuild: 38 calls (30 before #406 added 4, #408 added 2, #402 added 1 and
-        # #713 added 1). On main before #392 the same data took 100.
-        self.assertLessEqual(len(calls), 38, "\n".join(map(str, calls)))
+        # The whole rebuild: 40 calls (30 before #406 added 4, #408 added 2, #402 added 1,
+        # #712 added 2 and #713 added 1). On main before #392 the same data took 100.
+        self.assertLessEqual(len(calls), 40, "\n".join(map(str, calls)))
         self.assertLess(len(rest), g.PAGE_NEEDS["core"])
         self.assertLess(len(graphql), g.PAGE_NEEDS["graphql"])
 
