@@ -27,8 +27,8 @@ def parent(n, type_="Goal", state="open", author=OWNER, repo=REPO):
     return {"repo": repo, "number": n, "state": state, "type": type_, "author": author}
 
 
-def scope(*parents, blocked=(), complete=True):
-    return {"author": OWNER, "parents": list(parents), "deep": len(parents) >= swarm.SCOPE_DEPTH,
+def scope(*parents, blocked=(), complete=True, type_=None):
+    return {"author": OWNER, "type": type_, "parents": list(parents), "deep": len(parents) >= swarm.SCOPE_DEPTH,
             "blocked_by": [{"repo": REPO, "number": b, "state": s} for b, s in blocked],
             "blockers_complete": complete}
 
@@ -41,7 +41,7 @@ def task(n, author=PLANNER_APP, labels=(), body="Do it.\n"):
 
 class ParseScopeTest(unittest.TestCase):
     def test_reads_the_chain_blockers_and_bot_logins(self):
-        node = {"author": {"login": "productswarm-planner", "__typename": "Bot"},
+        node = {"author": {"login": "productswarm-planner", "__typename": "Bot"}, "issueType": {"name": "Task"},
                 "blockedBy": {"totalCount": 2, "nodes": [
                     {"number": 5, "state": "OPEN", "repository": {"nameWithOwner": REPO}},
                     {"number": 6, "state": "CLOSED", "repository": {"nameWithOwner": OTHER}}]},
@@ -52,6 +52,8 @@ class ParseScopeTest(unittest.TestCase):
                                       "parent": None}}}
         s = swarm.parse_scope(node)
         self.assertEqual(s["author"], PLANNER_APP)
+        self.assertEqual(s["type"], "Task")
+        self.assertIsNone(swarm.parse_scope({"author": None, "parent": None})["type"])   # no type set
         self.assertEqual(s["parents"], [parent(20, "Mission", author="productswarm-lead[bot]"),
                                         parent(3, repo=OTHER)])
         self.assertEqual(s["blocked_by"], [{"repo": REPO, "number": 5, "state": "open"},
@@ -111,6 +113,22 @@ class ScopeRefusalTest(unittest.TestCase):
         for case, (it, s, want) in cases.items():
             with self.subTest(case):
                 self.assertIn(want, self.refusal(it, s) or "")
+
+    def test_only_implementation_types_are_go(self):
+        """#690: Task, Bug, Feature or no type; never a Mission, Brief, Question, Lesson, Goal or Area."""
+        for type_ in (None, "Task", "Bug", "Feature"):
+            with self.subTest(type_):
+                self.assertIsNone(self.refusal(s=scope(parent(3), type_=type_)))
+        for type_ in ("Mission", "Brief", "Question", "Lesson", "Goal", "Area"):
+            with self.subTest(type_):
+                self.assertIn(f"#30 is a {type_}, not an implementation issue",
+                              self.refusal(s=scope(parent(3), type_=type_)) or "")
+
+    def test_ready_still_works_on_any_type(self):
+        it = task(30, labels=("ready",))
+        r = swarm.GoReader(plan=lambda: None, state=lambda w: "closed", comments=lambda: [],
+                           scope=lambda: scope(parent(3), type_="Brief"))
+        self.assertEqual(swarm.go_refusals(30, it, [ev("ready")], OWNER, AGENTS, r, now=NOW), [])
 
     def test_an_owners_comment_vetoes_unless_comments_are_left_out(self):
         said = [{"user": {"login": OWNER}, "body": "not yet"}]
@@ -230,6 +248,8 @@ class WatchGoalTest(unittest.TestCase):
             "no parent": lambda: self.scopes.update({30: scope()}),
             "a stranger's issue": lambda: setattr(self.scene, "issues", [task(30, author="stranger")]),
             "hold": lambda: setattr(self.scene, "issues", [task(30, labels=("hold",))]),
+            "a Mission": lambda: self.scopes.update({30: scope(parent(3), type_="Mission")}),
+            "a Brief": lambda: self.scopes.update({30: scope(parent(3), type_="Brief")}),
             "the owner commented": lambda: self.scene.comments.update(
                 {30: [{"user": {"login": OWNER}, "body": "not yet"}]}),
         }
