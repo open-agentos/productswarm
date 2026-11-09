@@ -211,12 +211,18 @@ Daily reports on #249, last 10 working days (local time):
   ...
 
 Streak: 2 working days in a row with a report [daily] started.
+M1: day 2 of 5
+
+Goal and Area edits not made by @mattmcalister since Fri 2026-11-06 00:00 (GOV-0031):
+  Mon 2026-11-09 10:00  productswarm-planner[bot] edited the body: Goal #683 M1: Daily report runs without the owner
 ```
 
 - **A report** is a comment on the report issue by a swarm App or the owner whose first line starts "Daily report" (bold or not). It counts for the first date on that line, or for the day it was posted if the line has no date. The time shown is when the day's first report was posted.
 - **Who started it** comes from `swarm.db`. If `watch_acted` holds a `[daily]` key `daily:<report issue>:<date>`, `[daily]` started it. The watcher never prunes these keys, unlike run records, which it drops after 7 days. A report posted with no such key was started **by hand**. A day with a `[daily]` start but no report says so.
 - **Today** shows `not yet posted` until its report appears, and doesn't break the streak.
 - `swarm.db` holds no comments, so the reports and their times are read from GitHub, one call for the report issue's comments. Only `report_issue` is needed in `[watch]`: `daily` may be off.
+- **`M1: day N of 5`** goes in the daily report's first line (#709). N is the streak, plus today once a `[daily]` run has started today's report, since that run's report is the day being counted. Before any `[daily]` run today it says today isn't counted; a report started by hand today makes it day 0. At 5 or more it says the done test is met.
+- **Goal and Area edits** (#709, GOV-0031): edits since the start of the previous working day to an open or closed Goal or Area issue the owner opened, by anyone but the owner: body edits, renames, closes and reopens. It searches the repo owner's account, so Goals in any of its repos count, with one GraphQL search per type. The planner lists them under Risks. If an issue's history is too long to read whole, it says to check that one by hand; if the search fails, it says so in one line and the rest still prints.
 
 ## swarm watch: the wake-up loop
 
