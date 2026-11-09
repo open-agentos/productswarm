@@ -50,6 +50,8 @@ What the events API does here (checked 2026-11-05):
 
 ## Where it's published
 
+**Moving to the engine host (#664).** `launcher/swarm desk` serves the same pages live on the engine host behind Caddy, rebuilt from GitHub on each webhook nudge (see `launcher/README.md`). Once it is running there, the owner retires `dashboard.yml` and Pages; until then both publish, and the rest of this section describes Pages. `generate.py --prev PATH` makes a build carry precedent's counts forward from a `state.json` on disk instead of the Pages copy.
+
 `.github/workflows/dashboard.yml` regenerates the pages every 15 minutes (plus a manual run) and publishes it to GitHub Pages at <https://open-agentos.github.io/productswarm/>. It runs on a schedule only, never on issue, comment or PR events, and its token can read the repo but not write to it (`pages` and `id-token` are only for the deploy), per the owner's choice on #32.
 
 GitHub runs that schedule hours apart here, so the nudge in `.github/workflows/digest-nudge.yml` (shared with the digest) dispatches `dashboard.yml` on `main` when something happens: an issue or PR is opened, closed, reopened or relabelled, a PR is pushed or reviewed, or a Discussion post or comment is created or edited (#351). The nudge passes no event data and holds no secrets; `dashboard.yml` itself still runs only on its schedule and dispatch, and the schedule stays as the safety net. An open page reloads itself every 300 seconds with a `<meta http-equiv="refresh">` tag (plain HTML, no script), so it picks up a rebuild within about five minutes; with JavaScript on, an open desk [picks it up](#live-refresh) within 15 seconds of Pages serving the new `state.json`.

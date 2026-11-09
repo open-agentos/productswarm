@@ -538,6 +538,16 @@ It never stops a session itself (GOV-0008): a headless run ends at its budget or
 
 **`swarm:halt`** on the report issue (`report_issue` in `[watch]`, #249) holds every start at the next check: each trigger waits with code `halted`, said once in the log and listed in `swarm inbox`, `watch-public.json` and the `[watch]` issue. Nothing running is stopped (GOV-0008). It counts only while the most recent `swarm:halt` label event is the owner's, checked as `ready` is (GOV-0006). Anyone else's is ignored, and the log says so once. Take the label off and the next check starts what was held.
 
+## swarm desk: the Desk served live (#664)
+
+`swarm desk [--host 127.0.0.1] [--port 8080] [--repo owner/name]` serves the Desk on the engine host behind Caddy (`ops/vps`), in place of the GitHub Pages publish. The pages are the ones `dashboard/generate.py` has always built, so they show only what GitHub already shows (GOV-0002, GOV-0004).
+
+- **Built from GitHub, nudged by webhooks.** It builds at start, on each change to `~/.productswarm/launcher/nudge` (which `swarm webhooks` touches) and every 10 minutes as a backstop. A nudge only starts a build early: generate.py re-reads everything from GitHub, never from the webhook, so a forged or replayed delivery can at most cause one extra build.
+- **At most one build every 120 seconds** (`desk.MIN_GAP`). A build makes about 25 to 45 REST calls and 20 to 25 GraphQL queries (`dashboard/README.md`), so at 30 builds an hour the desk stays under about 1,400 REST calls, leaving most of the read token's 5,000 for the watcher. A nudge inside the gap builds when it ends, not never.
+- **Swapped whole.** Each build goes into a new `~/.productswarm/launcher/desk/build-<n>/`, and the `desk/live` symlink moves to it only if generate.py wrote the pages and `state.json`. A skipped build (low allowance) or a failed one leaves the last good desk up. The build before the live one is kept for requests still reading it; older ones are deleted. Each build carries precedent's counts forward from the live `state.json` (`generate.py --prev`), not from Pages.
+- **Read-only.** It answers GET and HEAD for `/`, the four pages, `state.json` and `fonts/`, and nothing else: any other path is 404 and any other method 405. There is no form and no POST route until Google login. Before the first build finishes, `/` is 503 with `Retry-After: 60`.
+- generate.py reads GitHub with `gh`, so the desk needs `GH_TOKEN` in its environment and nothing else: on the host, the read-only token.
+
 ## The watch state: swarm.db and swarm backup (#659)
 
 `swarm watch` keeps its state in `~/.productswarm/launcher/swarm.db`, a SQLite database it shares with the webhook receiver. Until #659 the state was in `watch.json`. The meaning is unchanged: what the loop acted on (`watch_acted`), what it is holding or skipping (`watch_waiting`), how each run ended (`watch_runs`), and `checked`, `asks_since` and `research_since` (`watch_meta`, `watch_asks_since`). Each check replaces the whole state in one transaction, so a reader never sees half a check and a failed write keeps the old state. The database uses WAL, so `swarm status`, `swarm inbox` and `swarm cost` can read while the watcher or the receiver writes. Read-only commands never create it.

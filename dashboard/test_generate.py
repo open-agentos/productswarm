@@ -152,6 +152,18 @@ class PageTest(unittest.TestCase):
         self.assertEqual(m["gov"][0]["labels"], ["gov:deliberating"])
         self.assertEqual(m["prs"][0]["closes"], [{"number": 4, "title": "Dashboard <generator>"}])
 
+    def test_read_state_for_the_hosted_desk(self):
+        # --prev (#664): the hosted desk carries precedent forward from its own state.json.
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "state.json"
+            self.assertIsNone(g.read_state(f))
+            f.write_text("not json")
+            self.assertIsNone(g.read_state(f))
+            f.write_text("[1]")
+            self.assertIsNone(g.read_state(f))
+            f.write_text('{"built_at": "2026-11-09T08:00:00Z"}')
+            self.assertEqual(g.read_state(f), {"built_at": "2026-11-09T08:00:00Z"})
+
     def test_render_escapes_and_links(self):
         page = g.render(self.model())["operations.html"]
         self.assertNotIn("<b>generator</b>", page)
@@ -172,6 +184,9 @@ class PageTest(unittest.TestCase):
             # Only the desk carries a script: the live refresh, allowed by hash (#411).
             rest = page.replace(f"<script>{live.script()}</script>", "") if name == "index.html" else page
             self.assertNotIn("<script", rest.lower(), name)
+            # Read-only until Google login (#664): no form or button to post anything with.
+            for tag in ("<form", "<button", "<input"):
+                self.assertNotIn(tag, page.lower(), name)
             self.assertIn('http-equiv="Content-Security-Policy"', head, name)
             self.assertIn("#F4F3EE", head, name)   # one look (layout.py)
             self.assertIn('src:url("fonts/IBMPlexSans-Regular-Latin1.woff2")', head, name)

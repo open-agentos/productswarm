@@ -126,7 +126,7 @@ def tracking_comments(repo: str, numbers: list[int]) -> dict[int, list[dict]]:
 def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
           with_actions: bool = False, with_committees: bool = False,
           with_questions: bool = False, with_precedent: bool = False,
-          with_activity: bool = False) -> dict:
+          with_activity: bool = False, prev: Path | None = None) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
     also reads the v3 progress section's data (progress.py), `with_actions` the Actions
     reviewer section's (reviewer_runs.py), `with_committees` the committee Discussions
@@ -164,20 +164,32 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
             "actions": reviewer_runs.fetch(repo, now, reviews) if with_actions else None,
             "committees": committees.fetch(repo, gh_items, gh_json) if with_committees else None,
             "questions": questions.fetch(repo, now, days, gh_items) if with_questions else None,
-            "precedent": fetch_precedent(repo, now, days, list(items.values()))
+            "precedent": fetch_precedent(repo, now, days, list(items.values()), prev)
                          if with_precedent else None,
             "activity": activity.fetch(repo, gh_json, committees.owner_login(), wire.midnight(now))
                         if with_activity else None}
 
 
-def fetch_precedent(repo: str, now: dt.datetime, days: int, items: list[dict]) -> dict:
+def fetch_precedent(repo: str, now: dt.datetime, days: int, items: list[dict],
+                    prev: Path | None = None) -> dict:
     """precedent.py's data, leaving out tracking issues and the digest issue, and carrying
-    counts forward from the last published state.json."""
+    counts forward from the last published state.json: the Pages copy, or with `prev` (the
+    hosted desk, #664) that file on disk."""
     import digest   # here, not at the top: digest imports this module
     skip = ({t["issue"] for t in tracking_issues(items)}
             | {i["number"] for i in items if (i.get("body") or "").lstrip().startswith(digest.MARKER)})
     return precedent.fetch(repo, now, days, items, skip, gh_items, ghql, load_owner(),
-                           precedent.published(repo))
+                           precedent.published(repo) if prev is None else read_state(prev))
+
+
+def read_state(path: Path) -> dict | None:
+    """A state.json on disk, or None if it is missing or unreadable: the build then reads
+    precedent's whole window again."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def load_owner() -> str | None:
@@ -866,6 +878,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--days", type=int, default=DAYS, help="include sessions closed in the last N days")
     ap.add_argument("--idle-minutes", type=int, default=IDLE_MINUTES,
                     help="a live session is idle after this long without an event")
+    ap.add_argument("--prev", help="carry precedent counts from this state.json, not the Pages "
+                                   "copy (the hosted desk, #664)")
     args = ap.parse_args(argv)
 
     repo = args.repo or default_repo()
@@ -881,7 +895,7 @@ def main(argv: list[str]) -> int:
     try:
         data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
                      with_committees=True, with_questions=True, with_precedent=True,
-                     with_activity=True)
+                     with_activity=True, prev=Path(args.prev) if args.prev else None)
         data["records"] = precedent.load_records()
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
