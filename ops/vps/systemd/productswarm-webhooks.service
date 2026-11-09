@@ -1,0 +1,22 @@
+# ops/vps/systemd/productswarm-webhooks.service: the GitHub webhook receiver (#658).
+# It checks each delivery's signature, records it in swarm.db and touches the nudge file.
+[Unit]
+Description=productswarm webhook receiver (swarm webhooks)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=swarm
+Group=swarm
+WorkingDirectory=/home/swarm/productswarm
+EnvironmentFile=/etc/productswarm/webhooks.env
+ExecStart=/home/swarm/productswarm/launcher/swarm webhooks --host 127.0.0.1 --port 8081
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/swarm/.productswarm
+
+[Install]
+WantedBy=multi-user.target

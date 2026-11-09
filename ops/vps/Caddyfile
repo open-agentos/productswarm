@@ -1,0 +1,23 @@
+# ops/vps/Caddyfile: TLS in front of the engine. provision.sh fills in DESK_HOST.
+{$DESK_HOST} {
+	encode gzip
+	# GitHub App webhooks -> the receiver (launcher/webhooks.py), local only
+	handle /webhooks/github {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle /healthz {
+		respond "ok" 200
+	}
+	# The public, read-only Desk: GET and HEAD only until Google login
+	# (inside a handle: a bare respond runs after the catch-all handle and never fires)
+	@write not method GET HEAD
+	handle @write {
+		respond 405
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8080
+	}
+}

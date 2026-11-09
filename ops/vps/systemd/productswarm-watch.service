@@ -1,0 +1,22 @@
+# ops/vps/systemd/productswarm-watch.service: the always-on watcher (#660).
+# It checks on each webhook nudge (at most every 30 s) and every interval_minutes as a sweep.
+# --dry-run until #661: starting role sessions on this host needs the containers from #661,
+# since the launcher's runtime opens macOS Terminal windows. Drop --dry-run once that merges.
+[Unit]
+Description=productswarm watcher (swarm watch --serve)
+After=network-online.target productswarm-webhooks.service
+Wants=network-online.target
+
+[Service]
+User=swarm
+Group=swarm
+WorkingDirectory=/home/swarm/productswarm
+EnvironmentFile=/etc/productswarm/secrets.env
+ExecStart=/home/swarm/productswarm/launcher/swarm watch --serve --dry-run
+Restart=always
+RestartSec=10s
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

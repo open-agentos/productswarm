@@ -1,0 +1,15 @@
+# ops/vps/systemd/productswarm-backup.service: one consistent copy of swarm.db (#659),
+# run by productswarm-backup.timer. Keeps the newest 14 in ~/.productswarm/launcher/backups.
+[Unit]
+Description=productswarm swarm.db backup (swarm backup)
+
+[Service]
+Type=oneshot
+User=swarm
+Group=swarm
+WorkingDirectory=/home/swarm/productswarm
+ExecStart=/home/swarm/productswarm/launcher/swarm backup
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/swarm/.productswarm
