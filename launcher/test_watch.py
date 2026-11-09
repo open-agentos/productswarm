@@ -7,6 +7,7 @@ Run: python3 -m unittest discover -s launcher
 import datetime as dt
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import statedb  # noqa: E402
 import swarm  # noqa: E402
 import watch  # noqa: E402
 from test_swarm import Fake, FakeGit  # noqa: E402
@@ -1006,7 +1008,7 @@ def _save_states(home: str, tag: str, n: int) -> None:
 
 
 class SaveStateTest(unittest.TestCase):
-    """#296: watch.json is written through a temp file of each writer's own."""
+    """#296: two writers never mix their states; #659: in one SQLite transaction each."""
 
     def setUp(self):
         d = tempfile.TemporaryDirectory()
@@ -1042,6 +1044,226 @@ class SaveStateTest(unittest.TestCase):
         (key,) = watch.load_state(self.l)["acted"]                     # one writer's whole file
         self.assertRegex(key, r"^w[0-3]-49$")
         self.assertEqual(list(self.l.dir.glob(".*.tmp")), [])
+
+
+# A watch.json shaped like a real one after a week of runs (#659): every kind of acted
+# outcome, held entries with and without args and once, run records ended and live, a
+# retried run, asks and research on.
+REAL_SHAPED = {
+    "checked": "2026-11-09T14:04:46+00:00",
+    "acted": {
+        "build:111:35008832188": "started builder-issue-111",
+        "review:116:79fb7a7e40ee92946b53037ec2a4d591d92deffd": "started reviewer-watch",
+        "review:117:8471704e51ea156b70450024c98161e910f98491": "covered by reviewer-watch",
+        "respond:130:5d6e7f": "refused: the latest review isn't changes requested",
+        "call-in:3512345678:docs": "started docs-issue-140",
+        "answer:150": "started lead-issue-150",
+        "daily:600:2026-11-06": "started lead-daily",
+        "ask:600:3512399999": "started lead-ask",
+        "research:3512400000": "skipped: posted before research was turned on",
+    },
+    "waiting": [
+        {"key": "build:160:35023541150", "kind": "build", "ref": "#160", "why": "ready by owner",
+         "reason": "held: waits on #158, #159", "code": "waits_on", "since": "2026-11-08T09:00:00+00:00",
+         "args": {"n": 158}, "once": "waits:158,159"},
+        {"key": "review:161:abc", "kind": "review", "ref": "PR #161", "why": "new head",
+         "reason": "held: builder-issue-161 is live", "code": "live",
+         "since": "2026-11-09T13:00:00+00:00"},
+    ],
+    "runs": {
+        "review:161:7385f5fa": {"session_id": "55df6d54-273c-4e30-a688-685e3ab876d4",
+                                "name": "reviewer-watch", "kind": "review", "ref": "PR #161",
+                                "started": "2026-11-03T13:35:10+00:00", "cost_usd": 0.5003722,
+                                "subtype": "success", "ending": "done", "detail": "",
+                                "ended": "2026-11-03T13:41:13+00:00"},
+        "build:49:11": {"session_id": "6a5fb0c8-d158-4966-af1b-b12269774434",
+                        "name": "builder-issue-49", "kind": "build", "ref": "#49",
+                        "started": "2026-11-09T13:35:10+00:00", "tries": 2,
+                        "never_started": ["11111111-2222-3333-4444-555555555555"]},
+    },
+    "asks_since": {"600": "2026-11-06T21:46:56+00:00"},
+    "research_since": "2026-11-06T21:46:56+00:00",
+}
+
+
+class StateStoreTest(unittest.TestCase):
+    """#659: the watcher's state is tables in swarm.db, imported once from watch.json."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.home = Path(d.name)
+        self.lines = []
+        self.l = swarm.Launcher(self.home, root=self.home / "repo", proc=lambda pid: None,
+                                clock=time.time, out=self.lines.append, git=lambda a: (0, ""))
+        self.l.dir.mkdir(parents=True)
+        self.old = self.l.dir / "watch.json"
+
+    def query(self, sql):
+        con = sqlite3.connect(self.l.dir / "swarm.db")
+        try:
+            return con.execute(sql).fetchall()
+        finally:
+            con.close()
+
+    def test_state_is_kept_in_tables_with_the_same_meaning(self):
+        watch.save_state(self.l, REAL_SHAPED)
+        self.assertEqual(watch.state_path(self.l), self.l.dir / "swarm.db")
+        self.assertEqual(dict(self.query("SELECT key, outcome FROM watch_acted")), REAL_SHAPED["acted"])
+        self.assertEqual([k for (k,) in self.query("SELECT key FROM watch_waiting ORDER BY pos")],
+                         ["build:160:35023541150", "review:161:abc"])
+        self.assertEqual({k: json.loads(r) for k, r in self.query("SELECT key, record FROM watch_runs")},
+                         REAL_SHAPED["runs"])
+        self.assertEqual(dict(self.query("SELECT issue, since FROM watch_asks_since")),
+                         REAL_SHAPED["asks_since"])
+        self.assertEqual({k: json.loads(v) for k, v in self.query("SELECT name, value FROM watch_meta")},
+                         {"checked": REAL_SHAPED["checked"], "research_since": REAL_SHAPED["research_since"]})
+        self.assertEqual(watch.load_state(self.l), REAL_SHAPED)
+        self.assertFalse(self.old.exists())
+
+    def test_a_save_replaces_the_whole_state(self):
+        watch.save_state(self.l, REAL_SHAPED)
+        watch.save_state(self.l, {"checked": None, "acted": {"k": "started"}, "waiting": [], "runs": {}})
+        self.assertEqual(watch.load_state(self.l), {"checked": None, "acted": {"k": "started"},
+                                                    "waiting": [], "runs": {}, "asks_since": {},
+                                                    "research_since": None})
+
+    def test_a_missing_store_reads_empty_and_creates_nothing(self):
+        self.assertEqual(watch.load_state(self.l), statedb.empty())
+        self.assertEqual(list(self.l.dir.iterdir()), [])
+
+    def test_a_db_the_receiver_made_reads_empty_and_keeps_its_deliveries(self):
+        import webhooks
+        store = webhooks.Store(self.l.dir / webhooks.DB_FILE)
+        store.record("d-1", "issues", "labeled", "o/r", 5, dt.datetime(2026, 11, 9, tzinfo=dt.timezone.utc))
+        self.assertEqual(watch.load_state(self.l), statedb.empty())
+        watch.save_state(self.l, REAL_SHAPED)
+        self.assertEqual(store.rows(), [("d-1", "issues", "labeled", "o/r", 5)])
+        self.assertEqual(watch.load_state(self.l), REAL_SHAPED)
+        store.db.close()
+
+    def test_a_real_shaped_watch_json_is_read_then_imported_once_and_kept_as_bak(self):
+        raw = json.dumps(REAL_SHAPED, indent=1) + "\n"
+        self.old.write_text(raw)
+        self.assertEqual(watch.load_state(self.l), REAL_SHAPED)            # read before import,
+        self.assertFalse(watch.state_path(self.l).exists())                # writing nothing
+        self.assertTrue(statedb.import_json(self.l.dir))
+        self.assertFalse(self.old.exists())
+        self.assertEqual((self.l.dir / "watch.json.bak").read_text(), raw)  # kept as it was
+        self.assertEqual(watch.load_state(self.l), REAL_SHAPED)
+        self.assertFalse(statedb.import_json(self.l.dir))                  # nothing left to import
+        self.assertEqual(watch.load_state(self.l), REAL_SHAPED)
+
+    def test_an_older_watch_json_without_newer_keys_imports(self):
+        self.old.write_text(json.dumps({"checked": None, "acted": {"build:1:2": "started b"}, "waiting": []}))
+        statedb.import_json(self.l.dir)
+        self.assertEqual(watch.load_state(self.l), {**statedb.empty(), "acted": {"build:1:2": "started b"}})
+
+    def test_the_first_save_imports_a_waiting_watch_json_first(self):
+        self.old.write_text(json.dumps(REAL_SHAPED))
+        st = watch.load_state(self.l)
+        st["acted"]["build:200:1"] = "started builder-issue-200"
+        watch.save_state(self.l, st)
+        self.assertFalse(self.old.exists())
+        self.assertTrue((self.l.dir / "watch.json.bak").exists())
+        self.assertEqual(watch.load_state(self.l), st)
+
+    def test_a_crash_before_the_rename_imports_again_safely(self):
+        self.old.write_text(json.dumps(REAL_SHAPED))
+        with mock.patch.object(statedb.os, "replace", side_effect=OSError("crash")):
+            with self.assertRaises(OSError):
+                statedb.import_json(self.l.dir)
+        self.assertTrue(self.old.exists())
+        self.assertTrue(statedb.import_json(self.l.dir))
+        self.assertEqual(watch.load_state(self.l), REAL_SHAPED)
+
+    def test_a_bad_watch_json_is_neither_imported_nor_renamed(self):
+        self.old.write_text("{")
+        with self.assertRaisesRegex(RuntimeError, "not valid JSON"):
+            statedb.import_json(self.l.dir)
+        self.assertTrue(self.old.exists())
+        self.assertFalse(watch.state_path(self.l).exists())
+
+    def test_the_watcher_imports_on_its_first_run_and_says_so(self):
+        self.old.write_text(json.dumps(REAL_SHAPED))
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=False, read=lambda *a: self.fail("read"))
+        w.loop = lambda *a: 0
+        self.assertEqual(w.run(1, ticks=0), 0)
+        self.assertIn("imported watch.json into swarm.db; the old file is kept as watch.json.bak",
+                      " ".join(self.lines))
+        self.assertEqual(watch.load_state(self.l), REAL_SHAPED)
+
+    def test_a_dry_run_never_imports(self):
+        self.old.write_text(json.dumps(REAL_SHAPED))
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=True, read=lambda *a: self.fail("read"))
+        w.loop = lambda *a: 0
+        self.assertEqual(w.run(1, ticks=0), 0)
+        self.assertTrue(self.old.exists())
+        self.assertFalse(watch.state_path(self.l).exists())
+
+    def test_a_watcher_with_a_bad_watch_json_refuses_to_run(self):
+        self.old.write_text("{")
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=False, read=lambda *a: self.fail("read"))
+        w.loop = lambda *a: self.fail("looped")
+        self.assertEqual(w.run(1, ticks=0), 1)
+        self.assertIn("not valid JSON", self.lines[-1])
+
+    def test_an_unreadable_db_raises_cleanly(self):
+        (self.l.dir / "swarm.db").write_bytes(b"not a database" * 100)
+        with self.assertRaises(RuntimeError):
+            watch.load_state(self.l)
+        self.assertEqual(watch.runs(self.l), [])          # inbox shows nothing, never raises
+
+
+class BackupTest(unittest.TestCase):
+    """#659: `swarm backup` copies swarm.db through SQLite's backup API."""
+
+    NOW = dt.datetime(2026, 11, 9, 14, 5, 6, tzinfo=dt.timezone.utc)
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.home = Path(d.name)
+        self.lines = []
+        self.l = swarm.Launcher(self.home, root=self.home / "repo", proc=lambda pid: None,
+                                clock=time.time, out=self.lines.append, git=lambda a: (0, ""))
+
+    def test_a_backup_is_a_whole_copy_at_a_named_time(self):
+        watch.save_state(self.l, REAL_SHAPED)
+        dest = statedb.backup(self.l.dir, now=self.NOW)
+        self.assertEqual(dest, self.l.dir / "backups" / "swarm-20261109T140506Z.db")
+        copy = self.home / "copy"
+        copy.mkdir()
+        os.replace(dest, copy / "swarm.db")
+        self.assertEqual(statedb.load(copy), REAL_SHAPED)
+        self.assertEqual(list((self.l.dir / "backups").glob(".*.tmp")), [])
+
+    def test_a_backup_leaves_out_an_uncommitted_write(self):
+        watch.save_state(self.l, REAL_SHAPED)
+        con = statedb.connect(self.l.dir / "swarm.db")
+        con.execute("BEGIN IMMEDIATE")
+        con.execute("INSERT INTO watch_acted VALUES ('half', 'written')")
+        try:
+            dest = statedb.backup(self.l.dir, self.home / "out" / "swarm.db")
+        finally:
+            con.execute("ROLLBACK")
+            con.close()
+        self.assertEqual(statedb.load(dest.parent)["acted"], REAL_SHAPED["acted"])
+
+    def test_swarm_backup_writes_where_told_and_says_where(self):
+        watch.save_state(self.l, REAL_SHAPED)
+        dest = self.home / "elsewhere" / "b.db"
+        self.assertEqual(swarm.main(["backup", "--to", str(dest)], self.l), 0)
+        self.assertEqual(self.lines, [f"swarm backup: wrote {dest}"])
+        con = sqlite3.connect(dest)
+        self.assertEqual(len(con.execute("SELECT * FROM watch_runs").fetchall()), 2)
+        con.close()
+        self.assertEqual(dest.stat().st_mode & 0o777, 0o600)
+
+    def test_swarm_backup_with_no_db_fails_cleanly(self):
+        self.assertEqual(swarm.main(["backup"], self.l), 1)
+        self.assertIn("doesn't exist yet; nothing to back up", self.lines[-1])
+        self.assertFalse((self.l.dir / "backups").exists())
 
 
 class ManifestWatchTest(unittest.TestCase):
@@ -1157,7 +1379,7 @@ class ReviewInActionsTest(unittest.TestCase):
     def test_off_or_missing_starts_the_review(self):
         for value in (False, None):
             with self.subTest(review_in_actions=value):
-                (self.home / "launcher" / "watch.json").unlink(missing_ok=True)
+                watch.state_path(self.l).unlink(missing_ok=True)
                 self.l.save([])
                 for f in (self.home / "launcher").glob("*.pid"):   # else live() recovers it (#272)
                     f.unlink()
@@ -1700,7 +1922,7 @@ class RunRecordTest(unittest.TestCase):
         return e
 
     def state(self):
-        return json.loads((self.home / "launcher" / "watch.json").read_text())
+        return watch.load_state(self.l)
 
     def transcript(self, sid):
         """Claude Code wrote a transcript for sid: it got as far as starting (#550)."""
@@ -3241,7 +3463,7 @@ class PublicStateTest(unittest.TestCase):
                          [("#49", "build", "at_cap", later.isoformat()),
                           ("#88", "answer", "error", later.isoformat())])
         self.assertEqual([r["role"] for r in pub["running"]], ["reviewer"])
-        self.assertIn("cost_usd", (self.home / "launcher" / "watch.json").read_text())
+        self.assertTrue(any("cost_usd" in r for r in watch.load_state(self.l)["runs"].values()))
         self.assert_no_cost(pub)
 
     def test_dry_run_writes_nothing(self):

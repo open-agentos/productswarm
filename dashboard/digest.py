@@ -8,7 +8,7 @@ pinned digest issue's body, and only when the list changed.
 
 It reuses generate.fetch(), build() and needs_you(), so the digest can't disagree with the
 dashboard or `swarm inbox`. Like the dashboard, it reads only public GitHub data: local-only
-state (`watch.json` runs, held triggers, run cost) isn't on GitHub, so the digest doesn't
+state (`swarm.db` runs, held triggers, run cost) isn't on GitHub, so the digest doesn't
 show it (GOV-0002, GOV-0004, GOV-0014).
 
     python3 dashboard/digest.py --print            # prints the issue body

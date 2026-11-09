@@ -1104,7 +1104,8 @@ class StatusTest(Base):
     NOW = dt.datetime(2026, 11, 6, 12, 0, tzinfo=dt.timezone.utc)
 
     def write(self, st):
-        (self.home / "launcher" / "watch.json").write_text(json.dumps(st))
+        import watch
+        watch.save_state(self.l, st)
 
     def text(self, st, live=(), holder=None, interval=5, costs=None):
         import watch

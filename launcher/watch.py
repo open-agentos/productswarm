@@ -49,7 +49,7 @@ an ask when a line of it starts `Ask:` (any case): one role, a colon, then the q
 the rest of that line, at most WHY_MAX characters. Only the first such line counts. It is
 keyed on the comment id, so it starts once. A comment by anyone but the owner, a name with
 no prompt in roles/, a line naming more than one role, or a line with no question is
-skipped with a reason. Only asks posted since the switch was turned on count: watch.json
+skipped with a reason. Only asks posted since the switch was turned on count: swarm.db
 keeps when this watcher first saw it on for that report issue (`asks_since`), and drops it
 on a check that finds it off, so an ask posted while it was off (or answered by hand
 before it was on) never starts; each is skipped once with that reason. It waits only while
@@ -65,7 +65,7 @@ comment id, so it starts the analyst on that issue once. A line by anyone but th
 the planner App, one with no question, one on a pull request or closed issue, one on the
 report issue (which stays open, so a research PR can't close it) or on a gov:question
 (which a research PR mustn't close) is skipped with a reason. As for [ask], only lines
-posted since the switch was turned on count (watch.json's `research_since`, dropped while
+posted since the switch was turned on count (swarm.db's `research_since`, dropped while
 it is off). The repo's comments are read in one list call, since research_since but at
 most RESEARCH_DAYS back, so a line held longer than that drops out. It waits only while
 an analyst session is live on the issue, which must exist and be open; it needs no label.
@@ -127,7 +127,7 @@ lives only in the process, and nothing is written to disk.
 Leaving [review] to Actions (#216, GOV-0019): with `review_in_actions = true` in
 swarm.toml's [watch] table, every [review] trigger is listed as "left to Actions" and
 starts nothing, in --dry-run and for real; the GitHub Actions reviewer workflow reviews
-that head instead. It is logged once per head and never recorded in watch.json, so
+that head instead. It is logged once per head and never recorded in swarm.db, so
 setting the switch back to false (or disabling the workflow and setting it false) puts
 the local loop back in charge of any head still unreviewed. [respond], [build], [answer]
 and [record] are unchanged. Changing the switch is a `ci-and-workflows` call for the owner.
@@ -184,11 +184,11 @@ so the build starts on the first check after every listed issue is closed.
 
 Before each start it runs `swarm launch`'s refusal checks again on fresh GitHub data. A
 refusal is logged and the trigger is done. What it has acted on is kept in
-~/.productswarm/launcher/watch.json, so a restart starts nothing twice. One reviewer
+~/.productswarm/launcher/swarm.db (statedb.py, #659), so a restart starts nothing twice. One reviewer
 pass covers every review trigger present when it starts.
 
 How each run ended (#149): when a run the loop started is no longer live, the loop reads
-its result file and records, against the trigger in watch.json's "runs", the session id,
+its result file and records, against the trigger in swarm.db's "runs", the session id,
 Claude Code's total_cost_usd (a client-side estimate that stays local: GOV-0002/3/4) and
 its ending: done, ended at cap (--max-budget-usd or --max-turns), error, or no result (no
 file or no JSON result, for example after `swarm stop`), or limited (#489, below). Unless
@@ -214,7 +214,7 @@ One watcher at a time (#273): without --dry-run, swarm watch holds an exclusive,
 non-blocking fcntl.flock on ~/.productswarm/launcher/watch.lock for its whole life, with
 its pid in the file. A second one exits at once, naming that pid. The kernel drops the
 lock when the process ends, even on a crash or `kill`, so there is no stale lock to clean
-up. --dry-run takes no lock and writes no watch.json, so it is safe beside a running one.
+up. --dry-run takes no lock and writes no state, so it is safe beside a running one.
 
 It never stops a session (GOV-0008), never adds or removes labels, and never comments,
 approves or merges: its only GitHub calls are reads. Sessions it starts are recorded
@@ -240,11 +240,11 @@ from pathlib import Path
 from typing import Callable
 
 import manifest
+import statedb
 import swarm
 
 REVIEWER = swarm.dashboard().REVIEWER
 DEFAULT_INTERVAL = 5          # minutes, for --dry-run when swarm.toml has no [watch] table
-STATE_FILE = "watch.json"     # in the launcher's state directory
 LOCK_FILE = "watch.lock"      # held by the one running watcher (#273)
 REF_RE = re.compile(r"#(\d+)")
 GOV_RE = re.compile(r"\bGOV-\d{4}\b")
@@ -259,7 +259,7 @@ MAX_CALLS = 2                 # calls that count per issue per UTC day (GOV-0023
 WHY_MAX = 300                 # characters of a call's why that go into the prompt
 CALL_INS_OFF = ("call-ins are off: call_ins = true in swarm.toml's [watch] turns them on "
                 "(GOV-0023)")
-NOT_RECORDED = (LEFT_TO_ACTIONS, CALL_INS_OFF)   # listed once, never kept in watch.json
+NOT_RECORDED = (LEFT_TO_ACTIONS, CALL_INS_OFF)   # listed once, never kept in swarm.db
 DAILY = "daily"               # GOV-0029's daily report trigger (#588)
 ASK = "ask"                   # GOV-0029's owner Ask: trigger (#590)
 ASK_RE = re.compile(r"^[ \t]*Ask:[ \t]*([^:\n]*?)[ \t]*(?::[ \t]*([^\n]*?))?[ \t]*$",
@@ -269,8 +269,8 @@ RESEARCH_RE = re.compile(r"^[ \t]*Research:[ \t]*([^\n]*?)[ \t]*$", re.IGNORECAS
 RESEARCH_DAYS = 7             # how far back [research] reads the repo's comments
 PLANNER_APP = "productswarm-planner[bot]"   # whose Research: lines count, with the owner's
 WORKDAYS = range(5)           # Monday to Friday, by date.weekday()
-RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and watch.json keeps it
-PUBLIC_FILE = "watch-public.json"   # watch.json's no-cost form, beside it (#456)
+RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and swarm.db keeps it
+PUBLIC_FILE = "watch-public.json"   # the state's no-cost form, beside swarm.db (#456)
 MAX_RETRIES = 2               # times a run that never started is started again (#550)
 WAIT_RE = re.compile(r"\bwait(?:s|ing)?\s+(?:on|for)\b([^\n]*)", re.IGNORECASE)
 BUILDER_APP = "productswarm-builder[bot]"
@@ -1042,7 +1042,8 @@ def reviewed_heads(reviews: list[dict]) -> set[str]:
 # ---------------------------------------------------------------- local state
 
 def state_path(launcher: "swarm.Launcher") -> Path:
-    return launcher.dir / STATE_FILE
+    """Where the watcher's state lives: swarm.db's watch_ tables (#659)."""
+    return launcher.dir / statedb.DB_FILE
 
 
 def load_state(launcher: "swarm.Launcher") -> dict:
@@ -1051,18 +1052,10 @@ def load_state(launcher: "swarm.Launcher") -> dict:
     "research_since": ISO time or None}. A run record (#149) is {session_id, name, kind,
     ref, started}, plus {ending, detail, cost_usd, subtype, ended} once the run has ended.
     asks_since (#590) is when the watcher first saw [watch] asks on for that report issue;
-    it is empty while asks is off. research_since (#591) is the same for [watch] research."""
-    try:
-        data = json.loads(state_path(launcher).read_text())
-    except FileNotFoundError:
-        return {"checked": None, "acted": {}, "waiting": [], "runs": {}, "asks_since": {},
-                "research_since": None}
-    except ValueError as e:
-        raise RuntimeError(f"{state_path(launcher)} is not valid JSON: {e}") from None
-    return {"checked": data.get("checked"), "acted": dict(data.get("acted") or {}),
-            "waiting": list(data.get("waiting") or []), "runs": dict(data.get("runs") or {}),
-            "asks_since": dict(data.get("asks_since") or {}),
-            "research_since": data.get("research_since")}
+    it is empty while asks is off. research_since (#591) is the same for [watch] research.
+    Read from swarm.db (statedb.py, #659), or from a watch.json not yet imported. Writes
+    nothing."""
+    return statedb.load(launcher.dir)
 
 
 def gh_comments(repo: str, n: int) -> list[dict]:
@@ -1157,16 +1150,21 @@ def run_line(r: dict) -> str:
     return f"[{r['kind']}] {r['ref']} {r['name']} · {ending} · {usd(r.get('cost_usd'))} (est.)"
 
 
-def save_state(launcher: "swarm.Launcher", st: dict, name: str = STATE_FILE) -> None:
-    """Write watch.json (or `name` beside it) atomically through a temp file of its own, so
-    two writers never rename each other's (#296), as Launcher.save() does for sessions.json
-    (#272)."""
+def save_state(launcher: "swarm.Launcher", st: dict) -> None:
+    """Replace the watcher's state in swarm.db in one transaction (#659), so two writers
+    never mix their states (#296). A watch.json still waiting is imported first."""
+    statedb.save(launcher.dir, st)
+
+
+def save_public(launcher: "swarm.Launcher", pub: dict) -> None:
+    """Write watch-public.json atomically through a temp file of its own, so two writers
+    never rename each other's (#296), as Launcher.save() does for sessions.json (#272)."""
     launcher.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, tmp = tempfile.mkstemp(dir=launcher.dir, prefix=".watch.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(st, indent=1) + "\n")
-        os.replace(tmp, launcher.dir / name)
+            f.write(json.dumps(pub, indent=1) + "\n")
+        os.replace(tmp, launcher.dir / PUBLIC_FILE)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -1195,7 +1193,7 @@ def reason_text(code: str | None, args: dict | None = None) -> tuple[str, str]:
 
 
 def public_state(st: dict, live: list, now: dt.datetime) -> dict:
-    """watch.json in a form fit to show (#456): what swarm watch is running, holding and
+    """The watcher's state in a form fit to show (#456): what swarm watch is running, holding and
     skipping, and which of its runs failed in the last RUNS_DAYS. Pure. Each field is picked
     by name, and reasons are codes with REASONS' sentences, so no cost (GOV-0014), detail
     or text copied from an issue gets in."""
@@ -1395,7 +1393,7 @@ def waiting(launcher: "swarm.Launcher") -> tuple[dt.datetime | None, list[dict]]
 
 
 def runs(launcher: "swarm.Launcher") -> list[dict]:
-    """For `swarm inbox` (#149): every run record in watch.json, ended or not. Never
+    """For `swarm inbox` (#149): every run record in swarm.db, ended or not. Never
     raises: a missing or bad state file shows nothing."""
     try:
         return list(load_state(launcher)["runs"].values())
@@ -1466,10 +1464,10 @@ def cost_text(runs: list[dict], prs: list[dict]) -> str:
     runs is watch.runs(); prs is gh_prs(). Only prints: the costs stay on this machine
     (GOV-0002, GOV-0003, GOV-0004, GOV-0014)."""
     limits = ["Only runs swarm watch started have a cost: sessions you start by hand have none.",
-              f"watch.json keeps runs for {RUNS_DAYS} days (watch.RUNS_DAYS), so older runs aren't counted.",
+              f"swarm.db keeps runs for {RUNS_DAYS} days (watch.RUNS_DAYS), so older runs aren't counted.",
               "Costs are Claude Code's local estimate and stay on this machine."]
     if not runs:
-        return "\n".join(["no runs recorded in watch.json"] + limits)
+        return "\n".join(["no runs recorded in swarm.db"] + limits)
     state = {p["number"]: PR_STATES.get(p.get("state"), (p.get("state") or "?").lower()) for p in prs}
     groups: dict[tuple, dict] = {}
     for r in runs:
@@ -1678,7 +1676,7 @@ class Watch:
              now: dt.datetime) -> tuple[int | None, dt.datetime | None]:
         """[ask] (#590): (the report issue, when asks was first seen on for it), or (None,
         None) while asks is off. With asks on it reads the report issue's comments into w,
-        unless gather() already did. kept is watch.json's asks_since."""
+        unless gather() already did. kept is the stored asks_since."""
         n = limits.report_issue if limits and limits.asks else None
         if not n:
             return None, None
@@ -1691,7 +1689,7 @@ class Watch:
                  now: dt.datetime) -> dt.datetime | None:
         """[research] (#591): when research was first seen on, or None while it is off.
         With it on, it reads the repo's comments since then (at most RESEARCH_DAYS back)
-        into w.recent, unless already read. kept is watch.json's research_since."""
+        into w.recent, unless already read. kept is the stored research_since."""
         if not (limits and limits.research):
             return None
         since = dt.datetime.fromisoformat(kept) if kept else now
@@ -1796,7 +1794,7 @@ class Watch:
 
         for t in todo:
             if t.skipped in NOT_RECORDED:
-                # Not recorded in watch.json: flip the switch and the loop acts on it again.
+                # Not recorded in swarm.db: flip the switch and the loop acts on it again.
                 if t.key not in self.seen:
                     self.seen.add(t.key)
                     out(t.line())
@@ -1883,7 +1881,7 @@ class Watch:
               "asks_since": asks_since, "research_since": research_since}
         save_state(self.launcher, st)
         pub = public_state(st, self.launcher.live(), now)
-        save_state(self.launcher, pub, PUBLIC_FILE)
+        save_public(self.launcher, pub)
         self.publish(pub)
         return done
 
@@ -2045,6 +2043,14 @@ class Watch:
                               f"Stop it first; --dry-run is safe beside it (#273)")
             return 1
         try:
+            try:
+                if statedb.import_json(self.launcher.dir):     # #659: once, on the first run
+                    self.launcher.out(f"swarm watch: imported {statedb.JSON_FILE} into "
+                                      f"{statedb.DB_FILE}; the old file is kept as "
+                                      f"{statedb.JSON_FILE}{statedb.BAK_SUFFIX}")
+            except RuntimeError as e:
+                self.launcher.out(f"swarm watch: {e}")
+                return 1
             self.launcher.out(f"swarm watch: checking every {interval_minutes:g} min; starts sessions "
                               f"within swarm.toml's [watch] limits and only for roles with a "
                               f"spend_cap_usd (GOV-0010); never stops one; Ctrl-C to stop")

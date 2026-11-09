@@ -46,8 +46,10 @@ What the launcher started is recorded locally, never on GitHub:
     ~/.productswarm/launcher/<id>.pid        written by the window's shell before exec
     ~/.productswarm/launcher/<id>.result.json  a headless run's stdout: ops/swarm-session's
                                              one-line banner, then the JSON result (#147)
-    ~/.productswarm/launcher/watch.json      triggers `swarm watch` acted on or is holding,
-                                             and how each run it started ended (#149)
+    ~/.productswarm/launcher/swarm.db        triggers `swarm watch` acted on or is holding,
+                                             and how each run it started ended (#149), in
+                                             SQLite tables (statedb.py, #659); `swarm
+                                             backup` copies it consistently
 (PRODUCTSWARM_HOME moves ~/.productswarm, as for the heartbeat.)
 
 `stop` sends SIGTERM. Claude Code then runs its SessionEnd hook, so the heartbeat
@@ -784,7 +786,7 @@ def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None
 
 
 def cost(launcher: Launcher, repo: str, get_prs: Callable | None = None) -> int:
-    """`swarm cost` (#176): the runs in watch.json, costed per PR. Only prints: no cost
+    """`swarm cost` (#176): the runs in swarm.db, costed per PR. Only prints: no cost
     goes to GitHub or the repo (GOV-0002, GOV-0003, GOV-0004, GOV-0014)."""
     import watch
     runs = watch.runs(launcher)
@@ -1079,6 +1081,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_watch.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_watch.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_watch.add_argument("--idle-minutes", type=int, default=15)
+    p_backup = sub.add_parser("backup", help="copy swarm.db consistently (SQLite's backup API)")
+    p_backup.add_argument("--to", type=Path, default=None,
+                          help="default: ~/.productswarm/launcher/backups/swarm-<UTC time>.db")
     p_hooks = sub.add_parser("webhooks", help="receive GitHub webhooks and nudge the watcher (engine host)")
     p_hooks.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (Caddy in front)")
     p_hooks.add_argument("--port", type=int, default=8081)
@@ -1089,6 +1094,15 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
         import webhooks
         return webhooks.serve(launcher.dir, os.environ.get("WEBHOOK_SECRET", ""), args.host,
                               args.port, out=launcher.out)
+    if args.cmd == "backup":
+        import statedb
+        try:
+            dest = statedb.backup(launcher.dir, args.to)
+        except (RuntimeError, OSError) as e:
+            launcher.out(f"swarm backup: {e}")
+            return 1
+        launcher.out(f"swarm backup: wrote {dest}")
+        return 0
     if args.cmd == "watch" and not args.dry_run and args.interval is not None:
         launcher.out("swarm watch: --interval works only with --dry-run; the interval for real "
                      "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")
