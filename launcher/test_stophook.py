@@ -46,7 +46,8 @@ class FakeGitHub:
 
     def gh(self):
         return stophook.GitHub(get=self._look, items=lambda p: list(self._look(p) or []),
-                               closing_prs=lambda repo, n: self._look(f"closing/{n}") or [])
+                               closing_prs=lambda repo, n: self._look(f"closing/{n}") or [],
+                               scope=lambda repo, n: self._look(f"scope/{n}"))
 
     def put(self, path, value):
         self.data[f"repos/{R}/{path}"] = value
@@ -109,6 +110,9 @@ class BuilderTest(HookCase):
 
     def milestone_on(self, m="M1", plan=True, comments=()):
         import base64
+        from unittest import mock
+        # GOV-0031's week for milestone lines (swarm.MILESTONE_UNTIL): these tests read it as open.
+        self.enterContext(mock.patch.object(swarm, "MILESTONE_UNTIL", swarm.MILESTONE_UNTIL.replace(year=2100)))
         self.run_as("builder", 7)
         it = issue(7, ())
         it.update(user={"login": ME["planner"]}, body=f"**Milestone:** {m}\n**Waits on:** nothing.\n")
@@ -132,6 +136,31 @@ class BuilderTest(HookCase):
         self.gh.data.pop(f"repos/{R}/contents/PLAN.md", None)
         self.assertAllows()
         self.milestone_on(comments=[{"user": {"login": OWNER}, "body": "wait"}])   # veto
+        self.assertAllows()
+
+    def goal_on(self, goal_author=None, comments=()):
+        """#681: builder on #7, which a swarm App opened under the owner's Goal #3."""
+        self.run_as("builder", 7)
+        it = issue(7, ())
+        it.update(user={"login": ME["planner"]}, body="Do it.\n")
+        self.gh.put("issues/7", it)
+        self.gh.put("issues/7/events", [])
+        self.gh.put("issues/7/comments", list(comments))
+        self.gh.data["scope/7"] = {
+            "author": ME["planner"], "deep": False, "blocked_by": [], "blockers_complete": True,
+            "parents": [{"repo": R, "number": 3, "state": "open", "type": "Goal",
+                         "author": goal_author or OWNER}]}
+
+    def test_goal_issue_without_ready_blocks_until_its_pr(self):
+        self.goal_on()
+        self.assertBlocks("No PR closes #7")
+        self.gh.closes(7, 50)
+        self.assertAllows()
+
+    def test_goal_issue_that_isnt_go_is_done(self):
+        self.goal_on(goal_author=ME["planner"])      # a Goal an App opened doesn't count
+        self.assertAllows()
+        self.goal_on(comments=[{"user": {"login": OWNER}, "body": "wait"}])   # veto
         self.assertAllows()
 
     def test_closed_issue_is_done(self):

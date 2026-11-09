@@ -865,6 +865,9 @@ class GoTest(unittest.TestCase):
     def setUp(self):
         self.plan, self.states, self.comments = PLAN, {}, []
         self.reads = []
+        # GOV-0031's week for milestone lines (swarm.MILESTONE_UNTIL): read here as still open,
+        # since these tests use the real clock (#681).
+        self.enterContext(mock.patch.object(swarm, "MILESTONE_UNTIL", swarm.MILESTONE_UNTIL.replace(year=2100)))
 
     def reader(self):
         def plan():

@@ -44,18 +44,23 @@ It refuses, and says why, if:
 - #N isn't go (see "Two ways an issue is go" below);
 - a live session is already on #N. "Live" means a heartbeat session that isn't stopped and whose current issue is #N, or a session `launch` started on #N that hasn't sent a heartbeat yet. The refusal names the session.
 
-`--force` overrides only the last of these. No flag makes an issue go: add `ready` to the issue, or put it under an open milestone.
+`--force` overrides only the last of these. No flag makes an issue go: add `ready` to the issue, or put it under an open Goal or Area you opened.
 
-**Two ways an issue is go** (`swarm.go_refusals`, #582). `swarm launch` and the stop hook (`stophook.py`) share this check:
+**How an issue is go** (`swarm.go_refusals`, #582, #681). `swarm launch` and the stop hook (`stophook.py`) share this check:
 
 1. **The owner's `ready`** (GOV-0006): the most recent `ready` label on #N was added by the owner named in `governance/jurisdictions.yml`. This is checked first, and is enough on its own.
-2. **Its milestone** (GOV-0026), for an implementation issue only. All of these hold:
+2. **Its Goal or Area** (GOV-0031, #681), for an implementation issue only. All of these hold:
+   - the owner or a swarm App opened #N;
+   - #N sits under an open issue of type Goal or Area that the owner opened, at any depth of sub-issues (up to `swarm.SCOPE_DEPTH`, 6 levels), in any repo of the org. A Goal or Area anyone else opened doesn't count;
+   - none of its blocked-by issues is open (up to 50 are read; an issue with more isn't go);
+   - the owner hasn't vetoed it: no `hold` label and no owner comment, as for a milestone below.
+3. **Its milestone** (GOV-0026), until 2026-11-16 13:54 UTC only (`swarm.MILESTONE_UNTIL`: GOV-0031's week after #668 merged). After that a `**Milestone:**` line is refused as `stopped counting`. Until then, for an implementation issue only, all of these hold:
    - the owner or a swarm App (a login under `identities.agents` in `jurisdictions.yml`) opened #N, and its body has a line `**Milestone:** M<n>`;
    - `PLAN.md` on `main` has a `## M<n>` section that isn't marked done. `PLAN.md`'s format (#574) doesn't yet say how a milestone is marked done, so either form counts: `(done)` or ✅ in the heading, or a `**Status:** done` line in the section;
    - every issue on its `**Waits on:**` line is closed (read as `swarm watch` reads it, #490);
    - the owner hasn't vetoed it: it has no `hold` label, and the owner hasn't commented on it. Any owner comment is a veto, whatever it says, until the owner labels the issue `ready` (the record says "a comment" without narrowing it, so this reads it strictly).
 
-A `gov:question` is go only by `ready`, even with a milestone line (GOV-0026 leaves GOV-0006's rule for questions unchanged). When #N has a milestone line and neither way passes, the refusal names the milestone condition that failed, for example `#N's milestone M2 is marked done in PLAN.md`. Without a milestone line it names the `ready` check, as before. `swarm watch` starts `[build]` on an issue that is go either way (#583; see "Builds by milestone" under `swarm watch`).
+A `gov:question` is go only by `ready`, even under a Goal or with a milestone line (GOV-0006's rule for questions is unchanged). When nothing passes, the refusal names the milestone condition that failed first (for example `#N's milestone M2 is marked done in PLAN.md`), then the Goal or Area condition if #N is a sub-issue at all (for example `#N's Goal #3 was opened by productswarm-planner[bot], not @owner`). With neither, it names the `ready` check, as before. `swarm watch` starts `[build]` on an issue that is go any of these ways (#583, #681; see "Builds under a Goal or Area" under `swarm watch`).
 
 ## Spend cap (warn only)
 
@@ -189,7 +194,9 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respo
 | `[ask]` The owner's comment on the report issue with a line `Ask: <role>: <question>` (GOV-0029, #590). Off unless `asks = true` (see "Owner asks" below) | the named role on the report issue, once per comment, with a prompt that quotes the question and says it answers in one comment there |
 | `[research]` A comment by the owner or `productswarm-planner[bot]` on an open issue with a line `Research: <question>` (GOV-0029, #591). Off unless `research = true` (see "Research briefs" below) | `analyst` on that issue, once per comment, with a prompt that quotes the question and says the brief goes in `research/` as a PR that closes the issue |
 
-**Builds by milestone** (#583, GOV-0026). The watcher reads `PLAN.md` from `main` once per check, and the events and comments of every open, non-question issue with a `**Milestone:** M<n>` line. An issue without the owner's `ready` gets a `[build]` when the milestone check under "Two ways an issue is go" passes on that reading: opened by the owner or a swarm App, `M<n>` in `PLAN.md` and not marked done, no `hold` label and no owner comment. Its `**Waits on:**` issues hold the build, as for a `ready` issue, rather than stopping it. So do a live session on the issue, an overlapping GOV record and the GOV-0010 and GOV-0012 limits, as for any `[build]`.
+**Builds under a Goal or Area** (#681, GOV-0031). Once per check the watcher reads every open issue's sub-issue parents (6 levels), their issue types, authors and states, and its blocked-by links, in one GraphQL query per 25 issues. An issue without the owner's `ready` gets a `[build]` when the Goal or Area check under "How an issue is go" passes on that reading, keyed `build:N:G<repo>#<goal>` (plus a `hold` lift, as below) and reading `[build] #N go under Goal #3 (GOV-0031)`. An open blocked-by issue holds the build (`held: waits on #5 (blocked by)`) rather than stopping it, and it holds a `ready` build too, as `**Waits on:**` does (#490). `Call in:` lines count on these issues as on milestone issues, blocked or not.
+
+**Builds by milestone** (#583, GOV-0026), until `swarm.MILESTONE_UNTIL`. The watcher reads `PLAN.md` from `main` once per check, and the events and comments of every open, non-question issue with a `**Milestone:** M<n>` line. An issue without the owner's `ready` gets a `[build]` when the milestone check under "Two ways an issue is go" passes on that reading: opened by the owner or a swarm App, `M<n>` in `PLAN.md` and not marked done, no `hold` label and no owner comment. Its `**Waits on:**` issues hold the build, as for a `ready` issue, rather than stopping it. So do a live session on the issue, an overlapping GOV record and the GOV-0010 and GOV-0012 limits, as for any `[build]`.
 
 - The owner's `ready` is read first: a `ready` issue builds as before, keyed on that label event, whatever its milestone.
 - The trigger reads `[build] #N go by milestone M<n> (GOV-0026)`. Its key is `build:N:M<n>`, plus the id of the latest event removing `hold` if there is one. A change of milestone, or a `hold` veto then its removal, is a new trigger, so it starts at most one new build. An owner comment stays a veto until the owner labels the issue `ready`, which is then a `ready` build.

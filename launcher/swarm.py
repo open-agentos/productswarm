@@ -901,11 +901,112 @@ def plan_milestones(plan: str) -> dict[int, bool]:
 
 @dataclass
 class GoReader:
-    """What the milestone go needs beyond the issue and its events, read only when asked:
-    PLAN.md on main (None if it isn't there), an issue's state, and the issue's comments."""
+    """What the go needs beyond the issue and its events, read only when asked: PLAN.md on
+    main (None if it isn't there), an issue's state, the issue's comments, and its scope
+    (GOV-0031: its sub-issue parents and blocked-by links, parse_scope(); None if unread)."""
     plan: Callable[[], str | None]
     state: Callable[[int], str | None]
     comments: Callable[[], list[dict]]
+    scope: Callable[[], dict | None] = lambda: None
+
+
+# GOV-0031 (#681): an issue under an open Goal or Area the owner opened is go. For one week
+# after it merged (#668, 2026-11-09 13:54 UTC) the GOV-0026 milestone lines count too.
+SCOPE_TYPES = {"Goal", "Area"}
+SCOPE_DEPTH = 6               # sub-issue levels read above an issue; deeper ones don't count
+BLOCKERS_MAX = 50             # blocked-by issues read; an issue with more isn't go
+MILESTONE_UNTIL = dt.datetime(2026, 11, 16, 13, 54, 22, tzinfo=dt.timezone.utc)
+_SCOPE_NODE = "number state author { login __typename } issueType { name } repository { nameWithOwner }"
+
+
+def scope_field(depth: int = SCOPE_DEPTH) -> str:
+    """The GraphQL for one issue's scope, as `field % (n, n)` for ghql.batched()."""
+    chain = ""
+    for _ in range(depth):
+        chain = f"parent {{ {_SCOPE_NODE} {chain} }}"
+    return ("i%d: issue(number: %d) { author { login __typename } "
+            f"blockedBy(first: {BLOCKERS_MAX}) {{ totalCount nodes {{ number state "
+            f"repository {{ nameWithOwner }} }} }} {chain} }}")
+
+
+def parse_scope(node: dict | None) -> dict | None:
+    """An issue's scope from scope_field()'s data: {"author", "parents": [nearest first, each
+    {repo, number, state, type, author}], "deep": the chain may go on past SCOPE_DEPTH,
+    "blocked_by": [{repo, number, state}], "blockers_complete"}. States are lower case and
+    logins are REST's. None if the query didn't return the issue."""
+    if not node:
+        return None
+
+    def login(a: dict | None) -> str:   # REST's login, as dashboard/ghql.login (the stop hook can't import it)
+        return "ghost" if not a else a["login"] + "[bot]" if a.get("__typename") == "Bot" else a["login"]
+    parents, p = [], node.get("parent")
+    while p:
+        parents.append({"repo": (p.get("repository") or {}).get("nameWithOwner"),
+                        "number": p.get("number"), "state": (p.get("state") or "").lower(),
+                        "type": (p.get("issueType") or {}).get("name"),
+                        "author": login(p.get("author"))})
+        p = p.get("parent")
+    conn = node.get("blockedBy") or {}
+    nodes = conn.get("nodes") or []
+    return {"author": login(node.get("author")), "parents": parents,
+            "deep": len(parents) >= SCOPE_DEPTH,
+            "blocked_by": [{"repo": (b.get("repository") or {}).get("nameWithOwner"),
+                            "number": b.get("number"), "state": (b.get("state") or "").lower()}
+                           for b in nodes],
+            "blockers_complete": conn.get("totalCount", 0) <= len(nodes)}
+
+
+def scope_ref(x: dict, repo: str | None = None) -> str:
+    """#n, or owner/name#n for an issue in another repo."""
+    return f"#{x['number']}" if x.get("repo") in (None, repo) else f"{x['repo']}#{x['number']}"
+
+
+def scope_goal(scope: dict | None, owner: str) -> dict | None:
+    """The nearest open Goal or Area above the issue that the owner opened, or None."""
+    return next((p for p in (scope or {}).get("parents") or []
+                 if p["state"] == "open" and p["type"] in SCOPE_TYPES and p["author"] == owner), None)
+
+
+def scope_refusal(n: int, issue: dict, scope: dict | None, owner: str, agents: set[str],
+                  comments: Callable[[], list[dict]] | None, blockers: bool = True,
+                  repo: str | None = None) -> str | None:
+    """Why issue n isn't go under a Goal or Area (GOV-0031), or None if it is. blockers=False
+    leaves its open blocked-by issues out (the watcher holds those, #490), and comments=None
+    leaves the owner's comments out (a call-in's own comment mustn't veto it, #594)."""
+    if scope is None:
+        return f"#{n}'s sub-issue links couldn't be read"
+    author = (issue.get("user") or {}).get("login")
+    if author != owner and author not in agents:
+        return (f"#{n} was opened by {author or 'nobody we can see'}, not a swarm App or "
+                f"@{owner}, so a Goal or Area above it doesn't make it go")
+    if scope_goal(scope, owner) is None:
+        if not scope["parents"]:
+            return f"#{n} isn't a sub-issue of anything, so no Goal or Area makes it go"
+        near = next((p for p in scope["parents"] if p["type"] in SCOPE_TYPES), None)
+        if near and near["author"] != owner:
+            return (f"#{n}'s {near['type']} {scope_ref(near, repo)} was opened by {near['author']}, "
+                    f"not @{owner}, so it doesn't count (GOV-0031)")
+        if near:
+            return f"#{n}'s {near['type']} {scope_ref(near, repo)} is closed"
+        deep = f" within {SCOPE_DEPTH} levels" if scope["deep"] else ""
+        return f"#{n} isn't under an open Goal or Area that @{owner} opened{deep}"
+    labels = {lb.get("name") for lb in issue.get("labels") or []}
+    if "hold" in labels:
+        return f"#{n} is labelled `hold`: the owner's veto"
+    if blockers:
+        if not scope["blockers_complete"]:
+            return f"#{n} has more than {BLOCKERS_MAX} blocked-by issues; not all could be read"
+        still = [b for b in scope["blocked_by"] if b["state"] != "closed"]
+        if still:
+            return f"#{n} is blocked by {', '.join(scope_ref(b, repo) for b in still)}, still open"
+    if comments is not None and any((c.get("user") or {}).get("login") == owner for c in comments()):
+        return (f"@{owner} commented on #{n}: that's a veto until @{owner} labels it `ready`")
+    return None
+
+
+def milestone_open(now: dt.datetime | None) -> bool:
+    """Whether GOV-0031's week for the GOV-0026 milestone lines is still running."""
+    return (now or dt.datetime.now(dt.timezone.utc)) < MILESTONE_UNTIL
 
 
 def milestone_refusal(n: int, issue: dict, owner: str, agents: set[str], r: GoReader) -> str | None:
@@ -938,22 +1039,40 @@ def milestone_refusal(n: int, issue: dict, owner: str, agents: set[str], r: GoRe
 
 
 def go_refusals(n: int, issue: dict | None, events: list[dict], owner: str,
-                agents: set[str], r: GoReader) -> list[str]:
-    """Reasons issue n isn't go for a [build], or [] if it is (GOV-0026).
+                agents: set[str], r: GoReader, now: dt.datetime | None = None,
+                repo: str | None = None) -> list[str]:
+    """Reasons issue n isn't go for a [build], or [] if it is (GOV-0031).
 
-    Go is the owner's `ready` (GOV-0006), or, for an implementation issue, its milestone:
-    opened by a swarm App or the owner, `**Milestone:** M<n>` naming a milestone in PLAN.md
-    on main that isn't marked done, its `**Waits on:**` issues closed, and no veto (a `hold`
-    label or any owner comment; a closed issue is refused anyway). A gov:question is go
-    only by `ready`. When the issue names a milestone, the first reason is why that failed."""
+    Go is the owner's `ready` (GOV-0006), or, for an implementation issue, its scope: opened
+    by a swarm App or the owner, under an open Goal or Area the owner opened (at any depth
+    of sub-issues), none of its blocked-by issues open, and no veto (a `hold` label or any
+    owner comment; a closed issue is refused anyway). Until MILESTONE_UNTIL its GOV-0026
+    milestone still counts as well. A gov:question is go only by `ready`. When the issue
+    names a milestone, the first reason is why that failed; then why its scope did, if it
+    has a parent at all."""
     refused = issue_refusals(n, issue, events, owner)
     if not refused or issue is None or "pull_request" in issue or issue.get("state") != "open":
         return refused
     labels = {lb.get("name") for lb in issue.get("labels") or []}
-    if "gov:question" in labels or milestone_of(issue.get("body")) is None:
+    if "gov:question" in labels:
         return refused
-    why = milestone_refusal(n, issue, owner, agents, r)
-    return [why, *refused] if why else []
+    reasons = []
+    if milestone_of(issue.get("body")) is not None:
+        if milestone_open(now):
+            why = milestone_refusal(n, issue, owner, agents, r)
+            if why is None:
+                return []
+            reasons.append(why)
+        else:
+            reasons.append(f"#{n}'s `**Milestone:**` line stopped counting at "
+                           f"{MILESTONE_UNTIL:%Y-%m-%d %H:%M} UTC (GOV-0031)")
+    scope = r.scope() if r is not None else None
+    if scope is not None and scope["parents"]:
+        why = scope_refusal(n, issue, scope, owner, agents, r.comments, repo=repo)
+        if why is None:
+            return []
+        reasons.append(why)
+    return [*reasons, *refused]
 
 
 def gh_plan(repo: str) -> str | None:
@@ -968,11 +1087,19 @@ def gh_plan(repo: str) -> str | None:
     return base64.b64decode(d["content"]).decode()
 
 
+def gh_scopes(repo: str, numbers: list[int]) -> dict[int, dict | None]:
+    """parse_scope() for each issue: one GraphQL query per 25 issues (ghql.batched)."""
+    dashboard()
+    import ghql
+    return {n: parse_scope(x) for n, x in ghql.batched(repo, numbers, scope_field(), 25).items()}
+
+
 def gh_go_reader(repo: str, n: int) -> GoReader:
     g = dashboard()
     return GoReader(plan=lambda: gh_plan(repo),
                     state=lambda w: (g.gh_json("api", f"repos/{repo}/issues/{w}") or {}).get("state"),
-                    comments=lambda: g.gh_items(f"repos/{repo}/issues/{n}/comments?per_page=100"))
+                    comments=lambda: g.gh_items(f"repos/{repo}/issues/{n}/comments?per_page=100"),
+                    scope=lambda: gh_scopes(repo, [n]).get(n))
 
 
 def holders(n: int, model: dict, started: list[Started], role: str | None = None) -> list[str]:
@@ -1015,7 +1142,8 @@ def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, forc
            owner: Callable[[], str] = owner_login, agents: Callable[[], set[str]] = agent_logins,
            get_reader: Callable[[str, int], GoReader] = gh_go_reader) -> int:
     issue, events = get_issue(repo, n)
-    refused = go_refusals(n, issue, events, owner(), agents(), get_reader(repo, n))
+    refused = go_refusals(n, issue, events, owner(), agents(), get_reader(repo, n),
+                          now=dt.datetime.fromtimestamp(launcher.clock(), dt.timezone.utc), repo=repo)
     if refused:
         launcher.out(f"swarm launch: refused: {refused[0]}")
         return 1
