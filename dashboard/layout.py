@@ -174,6 +174,19 @@ ul.went li { display:flex; align-items:center; gap:12px; padding:8px 0;
 .past .call.split { color:var(--ink); }
 .past ul { margin:6px 0 0; padding:0; list-style:none; font-size:13px; color:var(--muted); }
 header.mast .live.stale { background:var(--quiet); }
+.report .lead { font-size:17px; margin:4px 0; } .report .lead a { font-weight:600; }
+.report .stamp { color:var(--muted); margin-left:6px; white-space:nowrap; }
+.report .ask, .report .ask a, ol.asks a { color:var(--owner); text-decoration-color:var(--owner); }
+ol.asks { margin:4px 0 8px; padding-left:22px; } ol.asks li { padding:3px 0; }
+ol.asks li::marker { color:var(--owner); font-weight:600; }
+.plan .scope h3 { margin:16px 0 4px; } .plan .scope h3 .muted { font:400 13px/1 var(--sans); margin-left:6px; }
+.plan ul.subs, .plan ul.subs ul { list-style:none; margin:0; padding:0; }
+.plan ul.subs ul { padding-left:18px; border-left:2px solid var(--line); margin:2px 0 4px 4px; }
+.plan ul.subs li { padding:3px 0; overflow-wrap:anywhere; }
+.plan .st { font:600 13px/1.3 var(--cond); margin-left:4px; }
+.plan .st.go { color:var(--agent); } .plan .st.waiting { color:var(--ink); }
+.plan .st.not_go { color:var(--owner); } .plan .st.unknown { color:var(--muted); }
+.plan .pr { font:13px/1.3 var(--mono); margin-left:6px; }
 .w-agent { color:var(--agent); font-weight:600; } .w-owner { color:var(--owner); font-weight:600; }
 .w-other { color:var(--quiet); }
 table.authority td:first-child { min-width:200px; }
