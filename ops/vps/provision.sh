@@ -66,6 +66,17 @@ fi
 sed "s/{\$DESK_HOST}/$DESK_HOST/" "$(dirname "$0")/Caddyfile" > /etc/caddy/Caddyfile
 systemctl reload caddy
 
+# 5b. GitHub CLI from GitHub's own repo: Ubuntu's gh is too old for the fields swarm watch reads
+if [ ! -f /etc/apt/sources.list.d/github-cli.list ]; then
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list
+  apt-get update -q
+fi
+apt-get install -yq gh
+
 # 6. Service user, state directory and an empty secrets file the owner fills by hand
 id "$SVC" >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$SVC"
 usermod -aG docker "$SVC"

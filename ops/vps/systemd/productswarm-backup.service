@@ -8,6 +8,7 @@ Type=oneshot
 User=swarm
 Group=swarm
 WorkingDirectory=/home/swarm/productswarm
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/swarm/productswarm/launcher/swarm backup
 NoNewPrivileges=yes
 PrivateTmp=yes

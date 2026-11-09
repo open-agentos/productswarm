@@ -11,6 +11,7 @@ Wants=network-online.target
 User=swarm
 Group=swarm
 WorkingDirectory=/home/swarm/productswarm
+Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/productswarm/secrets.env
 ExecStart=/home/swarm/productswarm/launcher/swarm watch --serve --dry-run
 Restart=always

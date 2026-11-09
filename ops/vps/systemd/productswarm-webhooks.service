@@ -9,6 +9,7 @@ Wants=network-online.target
 User=swarm
 Group=swarm
 WorkingDirectory=/home/swarm/productswarm
+Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/productswarm/webhooks.env
 ExecStart=/home/swarm/productswarm/launcher/swarm webhooks --host 127.0.0.1 --port 8081
 Restart=on-failure
