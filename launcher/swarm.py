@@ -11,7 +11,7 @@
     launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
     launcher/swarm cost             cost per PR of the runs swarm watch recorded (#176; local only)
     launcher/swarm status           swarm watch's state with cost, from local files only (#457)
-    launcher/swarm watch [--dry-run] [--serve]
+    launcher/swarm watch [--dry-run] [--serve] [--container IMAGE]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
     launcher/swarm webhooks         the GitHub webhook receiver on the engine host (#658)
@@ -105,6 +105,8 @@ DENY = (
 ISSUE_WORD_RE = re.compile(r"\bissue\s+#?(\d+)\b", re.IGNORECASE)   # heartbeat/hook.py's rule
 START_GRACE = 60      # seconds a session may take to write its pid file before it counts as failed
 MAX_CANON = 1024      # macOS's tty line limit: a longer line typed into a starting shell is cut (#550)
+IMAGE_RE = re.compile(r"^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$")
+CONTAINER_HOME = "/home/run"   # HOME inside a run's container: a tmpfs, gone when it ends (#661)
 STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
 
@@ -198,6 +200,21 @@ def open_terminal(command: str) -> None:
         raise RuntimeError(f"osascript failed: {r.stderr.strip()[:300]}")
 
 
+def run_detached(command: str) -> None:
+    """Run a shell command in the background, in its own session: the engine host's
+    counterpart of open_terminal() (#661), for runs in containers. The outer shell exits
+    at once, so its child is reparented and a long-lived watcher leaves no zombies; the
+    child's stderr goes to the watcher's log."""
+    subprocess.run(["/bin/sh", "-c", f"( {command} ) </dev/null >/dev/null &"],
+                   start_new_session=True, check=True, timeout=30)
+
+
+def pinned_image(ref: str) -> bool:
+    """A container image named by its content digest (#661): `name@sha256:<hex>`, or a
+    local image id `sha256:<hex>`. A tag can move under a running watcher; a digest can't."""
+    return bool(IMAGE_RE.match(ref))
+
+
 def process_command(pid: int) -> str | None:
     """The command line of a running process, or None if there is none."""
     try:
@@ -275,6 +292,16 @@ class Launcher:
     hook: str | None = None         # the pinned hook path, once refreshed in this run
     claude_dir: Path = field(default_factory=lambda: Path(
         os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser())   # transcripts (#550)
+    container: str | None = None    # a pinned image: runs swarm watch starts go in containers (#661)
+
+    def use_container(self, image: str) -> None:
+        """Start each run swarm watch starts in its own container from image (#661), in the
+        background rather than in a Terminal window. Their transcripts land in
+        <home>/claude/projects, mounted into each container, so read them there (#550)."""
+        if not pinned_image(image):
+            raise ValueError(f"--container takes an image pinned by digest (name@sha256:<64 hex> "
+                             f"or sha256:<64 hex>), not '{image}'")
+        self.container, self.run, self.claude_dir = image, run_detached, self.home / "claude"
 
     @property
     def dir(self) -> Path:
@@ -465,6 +492,9 @@ class Launcher:
             import stophook      # here, not at the top: stophook imports this module
             settings = stophook.with_stop_hook(settings, stophook.script_for(hook))
         install.write_settings(wt / ".claude" / "settings.local.json", settings)
+        if self.container and s.by == "watch":
+            # docker creates a missing bind-mount source as root; make it ours first.
+            (self.claude_dir / "projects").mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def removable(self, wt: Path) -> bool:
         """Clean (nothing uncommitted or untracked) and HEAD is on a remote branch."""
@@ -511,8 +541,14 @@ class Launcher:
                                     s.ask, s.ask_comment, s.research, s.research_comment))
         if s.by == "watch":
             result = shlex.quote(str(self.result_file(s.session_id)))
-            note = shlex.quote(f"swarm: headless run (claude -p); it ends when done or at its budget, "
-                               f"and its result is written to {self.result_file(s.session_id)}")
+            where = f" in container swarm-{s.session_id}" if self.container else ""
+            note = shlex.quote(f"swarm: headless run (claude -p){where}; it ends when done or at its "
+                               f"budget, and its result is written to {self.result_file(s.session_id)}")
+            if self.container:
+                # Mint the role App's token here, on the host; only it goes into the container.
+                token = ["tok=$(" + shlex.quote(str(wt / "ops" / "swarm-token")), shlex.quote(s.role) + ")",
+                         "&&", 'GH_TOKEN="$tok"']
+                session = [*token, *self.docker_run(s)]
             tail = ["echo", note, "&&", *session, "-p", prompt, *self.headless_args(s), ">|", result]
         else:
             tail = [*session, prompt]
@@ -521,6 +557,37 @@ class Launcher:
             "echo $$ >|", shlex.quote(str(self.pid_file(s.session_id))), "&&", *tail,
         ])
         return "exec /bin/bash -c " + shlex.quote(inner)
+
+    def docker_run(self, s: Started) -> list[str]:
+        """`exec docker run ...` for a run in a container (#661), shell-quoted, up to the
+        claude args. The image's entrypoint sets up git and gh as the role's App from
+        GH_TOKEN and exec's claude with the rest.
+
+        Only GH_TOKEN (the role App's token, minted by command()) and ANTHROPIC_API_KEY
+        go in from the host's environment; nothing else from it, and no secret file, is
+        mounted. Mounted at the same paths as on the host, so the worktree's .git file and
+        the hook paths in its settings resolve: the worktree, the checkout's .git (commits
+        write objects there), PRODUCTSWARM_HOME (heartbeat state, the Stop hook's file) with
+        the pinned hook copy read-only over it, and <home>/claude/projects for transcripts.
+        HOME is a tmpfs. It runs as the host user, so its files stay the watcher's.
+
+        The docker client stays in the foreground with --rm: its pid is the run's pid
+        (state() finds --session-id in its command line), `swarm stop`'s SIGTERM reaches
+        claude through it and --init, and the container goes when the run ends."""
+        wt, git_dir, home = self.worktree(s.session_id), self.root / ".git", self.home
+        runtime, projects = home / "runtime", self.claude_dir / "projects"
+        uid, gid = os.getuid(), os.getgid()
+        argv = ["docker", "run", "--rm", "--init", "--name", f"swarm-{s.session_id}",
+                "--user", f"{uid}:{gid}",
+                "--tmpfs", f"{CONTAINER_HOME}:uid={uid},gid={gid},mode=0700",
+                "-e", "GH_TOKEN", "-e", "ANTHROPIC_API_KEY", "-e", f"SWARM_ROLE={s.role}",
+                "-e", f"HOME={CONTAINER_HOME}", "-e", f"PRODUCTSWARM_HOME={home}",
+                "-v", f"{wt}:{wt}", "-v", f"{git_dir}:{git_dir}",
+                "-v", f"{home}:{home}", "-v", f"{runtime}:{runtime}:ro",
+                "-v", f"{projects}:{CONTAINER_HOME}/.claude/projects",
+                "-w", str(wt), self.container or "",
+                "--model", s.model, "--session-id", s.session_id]
+        return ["exec", *(shlex.quote(a) for a in argv)]
 
     @staticmethod
     def headless_args(s: Started) -> list[str]:
@@ -1087,6 +1154,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_watch.add_argument("--idle-minutes", type=int, default=15)
     p_watch.add_argument("--serve", action="store_true",
                          help="also check on each webhook nudge from `swarm webhooks` (engine host, #660)")
+    p_watch.add_argument("--container", metavar="IMAGE",
+                         help="start each run in its own container from IMAGE, pinned by digest "
+                              "(engine host, #661)")
     p_hooks = sub.add_parser("webhooks", help="receive GitHub webhooks and nudge the watcher (engine host)")
     p_hooks.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (Caddy in front)")
     p_hooks.add_argument("--port", type=int, default=8081)
@@ -1112,6 +1182,12 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
         launcher.out("swarm watch: --interval works only with --dry-run; the interval for real "
                      "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")
         return 2
+    if args.cmd == "watch" and args.container:
+        try:
+            launcher.use_container(args.container)
+        except ValueError as e:
+            launcher.out(f"swarm watch: {e}")
+            return 2
     repo = None
     if args.cmd in ("ls", "launch", "inbox", "watch", "cost"):
         repo = args.repo or dashboard().default_repo()

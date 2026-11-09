@@ -297,6 +297,57 @@ class CommandTest(Base):
         e = self.watch_entry()
         self.assertEqual(swarm.Started.from_dict(json.loads(json.dumps(e.__dict__))), e)
 
+    IMAGE = "productswarm-run@sha256:" + "a" * 64
+
+    def test_a_watch_run_in_a_container_gets_only_its_token_and_the_claude_key(self):
+        # #661: the App token is minted on the host, and docker run passes in only it and
+        # the Claude key from the host's environment; nothing else, and no secret file.
+        import shlex
+        self.l.use_container(self.IMAGE)
+        e = self.watch_entry()
+        (script,) = shlex.split(self.l.command(e)[len("exec /bin/bash -c "):])
+        wt = self.root / ".worktrees" / e.session_id
+        result = self.home / "launcher" / f"{e.session_id}.result.json"
+        self.assertTrue(script.startswith(f"cd {wt} && echo $$ >| {self.home}/launcher/{e.session_id}.pid && "))
+        before, rest = script.split(" exec docker run ", 1)
+        self.assertTrue(before.endswith(f' && tok=$({wt}/ops/swarm-token builder) && GH_TOKEN="$tok"'))
+        argv, redirect = rest.split(" >| ")
+        self.assertEqual(shlex.split(redirect), [str(result)])
+        uid, gid, home, projects = os.getuid(), os.getgid(), self.home, self.home / "claude" / "projects"
+        self.assertEqual(shlex.split(argv), [
+            "--rm", "--init", "--name", f"swarm-{e.session_id}", "--user", f"{uid}:{gid}",
+            "--tmpfs", f"/home/run:uid={uid},gid={gid},mode=0700",
+            "-e", "GH_TOKEN", "-e", "ANTHROPIC_API_KEY", "-e", "SWARM_ROLE=builder",
+            "-e", "HOME=/home/run", "-e", f"PRODUCTSWARM_HOME={home}",
+            "-v", f"{wt}:{wt}", "-v", f"{self.root}/.git:{self.root}/.git",
+            "-v", f"{home}:{home}", "-v", f"{home}/runtime:{home}/runtime:ro",
+            "-v", f"{projects}:/home/run/.claude/projects",
+            "-w", str(wt), self.IMAGE,
+            "--model", "claude-opus-5-5", "--session-id", e.session_id,
+            "-p", swarm.opener("builder", 49), *swarm.headless_flags(15.0, 200)])
+        # state() still finds the run by its session id in the docker client's command line.
+        self.assertIn(f"--session-id {e.session_id}", script)
+
+    def test_only_watch_runs_go_in_containers(self):
+        self.l.use_container(self.IMAGE)
+        e = swarm.Started("builder-1", "builder", "claude-opus-5-5", "0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41", 0)
+        self.assertNotIn("docker", self.l.command(e))
+
+    def test_container_takes_only_an_image_pinned_by_digest(self):
+        for ok in (self.IMAGE, "sha256:" + "0" * 64, "ghcr.io/o/run@sha256:" + "f" * 64):
+            self.assertTrue(swarm.pinned_image(ok), ok)
+        for bad in ("productswarm-run", "productswarm-run:latest", "x@sha256:abc",
+                    "x@sha256:" + "A" * 64, "a b@sha256:" + "a" * 64):
+            self.assertFalse(swarm.pinned_image(bad), bad)
+            with self.assertRaises(ValueError):
+                self.l.use_container(bad)
+        self.assertIsNone(self.l.container)
+
+    def test_use_container_runs_in_the_background_and_reads_transcripts_from_home(self):
+        self.l.use_container(self.IMAGE)
+        self.assertIs(self.l.run, swarm.run_detached)
+        self.assertEqual(self.l.claude_dir, self.home / "claude")
+
     def test_applescript_string_escapes(self):
         self.assertEqual(swarm.applescript_string('a "b" \\c'), '"a \\"b\\" \\\\c"')
 
@@ -589,6 +640,11 @@ class CliTest(Base):
         self.assertEqual(swarm.main(["launch", "juggler", "--issue", "1", "--repo", "o/r"], self.l), 1)
         self.assertIn("unknown role 'juggler'", self.lines[-1])
         self.assertEqual(swarm.main(["launch", "../roles/builder", "--issue", "1", "--repo", "o/r"], self.l), 1)
+
+    def test_watch_refuses_a_container_image_not_pinned_by_digest(self):
+        self.assertEqual(swarm.main(["watch", "--container", "productswarm-run:latest"], self.l), 2)
+        self.assertIn("pinned by digest", self.lines[-1])
+        self.assertEqual(self.fake.commands, [])
 
     def test_corrupt_state_file(self):
         (self.home / "launcher" / "sessions.json").write_text("{")
@@ -982,6 +1038,24 @@ class LaunchHelpersTest(unittest.TestCase):
 
 
 @unittest.skipUnless(os.path.exists("/bin/bash"), "needs /bin/bash")
+class RunDetachedTest(unittest.TestCase):
+    def test_returns_at_once_and_the_command_runs_on_in_the_background(self):
+        # #661: the engine host's runner. It must not wait for the run, and the run must
+        # not be the watcher's child (no zombies in a long-lived watcher).
+        with tempfile.TemporaryDirectory() as d:
+            out, gate = Path(d) / "out", Path(d) / "gate"
+            t0 = time.time()
+            swarm.run_detached(f"while [ ! -e {gate} ]; do sleep 0.05; done; echo done >| {out}")
+            self.assertLess(time.time() - t0, 5)
+            self.assertFalse(out.exists())
+            gate.touch()
+            for _ in range(100):
+                if out.exists() and out.read_text().strip():
+                    break
+                time.sleep(0.05)
+            self.assertEqual(out.read_text(), "done\n")
+
+
 class RealShellTest(unittest.TestCase):
     """Runs the real window command through a shell, with a stand-in ops/swarm-session
     that just sleeps: checks the pid file names the process that carries --session-id,
