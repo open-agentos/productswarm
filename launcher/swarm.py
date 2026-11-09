@@ -11,7 +11,7 @@
     launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
     launcher/swarm cost             cost per PR of the runs swarm watch recorded (#176; local only)
     launcher/swarm status           swarm watch's state with cost, from local files only (#457)
-    launcher/swarm watch [--dry-run]
+    launcher/swarm watch [--dry-run] [--serve]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
     launcher/swarm webhooks         the GitHub webhook receiver on the engine host (#658)
@@ -1080,6 +1080,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_launch.add_argument("--idle-minutes", type=int, default=15)
     p_watch = sub.add_parser("watch", help="start sessions on triggers, within swarm.toml's [watch] limits")
     p_watch.add_argument("--dry-run", action="store_true", help="print triggers; start nothing")
+    p_watch.add_argument("--serve", action="store_true",
+                         help="also check as soon as swarm webhooks nudges (#660); the interval "
+                              "becomes a backstop sweep")
     p_watch.add_argument("--interval", type=float, default=None,
                          help="--dry-run only: minutes between checks (default: swarm.toml's)")
     p_watch.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
@@ -1161,7 +1164,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             w = watch.Watch(launcher, repo, owner_login(), watch.roles_in(launcher.root),
                             idle_minutes=args.idle_minutes, dry_run=args.dry_run,
                             manifest_path=Path(args.manifest), roles_from=launcher.root,
-                            list_issues=watch.owner_issues, edit_issue=watch.edit_body)
+                            list_issues=watch.owner_issues, edit_issue=watch.edit_body,
+                            serve=args.serve)
             interval = args.interval or (limits.interval_minutes if limits else watch.DEFAULT_INTERVAL)
             return w.run(interval)
         return launcher.stop(args.session)

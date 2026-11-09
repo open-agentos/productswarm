@@ -3425,3 +3425,163 @@ class PublishTest(unittest.TestCase):
         sys.path.insert(0, str(HERE.parent / "dashboard"))
         import activity
         self.assertEqual(activity.WATCH_MARKER, watch.WATCH_MARKER)
+
+
+class HaltTest(unittest.TestCase):
+    """#660: the owner's swarm:halt on the report issue (#600 here) stops every start."""
+
+    manifest = StartTest.manifest
+
+    def setUp(self):
+        StartTest.setUp(self)
+        self.path = write_manifest(self.home, ALL_CAPPED, extra="report_issue = 600\n")
+        self.report = issue(600, ["swarm:halt"], title="Daily report")
+        self.scene.issues.append(self.report)
+
+    def watcher(self, dry_run=False):
+        return watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=dry_run, manifest_path=self.path,
+                           read=self.scene.read, get_issue=self.scene.get_issue,
+                           get_heartbeat=self.scene.heartbeat, get_reader=self.scene.get_reader)
+
+    def test_the_owners_halt_starts_nothing_until_it_comes_off(self):
+        self.scene.events[600] = [ev("swarm:halt", OWNER, 31)]
+        w = self.watcher()
+        self.assertEqual(w.tick(NOW), [])
+        self.assertEqual(w.tick(NOW), [])
+        self.assertEqual((self.fake.commands, self.scene.reads), ([], 0))
+        self.assertEqual(sum("halted: the owner put swarm:halt on #600" in x for x in self.lines), 1)
+        self.assertEqual(watch.load_state(self.l)["checked"], watch.iso(NOW))
+        self.report["labels"] = []                                 # the owner takes it off
+        self.scene.events[600].append(ev("swarm:halt", OWNER, 32, kind="unlabeled"))
+        self.assertEqual([(t.kind, t.ref) for t in w.tick(NOW)],
+                         [("review", "PR #70"), ("record", "#87"), ("answer", "#88"), ("build", "#49")])
+        self.assertIn("swarm watch: swarm:halt is off; starting sessions again", self.lines)
+
+    def test_a_halt_anyone_else_added_is_ignored_and_said_once(self):
+        self.scene.events[600] = [ev("swarm:halt", OWNER, 31),     # the owner's, then an App's
+                                  ev("swarm:halt", OWNER, 32, kind="unlabeled"),
+                                  ev("swarm:halt", "productswarm-planner[bot]", 33)]
+        w = self.watcher()
+        self.assertEqual(len(w.tick(NOW)), 4)
+        self.assertEqual(w.tick(NOW), [])
+        note = [x for x in self.lines if "ignoring swarm:halt on #600" in x]
+        self.assertEqual(note, ["swarm watch: ignoring swarm:halt on #600: productswarm-planner[bot] "
+                                "added it, not the owner; only the owner's halts count (GOV-0006)"])
+        self.assertFalse(any("halted" in x for x in self.lines))
+
+    def test_dry_run_prints_nothing_new_while_halted(self):
+        self.scene.events[600] = [ev("swarm:halt", OWNER, 31)]
+        self.assertEqual(self.watcher(dry_run=True).tick(NOW), [])
+        self.assertEqual(self.lines, ["swarm watch: halted: the owner put swarm:halt on #600; "
+                                      "starting nothing until it comes off (#660)"])
+        self.assertEqual(self.scene.reads, 0)
+
+    def test_a_check_that_cant_read_the_report_issue_starts_nothing(self):
+        def down(repo, n):
+            raise RuntimeError("gh api failed")
+        w = self.watcher()
+        w.get_issue = down
+        w.run(5, ticks=1, sleep=lambda s: None)
+        self.assertEqual(self.fake.commands, [])
+        self.assertTrue(any("gh api failed; trying again next tick" in x for x in self.lines))
+
+    def test_halt_state(self):
+        self.assertEqual(watch.halt_state(600, issue(600), [], OWNER), (False, None))
+        self.assertEqual(watch.halt_state(600, None, [], OWNER), (False, None))
+        self.assertEqual(watch.halt_state(600, self.report, [ev("swarm:halt", OWNER)], OWNER),
+                         (True, None))
+        on, note = watch.halt_state(600, self.report, [], OWNER)   # labelled, no event seen
+        self.assertFalse(on)
+        self.assertIn("someone else added it", note)
+
+
+class ServeTest(unittest.TestCase):
+    """#660: --serve checks on each webhook nudge, with the interval as a backstop sweep."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        self.lines = []
+        self.l = swarm.Launcher(self.home, out=self.lines.append, run=lambda c: self.fail("started"))
+        self.l.dir.mkdir(parents=True, exist_ok=True)
+        self.nudge = self.l.dir / watch.NUDGE_FILE
+
+    def watcher(self, serve=True, **kw):
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=True, serve=serve, **kw)
+        w.checks = []
+        w.tick = lambda: w.checks.append(time.monotonic())
+        return w
+
+    def test_the_receivers_nudge_file_is_the_one_watched(self):
+        import webhooks
+        self.assertEqual(self.watcher().nudge_path(), self.l.dir / webhooks.NUDGE_FILE)
+
+    def test_a_nudge_starts_a_check_within_a_second(self):
+        self.nudge.touch()
+        os.utime(self.nudge, ns=(0, 0))                    # an old nudge, already acted on
+        w = self.watcher()
+        import threading
+        t = threading.Thread(target=w.loop, args=(5, 2, time.sleep), daemon=True)
+        t.start()
+        deadline = time.monotonic() + 5
+        while not w.checks and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.3)                                    # the loop is now waiting out 5 minutes
+        nudged = time.monotonic()
+        self.nudge.touch()                                 # what swarm webhooks does
+        t.join(timeout=3)
+        self.assertFalse(t.is_alive(), "no check followed the nudge")
+        self.assertEqual(len(w.checks), 2)
+        self.assertLess(w.checks[1] - nudged, 1.0)
+
+    def fake_time(self, w):
+        now = [0.0]
+        slept = []
+        w.clock = lambda: now[0]
+
+        def sleep(s):
+            slept.append(s)
+            now[0] += s
+        return now, slept, sleep
+
+    def test_with_no_nudges_the_sweep_still_runs_each_interval(self):
+        w = self.watcher()
+        now, slept, sleep = self.fake_time(w)
+        w.tick = lambda: w.checks.append(now[0])
+        w.loop(5, 3, sleep)
+        self.assertEqual(w.checks, [0.0, 300.0, 600.0])
+        self.assertTrue(all(s <= watch.NUDGE_POLL for s in slept))
+
+    def test_a_nudge_during_a_check_wakes_the_next_one_at_once(self):
+        w = self.watcher()
+        now, slept, sleep = self.fake_time(w)
+
+        def tick():
+            w.checks.append(now[0])
+            if len(w.checks) == 1:
+                self.nudge.touch()                         # a webhook arrives mid-check
+        w.tick = tick
+        w.loop(5, 2, sleep)
+        self.assertEqual(w.checks, [0.0, watch.NUDGE_POLL])
+
+    def test_without_serve_the_loop_sleeps_the_whole_interval(self):
+        w = self.watcher(serve=False)
+        slept = []
+        self.nudge.touch()
+        w.loop(5, 2, slept.append)
+        self.assertEqual(slept, [300])
+
+    def test_the_cli_flag_turns_serve_on(self):
+        path = write_manifest(self.home, ALL_CAPPED)
+        seen = []
+        with mock.patch.object(watch.Watch, "run", lambda w, i: seen.append((w.serve, i)) or 0), \
+                mock.patch.object(swarm, "owner_login", return_value=OWNER):
+            for argv in (["--serve"], []):
+                self.assertEqual(swarm.main(["watch", "--dry-run", *argv, "--repo", REPO,
+                                             "--manifest", str(path)], self.l), 0)
+        self.assertEqual(seen, [(True, 5), (False, 5)])
+
+    def test_the_start_line_says_it_wakes_on_nudges(self):
+        w = self.watcher()
+        w.run(5, ticks=1, sleep=lambda s: None)
+        self.assertIn("on each webhook nudge", self.lines[0])
+        self.assertIn("every 5 min as a backstop sweep", self.lines[0])

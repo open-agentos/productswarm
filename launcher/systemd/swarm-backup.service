@@ -1,0 +1,10 @@
+# Draft for the owner to commit under ops/ (#660). Run by swarm-backup.timer: one
+# consistent copy of swarm.db in ~/.productswarm/launcher/backups/, keeping the newest 14 (#659).
+[Unit]
+Description=productswarm: swarm backup of swarm.db
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/productswarm
+ExecStart=%h/productswarm/launcher/swarm backup
+NoNewPrivileges=true

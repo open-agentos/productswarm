@@ -3,6 +3,7 @@
 
     launcher/swarm watch                          start sessions, within swarm.toml's [watch]
     launcher/swarm watch --dry-run [--interval MINUTES]   print what it would start
+    launcher/swarm watch --serve                  check on each webhook nudge as well (#660)
 
 Every interval it reads the same GitHub and heartbeat state as `swarm inbox` and works
 out each trigger below. --dry-run prints them and starts nothing. For each one it would
@@ -154,6 +155,22 @@ Every start is within the limits in GOV-0010 (the owner's answer on #88):
 - every [watch] interval_minutes. swarm.toml is read again on every check, and a [watch]
   table with no max_turns starts nothing, as a missing [watch] table doesn't.
 
+--serve (#660) is the always-on engine's mode: the loop also checks as soon as `swarm
+webhooks` (#658) touches ~/.productswarm/launcher/nudge, so a check follows a webhook
+within a second, and [watch] interval_minutes becomes a backstop sweep: a lost webhook
+delays work by at most one interval. A nudge only wakes the loop. Each check re-reads
+GitHub as any other does and never reads what a webhook said, so a forged or replayed
+event can at most cause one extra read (GOV-0020's rule). Nudges that arrive during a
+check wake one more check right after it. max_live, the caps and the turn ceiling are
+unchanged (GOV-0010, GOV-0012).
+
+swarm:halt (#660): while [watch] report_issue carries the swarm:halt label and its most
+recent `labeled` event for it is the owner's (checked as `ready` is, GOV-0006), every
+check starts nothing, reads nothing else and keeps its holds; --dry-run prints nothing
+new. It is read fresh on each check, so it takes effect at the next one, and the loop says
+when a halt starts and ends. A swarm:halt anyone else added is ignored, and the loop says
+so once. With no report_issue in [watch] there is nothing to halt on.
+
 A [build] trigger is also held while other work from the same GOV record is in flight
 (#136, the owner's answer on #127; direction, not a ruling). An issue's GOV records are
 the GOV-NNNN ids in its title only: bodies cite rulings in passing. A build for #N is
@@ -242,6 +259,7 @@ from typing import Callable
 import manifest
 import statedb
 import swarm
+import webhooks
 
 REVIEWER = swarm.dashboard().REVIEWER
 DEFAULT_INTERVAL = 5          # minutes, for --dry-run when swarm.toml has no [watch] table
@@ -269,6 +287,9 @@ RESEARCH_RE = re.compile(r"^[ \t]*Research:[ \t]*([^\n]*?)[ \t]*$", re.IGNORECAS
 RESEARCH_DAYS = 7             # how far back [research] reads the repo's comments
 PLANNER_APP = "productswarm-planner[bot]"   # whose Research: lines count, with the owner's
 WORKDAYS = range(5)           # Monday to Friday, by date.weekday()
+HALT = "swarm:halt"           # on [watch] report_issue, by the owner: start nothing (#660)
+NUDGE_FILE = webhooks.NUDGE_FILE   # touched by swarm webhooks (#658); --serve wakes on it (#660)
+NUDGE_POLL = 0.2              # seconds between --serve's looks at the nudge file
 RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and the watch state keeps it
 PUBLIC_FILE = "watch-public.json"   # the watch state's no-cost form, beside it (#456)
 MAX_RETRIES = 2               # times a run that never started is started again (#550)
@@ -442,6 +463,20 @@ def later(events: list[dict], a: dict | None, b: dict) -> bool:
         return False
     pos = {id(e): i for i, e in enumerate(events)}
     return pos.get(id(a), -1) > pos.get(id(b), -1)
+
+
+def halt_state(n: int, issue: dict | None, events: list[dict], owner: str) -> tuple[bool, str | None]:
+    """(halted, note) for report issue n (#660). Halted only while the issue carries
+    swarm:halt and its most recent `labeled` event for it is the owner's, checked the way
+    `ready` is (GOV-0006). A swarm:halt anyone else added is ignored, and the note says so."""
+    if not issue or HALT not in {lb.get("name") for lb in issue.get("labels") or []}:
+        return False, None
+    if owner_label(events, HALT, owner):
+        return True, None
+    e = swarm.label_event(events, HALT)
+    who = ((e or {}).get("actor") or {}).get("login") or "someone else"
+    return False, (f"swarm watch: ignoring {HALT} on #{n}: {who} added it, not the owner; "
+                   f"only the owner's halts count (GOV-0006)")
 
 
 def held_by(n: int, m: dict, started: list, now: dt.datetime | None,
@@ -1538,6 +1573,10 @@ class Watch:
     tz: dt.tzinfo | None = None       # [daily]'s time zone (#588); None: this machine's
     get_comments: Callable[[str, int], list[dict]] = gh_comments    # the report issue's, for [ask] (#590)
     get_recent: Callable[[str, dt.datetime], list[dict]] = gh_recent_comments   # for [research] (#591)
+    serve: bool = False               # --serve (#660): wake on the receiver's nudge, or at the interval
+    poll: float = NUDGE_POLL          # --serve: seconds between looks at the nudge file
+    clock: Callable[[], float] = time.monotonic
+    was_halted: bool = False          # the last check found the owner's swarm:halt (#660)
 
     def once(self, line: str) -> None:
         if line not in self.said:
@@ -1597,6 +1636,27 @@ class Watch:
         self.report_manifest_problems()
         return self.dry_tick(now) if self.dry_run else self.start_tick(now)
 
+    def halted(self, limits: "manifest.WatchLimits | None") -> bool:
+        """Whether the owner's swarm:halt is on [watch] report_issue (#660), read fresh from
+        GitHub on every check. Says so when a halt starts or ends. With no report_issue
+        there is nothing to halt on. Raises RuntimeError if GitHub can't be read, so a
+        check that can't tell starts nothing."""
+        n = limits.report_issue if limits else None
+        if not n:
+            on, note = False, None
+        else:
+            issue, events = self.get_issue(self.repo, n)
+            on, note = halt_state(n, issue, events, self.owner)
+        if note:
+            self.once(note)
+        if on and not self.was_halted:
+            self.launcher.out(f"swarm watch: halted: the owner put {HALT} on #{n}; starting "
+                              f"nothing until it comes off (#660)")
+        elif self.was_halted and not on:
+            self.launcher.out(f"swarm watch: {HALT} is off; starting sessions again")
+        self.was_halted = on
+        return on
+
     def report_manifest_problems(self) -> None:
         """Print each bad [[session]] entry in swarm.toml, every tick (#487): the loop
         carries on with the valid ones. A file it can't use at all is reported where it's
@@ -1631,8 +1691,10 @@ class Watch:
         A held trigger (#488, #490) is printed once per reason and not returned; it prints
         as a trigger once its holder has stopped or its Waits-on issues have closed."""
         g = swarm.dashboard()
-        w = self.read(self.repo, self.idle_minutes, now)
         limits = self.limits()
+        if self.halted(limits):
+            return []
+        w = self.read(self.repo, self.idle_minutes, now)
         try:
             st = load_state(self.launcher)
         except RuntimeError:
@@ -1739,6 +1801,11 @@ class Watch:
         if limits.max_turns is None:
             raise RuntimeError(f"{self.manifest_path}'s [watch] table has no max_turns; starting "
                                f"nothing (GOV-0012)")
+        if self.halted(limits):    # #660: before any read or start; the state keeps its holds
+            st = load_state(self.launcher)
+            st["checked"] = iso(now)
+            save_state(self.launcher, st)
+            return []
         by_role = {s.role: s for s in sessions}
         w = self.read(self.repo, self.idle_minutes, now)
         live = self.launcher.live()
@@ -2030,7 +2097,7 @@ class Watch:
     def run(self, interval_minutes: float, ticks: int | None = None,
             sleep: Callable[[float], None] = time.sleep) -> int:
         if self.dry_run:
-            self.launcher.out(f"swarm watch --dry-run: checking every {interval_minutes:g} min; "
+            self.launcher.out(f"swarm watch --dry-run: checking {self.every(interval_minutes)}; "
                               f"starts nothing; Ctrl-C to stop")
             return self.loop(interval_minutes, ticks, sleep)
         fd, holder = take_lock(self.launcher)
@@ -2042,7 +2109,7 @@ class Watch:
                               f"Stop it first; --dry-run is safe beside it (#273)")
             return 1
         try:
-            self.launcher.out(f"swarm watch: checking every {interval_minutes:g} min; starts sessions "
+            self.launcher.out(f"swarm watch: checking {self.every(interval_minutes)}; starts sessions "
                               f"within swarm.toml's [watch] limits and only for roles with a "
                               f"spend_cap_usd (GOV-0010); never stops one; Ctrl-C to stop")
             return self.loop(interval_minutes, ticks, sleep)
@@ -2053,12 +2120,44 @@ class Watch:
         self.restart()
         return 0
 
+    def every(self, interval_minutes: float) -> str:
+        if not self.serve:
+            return f"every {interval_minutes:g} min"
+        return (f"on each webhook nudge ({self.nudge_path()}) and every {interval_minutes:g} min "
+                f"as a backstop sweep")
+
+    def nudge_path(self) -> Path:
+        return self.launcher.dir / NUDGE_FILE
+
+    def nudge_mark(self) -> int | None:
+        """The nudge file's mtime in ns, or None while it doesn't exist."""
+        try:
+            return self.nudge_path().stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def pause(self, seconds: float, mark: int | None, sleep: Callable[[float], None]) -> bool:
+        """Wait out the interval. With --serve (#660), return early, True, as soon as the
+        nudge file changes from `mark`, its state when the last check began, so a nudge
+        that came during that check wakes the next one at once. A burst of nudges is one
+        check: the watcher re-reads GitHub and never reads what a webhook said."""
+        if not self.serve:
+            sleep(seconds)
+            return False
+        end = self.clock() + seconds
+        while (left := end - self.clock()) > 0:
+            sleep(min(self.poll, left))
+            if self.nudge_mark() != mark:
+                return True
+        return False
+
     def loop(self, interval_minutes: float, ticks: int | None, sleep: Callable[[float], None]) -> int:
-        n = 0
+        n, mark = 0, None
         try:
             while ticks is None or n < ticks:
                 if n:
-                    sleep(interval_minutes * 60)
+                    self.pause(interval_minutes * 60, mark, sleep)
+                mark = self.nudge_mark() if self.serve else None
                 try:
                     self.tick()
                 except RuntimeError as e:      # GitHub unreachable, bad swarm.toml: try again next tick

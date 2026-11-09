@@ -1,0 +1,19 @@
+# Draft for the owner to commit under ops/ (#660). The webhook receiver (#658), on
+# localhost behind Caddy, which terminates TLS. See swarm-watch.service for installing.
+[Unit]
+Description=productswarm webhook receiver: swarm webhooks (verify, record, nudge)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/productswarm
+# Holds WEBHOOK_SECRET=..., mode 600. The receiver refuses to start without it.
+EnvironmentFile=%h/.config/productswarm/webhooks.env
+ExecStart=%h/productswarm/launcher/swarm webhooks --host 127.0.0.1 --port 8081
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

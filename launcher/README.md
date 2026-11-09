@@ -508,6 +508,12 @@ If the condition isn't met, the hook blocks the stop and gives a short reason na
 
 If the checkout is on another branch, has changes, or can't fast-forward, it says why once and carries on with the code it has. Pull and restart it by hand. `--dry-run` never restarts itself. Because it now fetches every check, each session it starts is created at the latest `origin/main` and uses the latest pinned hook copy, not the ones from when the loop started.
 
+### Always on: `--serve` and `swarm:halt` (#660)
+
+`swarm watch --serve` is how the engine host runs it. It also checks as soon as `swarm webhooks` touches `~/.productswarm/launcher/nudge`, within a second, and `[watch] interval_minutes` (5 by GOV-0010) becomes a backstop sweep: a lost webhook delays work by at most one interval. A nudge only wakes the loop. Each check re-reads GitHub and never reads what a webhook said, so a forged or replayed event can at most cause one extra read (GOV-0020's rule). Nudges during a check wake one more check right after it. `max_live`, the caps and the turn ceiling are unchanged (GOV-0010, GOV-0012). The systemd unit drafts for the watcher, the receiver and the nightly backup are in [`systemd/`](systemd/README.md), for the owner to commit under `ops/`.
+
+To stop all dispatch, the owner puts the `swarm:halt` label on `[watch] report_issue`. Every check reads it fresh, before anything else, so it takes effect at the next check. While it is on, checks start nothing and read nothing else, holds are kept, and `--dry-run` prints nothing new. The loop says when a halt starts and when it ends. It counts only when the most recent `labeled` event for it is the owner's, checked as `ready` is (GOV-0006); one anyone else added is ignored, and the loop says so once. With no `report_issue` there is nothing to halt on. If the report issue can't be read, the check starts nothing and tries again.
+
 ### What it never does
 
 It never stops a session itself (GOV-0008): a headless run ends at its budget or turn ceiling because Claude Code ends it (GOV-0012). It never adds or removes labels, and never comments, approves or merges. Its only GitHub calls are reads. Sessions it starts are recorded with `by: watch` in `sessions.json`, and `swarm ls` shows them as `running, by watch`. To end one, run `swarm stop <name>` yourself. If GitHub can't be read, or `swarm.toml` is invalid, it says so and tries again on the next check.
@@ -526,7 +532,7 @@ It never stops a session itself (GOV-0008): a headless run ends at its budget or
 `swarm watch` keeps its state in `~/.productswarm/launcher/swarm.db`, a SQLite database it shares with the webhook receiver. Until #659 the state was in `watch.json`. The meaning is unchanged: what the loop acted on (`watch_acted`), what it is holding or skipping (`watch_waiting`), how each run ended (`watch_runs`), and `checked`, `asks_since` and `research_since` (`watch_meta`, `watch_asks_since`). Each check replaces the whole state in one transaction, so a reader never sees half a check and a failed write keeps the old state. The database uses WAL, so `swarm status`, `swarm inbox` and `swarm cost` can read while the watcher or the receiver writes. Read-only commands never create it.
 
 - **Upgrading from watch.json.** While `watch.json` exists, it is read in place of the database, so `--dry-run` still writes nothing. The first real check writes its state to `swarm.db` and renames the file to `watch.json.bak`. Delete the `.bak` once you're happy.
-- **`swarm backup [--out PATH]`** writes a consistent copy with SQLite's online backup API, safe while the watcher and receiver run. Without `--out` it writes `backups/swarm-<UTC time>.db` (mode 0600) and keeps the newest 14. On the engine host a nightly systemd timer runs it (#660). To restore, stop the watcher and receiver and copy a backup over `swarm.db`.
+- **`swarm backup [--out PATH]`** writes a consistent copy with SQLite's online backup API, safe while the watcher and receiver run. Without `--out` it writes `backups/swarm-<UTC time>.db` (mode 0600) and keeps the newest 14. On the engine host a nightly systemd timer runs it (`systemd/swarm-backup.timer`, #660). To restore, stop the watcher and receiver and copy a backup over `swarm.db`.
 - `watch-public.json` and the `[watch]` issue (GOV-0025) are unchanged.
 
 ## The swarm manifest

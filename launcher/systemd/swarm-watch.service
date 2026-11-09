@@ -1,0 +1,23 @@
+# Draft for the owner to commit under ops/ (#660). A systemd user unit on the engine host:
+#   cp swarm-*.service swarm-*.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now swarm-watch swarm-webhooks swarm-backup.timer
+#   loginctl enable-linger "$USER"     # keep user units running with nobody logged in
+[Unit]
+Description=productswarm watcher: swarm watch --serve (checks on each webhook nudge, sweeps every interval)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# The checkout swarm watch runs from: on main, with no local changes, so it can fast-forward
+# and restart itself on new launcher code (#550). os.execv keeps the same PID, so systemd
+# sees one long-running service.
+WorkingDirectory=%h/productswarm
+ExecStart=%h/productswarm/launcher/swarm watch --serve
+Restart=on-failure
+# Restarts after a failed start too (GitHub unreachable at boot, a swarm.toml it refused).
+# A second watcher refuses on watch.lock (#273), so a restart never makes two.
+RestartSec=30
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+# Draft for the owner to commit under ops/ (#660). Nightly swarm backup; a night the host
+# was off runs at the next boot (Persistent=true).
+[Unit]
+Description=productswarm: nightly swarm backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
