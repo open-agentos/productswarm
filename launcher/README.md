@@ -521,6 +521,16 @@ It never stops a session itself (GOV-0008): a headless run ends at its budget or
 - A repeated `X-GitHub-Delivery` is recorded and nudges once. `ping` is recorded but doesn't nudge.
 - `GET /healthz` answers 200. Nothing is logged per request.
 
+## swarm watch --serve and swarm:halt: the always-on watcher (#660)
+
+`swarm watch --serve` is how the watcher runs on the engine host, under systemd (`ops/vps/systemd`). Besides checking every `interval_minutes`, it watches `~/.productswarm/launcher/nudge`, which `swarm webhooks` touches on each delivery, and starts a check within a second of a nudge. The interval stays as a backstop sweep, so a lost webhook delays work by at most `interval_minutes`. Concurrency and caps are unchanged (GOV-0010, GOV-0012).
+
+- **A nudge only starts a check early.** What to do is read from GitHub as on any check, never from the webhook. A forged or replayed delivery can at most cause one extra read.
+- **At most one check every 30 seconds** (`watch.MIN_GAP`). A burst of webhooks, say a label and a comment, makes one more check, not one per event. A nudge that arrives during a check starts the next one once the gap has passed.
+- It works with `--dry-run` too. On the engine host the watcher runs `--serve --dry-run` until #661, since starting sessions there needs #661's containers.
+
+**`swarm:halt`** on the report issue (`report_issue` in `[watch]`, #249) holds every start at the next check: each trigger waits with code `halted`, said once in the log and listed in `swarm inbox`, `watch-public.json` and the `[watch]` issue. Nothing running is stopped (GOV-0008). It counts only while the most recent `swarm:halt` label event is the owner's, checked as `ready` is (GOV-0006). Anyone else's is ignored, and the log says so once. Take the label off and the next check starts what was held.
+
 ## The watch state: swarm.db and swarm backup (#659)
 
 `swarm watch` keeps its state in `~/.productswarm/launcher/swarm.db`, a SQLite database it shares with the webhook receiver. Until #659 the state was in `watch.json`. The meaning is unchanged: what the loop acted on (`watch_acted`), what it is holding or skipping (`watch_waiting`), how each run ended (`watch_runs`), and `checked`, `asks_since` and `research_since` (`watch_meta`, `watch_asks_since`). Each check replaces the whole state in one transaction, so a reader never sees half a check and a failed write keeps the old state. The database uses WAL, so `swarm status`, `swarm inbox` and `swarm cost` can read while the watcher or the receiver writes. Read-only commands never create it.

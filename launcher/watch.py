@@ -242,6 +242,7 @@ from typing import Callable
 import manifest
 import statedb
 import swarm
+from webhooks import NUDGE_FILE
 
 REVIEWER = swarm.dashboard().REVIEWER
 DEFAULT_INTERVAL = 5          # minutes, for --dry-run when swarm.toml has no [watch] table
@@ -270,6 +271,9 @@ RESEARCH_DAYS = 7             # how far back [research] reads the repo's comment
 PLANNER_APP = "productswarm-planner[bot]"   # whose Research: lines count, with the owner's
 WORKDAYS = range(5)           # Monday to Friday, by date.weekday()
 RUNS_DAYS = 7                 # how long `swarm inbox` lists a recorded run, and the watch state keeps it
+HALT = "swarm:halt"           # the owner's stop for every start, on the report issue (#660)
+POLL = 0.5                    # --serve: seconds between looks at the nudge file (#660)
+MIN_GAP = 30                  # --serve: seconds from one check's start before a nudge starts another
 PUBLIC_FILE = "watch-public.json"   # the watch state's no-cost form, beside it (#456)
 MAX_RETRIES = 2               # times a run that never started is started again (#550)
 WAIT_RE = re.compile(r"\bwait(?:s|ing)?\s+(?:on|for)\b([^\n]*)", re.IGNORECASE)
@@ -295,6 +299,7 @@ REASONS = {
     "waits_on": "held: waits on an open issue",
     "overlap": "held: work from the same GOV record is in flight",
     "usage_limit": "held: usage limit",
+    "halted": "held: the owner put swarm:halt on the report issue",
     "record_first": "held: docs records the ruling first",
     "error": "held: failed to start; trying again next check",
     "raised_by": "skipped: \"Raised by\" names no role",
@@ -434,6 +439,20 @@ def owner_label(events: list[dict], name: str, owner: str) -> dict | None:
     """The owner's label event for `name`, if the most recent one is the owner's (GOV-0006)."""
     e = swarm.label_event(events, name)
     return e if e and (e.get("actor") or {}).get("login") == owner else None
+
+
+def halt_reason(w: World, owner: str, report_issue: int | None) -> tuple[str | None, str | None]:
+    """(reason every start is held for, or None; a line to say once, or None) for HALT (#660).
+    It counts only on the open report issue, and only while the most recent label event for
+    it is the owner's, checked as `ready` is (GOV-0006)."""
+    it = next((i for i in w.issues if i.get("number") == report_issue), None) if report_issue else None
+    if not it or HALT not in {lb.get("name") for lb in it.get("labels") or []}:
+        return None, None
+    if owner_label(w.events.get(report_issue, []), HALT, owner):
+        return (f"held: the owner put {HALT} on #{report_issue}; nothing starts until it comes off",
+                None)
+    return None, (f"swarm watch: {HALT} on #{report_issue} wasn't added by the owner; ignored "
+                  f"(GOV-0006)")
 
 
 def later(events: list[dict], a: dict | None, b: dict) -> bool:
@@ -1019,7 +1038,7 @@ def gather(repo: str, idle_minutes: int, now: dt.datetime) -> World:
         # (the owner's veto), like a ready one.
         milestone = ("gov:question" not in labels and not g.is_tracking(it)
                      and swarm.milestone_of(it.get("body")) is not None)
-        if (labels & {"ready", "gov:ruled"} and not g.is_tracking(it)) or milestone:
+        if (labels & {"ready", "gov:ruled"} and not g.is_tracking(it)) or milestone or HALT in labels:
             w.events[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/events?per_page=100")
         if ({"gov:question", "gov:ruled"} <= labels or ("ready" in labels and not g.is_tracking(it))
                 or milestone):
@@ -1538,6 +1557,10 @@ class Watch:
     tz: dt.tzinfo | None = None       # [daily]'s time zone (#588); None: this machine's
     get_comments: Callable[[str, int], list[dict]] = gh_comments    # the report issue's, for [ask] (#590)
     get_recent: Callable[[str, dt.datetime], list[dict]] = gh_recent_comments   # for [research] (#591)
+    serve: bool = False               # --serve (#660): a webhook nudge starts a check early
+    clock: Callable[[], float] = time.monotonic
+    nudged: int | None = None         # the nudge file's mtime when the last check started
+    checked_at: float | None = None   # clock() when the last check started
 
     def once(self, line: str) -> None:
         if line not in self.said:
@@ -1748,6 +1771,11 @@ class Watch:
         limited = limit_reason(runs, now)
         if limited and not any(x.get("reason") == limited for x in st["waiting"]):
             out(f"swarm watch: a run hit the account's usage limit; {limited}, for every start (#489)")
+        halted, ignored = halt_reason(w, self.owner, limits.report_issue)
+        if ignored:
+            self.once(ignored)
+        if halted and not any(x.get("reason") == halted for x in st["waiting"]):
+            out(f"swarm watch: {halted} (#660)")
         ask_n, since = self.asks(w, limits, st["asks_since"], now)
         # #590: kept while asks is on for this report issue; dropped as soon as it is off.
         asks_since = {str(ask_n): iso(since)} if ask_n else {}
@@ -1788,7 +1816,7 @@ class Watch:
             if once:
                 entry["once"] = once
             held.append(entry)
-            if reason != limited and (was.get("once") or was.get("reason")) != (once or reason):   # each reason once
+            if reason not in (limited, halted) and (was.get("once") or was.get("reason")) != (once or reason):   # each reason once
                 out(f"[{t.kind}] {t.ref} {t.why} -> {reason}")
 
         for t in todo:
@@ -1847,6 +1875,9 @@ class Watch:
                 continue
             if limited:
                 hold(t, limited, code="usage_limit")   # said once above: the limit is account-wide
+                continue
+            if halted:
+                hold(t, halted, code="halted")         # said once above: it holds every start
                 continue
             busy_with = overlap(t.issue, w, live) if t.kind == "build" else None
             if busy_with:
@@ -2027,11 +2058,15 @@ class Watch:
             name, k = f"reviewer-watch-{k}", k + 1
         return name
 
+    def serve_note(self) -> str:
+        return (f" and on each webhook nudge (at most every {MIN_GAP} s; {NUDGE_FILE} in "
+                f"{self.launcher.dir})" if self.serve else "")
+
     def run(self, interval_minutes: float, ticks: int | None = None,
             sleep: Callable[[float], None] = time.sleep) -> int:
         if self.dry_run:
-            self.launcher.out(f"swarm watch --dry-run: checking every {interval_minutes:g} min; "
-                              f"starts nothing; Ctrl-C to stop")
+            self.launcher.out(f"swarm watch --dry-run: checking every {interval_minutes:g} min"
+                              f"{self.serve_note()}; starts nothing; Ctrl-C to stop")
             return self.loop(interval_minutes, ticks, sleep)
         fd, holder = take_lock(self.launcher)
         rc, tree = self.launcher.git(["-C", str(self.launcher.root), "rev-parse", "HEAD:launcher"])
@@ -2042,7 +2077,7 @@ class Watch:
                               f"Stop it first; --dry-run is safe beside it (#273)")
             return 1
         try:
-            self.launcher.out(f"swarm watch: checking every {interval_minutes:g} min; starts sessions "
+            self.launcher.out(f"swarm watch: checking every {interval_minutes:g} min{self.serve_note()}; starts sessions "
                               f"within swarm.toml's [watch] limits and only for roles with a "
                               f"spend_cap_usd (GOV-0010); never stops one; Ctrl-C to stop")
             return self.loop(interval_minutes, ticks, sleep)
@@ -2053,12 +2088,40 @@ class Watch:
         self.restart()
         return 0
 
+    def nudge_mtime(self) -> int | None:
+        """The nudge file's mtime in ns (webhooks.py touches it), or None if there is none."""
+        try:
+            return (self.launcher.dir / NUDGE_FILE).stat().st_mtime_ns
+        except FileNotFoundError:
+            return None
+
+    def wait(self, seconds: float, sleep: Callable[[float], None]) -> None:
+        """Wait until the next check. Without --serve, `seconds`. With it (#660), until the
+        nudge file changes or `seconds` pass, whichever comes first, so the interval is a
+        backstop sweep. A nudge only starts a check early: what to do is read from GitHub,
+        never from the webhook. Checks start at most once every MIN_GAP seconds, so a burst
+        of webhooks makes one more check rather than one per event."""
+        if not self.serve:
+            sleep(seconds)
+            return
+        end = self.clock() + seconds
+        while (left := end - self.clock()) > 0:
+            m = self.nudge_mtime()
+            if m is not None and m != self.nudged:
+                gap = (self.checked_at or float("-inf")) + MIN_GAP - self.clock()
+                if gap <= 0:
+                    return
+                sleep(min(gap, left))
+                continue
+            sleep(min(POLL, left))
+
     def loop(self, interval_minutes: float, ticks: int | None, sleep: Callable[[float], None]) -> int:
         n = 0
         try:
             while ticks is None or n < ticks:
                 if n:
-                    sleep(interval_minutes * 60)
+                    self.wait(interval_minutes * 60, sleep)
+                self.nudged, self.checked_at = self.nudge_mtime(), self.clock()
                 try:
                     self.tick()
                 except RuntimeError as e:      # GitHub unreachable, bad swarm.toml: try again next tick
