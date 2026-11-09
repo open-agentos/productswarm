@@ -154,6 +154,11 @@ ol.wire li { padding:6px 0; border-bottom:1px solid var(--line); font-size:16px;
 ol.wire time { font:600 14px/1 var(--cond); color:var(--muted); margin-right:8px; }
 ol.wire li.ruled time, ol.wire li.lapsed time, ol.wire li.convened time { color:var(--owner); }
 ol.wire li.red time { color:var(--red); }
+ol.grants { list-style:none; margin:0 0 8px; padding:0; max-width:760px; }
+ol.grants li { padding:6px 0; border-bottom:1px solid var(--line); font-size:16px; overflow-wrap:anywhere; }
+ol.grants time { font-family:var(--mono); }
+.grants-mode { margin:0 0 6px; }
+h3.left, ol.grants.left a { color:var(--owner); }
 ul.went { list-style:none; margin:0; padding:0; }
 ul.went li { display:flex; align-items:center; gap:12px; padding:8px 0;
   border-bottom:1px solid var(--line); font-size:16px; }

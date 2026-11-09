@@ -91,6 +91,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `precedent` | [precedent in use](#precedent-in-use): `version`, `from` (the window's first day), `counts` (record → day → `n`, `agents`, `owner`, `reviewer`), `totals`, `findings`, `records` (`id`, `date`, `status`) and `read` (where this build started reading, what it carried from, and its calls). The next build carries `counts` forward |
 | `wire` | [the wire](#the-wire): `day`, `events` (whether the repo's events could be read) and `items`, newest first, each with `kind` (`opened`, `ruled`, `lapsed`, `record`, `red` or `convened`), `time`, `number`, `text` and `link`, plus `record` on a `record` item; `[]` items on a quiet day |
 | `past_committees` | each ended committee's card: `discussion`, `url`, `question`, `question_title`, `question_url`, `record` (`id`, `url`, or null), `summary` (the INDEX.md ruling, or null), `consensus` (`text`, `consensus`, `dissent`), `rounds_used`, `max_rounds`, `stopped_early`, `models`, `diversity_met`, `minutes`, `swing` and `seats`; `[]` when none has ended |
+| `grants` | [grants in use](#grants-in-use) (#713): `mode` (`off`, `shadow`, `live`, or null if `swarm.toml` couldn't be read), `read` (whether the merger's comments could be read) and `calls`, newest first, one per PR: `number`, `title` (null if it couldn't be read), `group` (`merged`, `would` or `left`), `reason` (the merger's words), `time` and `link` (the comment) |
 | `desk` | what the [live refresh](#live-refresh) draws: the desk's `mast` (masthead) and each panel (`floor`, `committee_desk`, `trends`, `precedent`, `past_committees`) as a node tree, or `null` for a panel that can't be one |
 
 It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
@@ -200,6 +201,8 @@ The panel opens with one line for the merger's mode, from `[merger] mode` in `sw
 | The comments couldn't be read | "Couldn't read the merger's calls." |
 
 Other uses of delegated authority (call-ins, `Research:`, agents' `decide`s) stay in the daily report's section 4; this panel shows only the merger.
+
+**Built** in `grants.py` (#713). It parses the three bodies `launcher/merger.py` writes (a test checks them against the merger's own `would_body`, `merged_body` and `left_body`), keeps comments on PRs only, and checks each comment's own time, since `?since=` filters on the last update. Times are UTC, like the wire's. The mode line reads `[merger]` with the merger's own `load_switch`, so a bad table shows "The merger is off." as the merger treats it; if `swarm.toml` can't be read it says "The merger's mode couldn't be read from swarm.toml." Until #712 adds the report and plan panels, the grants panel sits right after the floor.
 
 **API calls:** 1 or 2 REST calls, the repo's issue comments since 24 hours ago (`repos/{repo}/issues/comments?since=`), filtered to the merger. A PR's title comes from the open PRs the build already reads; a merged or closed PR's title costs one more REST call.
 
