@@ -17,7 +17,7 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
 
 Builds four pages in one look (layout.py), each headed by a red LIVE mark, the build time
 and the owner's last act (#402), and copies the self-hosted fonts beside them:
-  - index.html, the desk: on the floor (floor.py), the wire (wire.py, #405), the committee desk while one is open (#404),
+  - index.html, the desk: on the floor (floor.py), grants in use (grants.py, #713), the wire (wire.py, #405), the committee desk while one is open (#404),
     what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
     committee (#409), and a pointer to the other pages (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
@@ -50,6 +50,7 @@ import committees
 import floor
 import ghql
 import governance
+import grants
 import layout
 import precedent
 import progress
@@ -126,15 +127,17 @@ def tracking_comments(repo: str, numbers: list[int]) -> dict[int, list[dict]]:
 def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
           with_actions: bool = False, with_committees: bool = False,
           with_questions: bool = False, with_precedent: bool = False,
-          with_activity: bool = False, prev: Path | None = None) -> dict:
+          with_activity: bool = False, with_grants: bool = False,
+          prev: Path | None = None) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
     also reads the v3 progress section's data (progress.py), `with_actions` the Actions
     reviewer section's (reviewer_runs.py), `with_committees` the committee Discussions
     (committees.py, GraphQL), `with_questions` the gov:question history the desk's trends
     read (questions.py, REST, search and GraphQL), and `with_precedent` the GOV citations
-    (precedent.py), and `with_activity` the repo's events for the header (activity.py). Only
-    the page shows them, so swarm's snapshot() and the digest leave all six off and make none
-    of those calls; main() asks for them."""
+    (precedent.py), `with_activity` the repo's events for the header (activity.py), and
+    `with_grants` the merger's comments for grants in use (grants.py, #713). Only the page
+    shows them, so swarm's snapshot() and the digest leave all seven off and make none of
+    those calls; main() asks for them."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
     items: dict[int, dict] = {}   # issues and PRs, for precedent.py's bodies
@@ -167,7 +170,10 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
             "precedent": fetch_precedent(repo, now, days, list(items.values()), prev)
                          if with_precedent else None,
             "activity": activity.fetch(repo, gh_json, committees.owner_login(), wire.midnight(now))
-                        if with_activity else None}
+                        if with_activity else None,
+            "grants": grants.fetch(repo, now, gh_items, gh_json,
+                                   {p["number"]: p.get("title") or "" for p in prs or []})
+                      if with_grants else None}
 
 
 def fetch_precedent(repo: str, now: dt.datetime, days: int, items: list[dict],
@@ -461,6 +467,8 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
          "wire": wire.build(data.get("activity"), data.get("questions"), data.get("reviews"), comms,
                             committees.records(), owner, repo, now)   # #405: today's governance events
                  if data.get("activity") is not None or data.get("questions") is not None else None,
+         "grants": grants.build(data["grants"], now)   # #713: the merger's calls
+                   if data.get("grants") is not None else None,
          "spend": {"per_day": per_day, "today": per_day[today],
                    "unpriced": [s for s in sessions if s["cost"] is None]}}
     m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
@@ -669,13 +677,15 @@ def rfc3339(t: dt.datetime) -> str:
 
 
 def desk_panels(m: dict) -> dict[str, str]:
-    """The desk's panels by name, in page order: on the floor (#403), the wire (#405), the
+    """The desk's panels by name, in page order: on the floor (#403), grants in use (#713,
+    after the floor per #711's layout), the wire (#405), the
     committee desk while a committee is open (#404), what the numbers say (#406), how the
     questions went (#407), precedent in use (#408) and a card per past committee (#409). Each is drawn into a
     `data-panel` box that the live refresh redraws from state.json (#411), so an empty one
     still gets its box. #397's later panels join here."""
     repo = m["repo"]
     return {"floor": floor.render(m.get("floor"), repo, m.get("watcher")),
+            "grants": grants.render(m.get("grants"), repo),
             "wire": wire.render(m.get("wire")),
             "committee_desk": committees.desk(m.get("committees"), repo),
             "trends": trends.render(m.get("trends")),
@@ -804,8 +814,9 @@ def default_repo() -> str | None:
 # rebuild made 23 REST calls and 19 GraphQL queries (before #392: 258 and 9), and the digest
 # 5 and 8. The workflow token's allowance is 1,000 an hour of each, shared with the digest.
 # precedent.py (#408) adds about 20 REST calls on a full read and 5 GraphQL queries, and the
-# header's repo events (#402, activity.py) 1 to 3 REST calls.
-PAGE_NEEDS = {"core": 100, "graphql": 55}
+# header's repo events (#402, activity.py) 1 to 3 REST calls. Grants in use (#713, grants.py)
+# adds 1 or 2, plus one per merged or closed PR the merger called in the last 24 hours.
+PAGE_NEEDS = {"core": 115, "graphql": 55}
 DIGEST_NEEDS = {"core": 30, "graphql": 30}
 SPACING = dt.timedelta(minutes=5)       # a nudged rebuild waits this long after a published one
 WORKFLOW = "dashboard.yml"
@@ -895,7 +906,8 @@ def main(argv: list[str]) -> int:
     try:
         data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
                      with_committees=True, with_questions=True, with_precedent=True,
-                     with_activity=True, prev=Path(args.prev) if args.prev else None)
+                     with_activity=True, with_grants=True,
+                     prev=Path(args.prev) if args.prev else None)
         data["records"] = precedent.load_records()
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
