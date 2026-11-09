@@ -913,6 +913,7 @@ class GoReader:
 # GOV-0031 (#681): an issue under an open Goal or Area the owner opened is go. For one week
 # after it merged (#668, 2026-11-09 13:54 UTC) the GOV-0026 milestone lines count too.
 SCOPE_TYPES = {"Goal", "Area"}
+BUILD_TYPES = {None, "Task", "Bug", "Feature"}   # implementation issues (#690); None: no type set
 SCOPE_DEPTH = 6               # sub-issue levels read above an issue; deeper ones don't count
 BLOCKERS_MAX = 50             # blocked-by issues read; an issue with more isn't go
 MILESTONE_UNTIL = dt.datetime(2026, 11, 16, 13, 54, 22, tzinfo=dt.timezone.utc)
@@ -924,13 +925,13 @@ def scope_field(depth: int = SCOPE_DEPTH) -> str:
     chain = ""
     for _ in range(depth):
         chain = f"parent {{ {_SCOPE_NODE} {chain} }}"
-    return ("i%d: issue(number: %d) { author { login __typename } "
+    return ("i%d: issue(number: %d) { author { login __typename } issueType { name } "
             f"blockedBy(first: {BLOCKERS_MAX}) {{ totalCount nodes {{ number state "
             f"repository {{ nameWithOwner }} }} }} {chain} }}")
 
 
 def parse_scope(node: dict | None) -> dict | None:
-    """An issue's scope from scope_field()'s data: {"author", "parents": [nearest first, each
+    """An issue's scope from scope_field()'s data: {"author", "type", "parents": [nearest first, each
     {repo, number, state, type, author}], "deep": the chain may go on past SCOPE_DEPTH,
     "blocked_by": [{repo, number, state}], "blockers_complete"}. States are lower case and
     logins are REST's. None if the query didn't return the issue."""
@@ -948,7 +949,8 @@ def parse_scope(node: dict | None) -> dict | None:
         p = p.get("parent")
     conn = node.get("blockedBy") or {}
     nodes = conn.get("nodes") or []
-    return {"author": login(node.get("author")), "parents": parents,
+    return {"author": login(node.get("author")), "type": (node.get("issueType") or {}).get("name"),
+            "parents": parents,
             "deep": len(parents) >= SCOPE_DEPTH,
             "blocked_by": [{"repo": (b.get("repository") or {}).get("nameWithOwner"),
                             "number": b.get("number"), "state": (b.get("state") or "").lower()}
@@ -979,6 +981,9 @@ def scope_refusal(n: int, issue: dict, scope: dict | None, owner: str, agents: s
     if author != owner and author not in agents:
         return (f"#{n} was opened by {author or 'nobody we can see'}, not a swarm App or "
                 f"@{owner}, so a Goal or Area above it doesn't make it go")
+    if scope.get("type") not in BUILD_TYPES:
+        return (f"#{n} is a {scope['type']}, not an implementation issue (Task, Bug or Feature), "
+                f"so a Goal or Area above it doesn't make it go (GOV-0031)")
     if scope_goal(scope, owner) is None:
         if not scope["parents"]:
             return f"#{n} isn't a sub-issue of anything, so no Goal or Area makes it go"

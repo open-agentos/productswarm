@@ -51,6 +51,7 @@ It refuses, and says why, if:
 1. **The owner's `ready`** (GOV-0006): the most recent `ready` label on #N was added by the owner named in `governance/jurisdictions.yml`. This is checked first, and is enough on its own.
 2. **Its Goal or Area** (GOV-0031, #681), for an implementation issue only. All of these hold:
    - the owner or a swarm App opened #N;
+   - #N is an implementation issue: of type Task, Bug or Feature, or with no type. A Mission, Brief, Question, Lesson, Goal or Area is never go this way, though the owner's `ready` still works on any type (#690);
    - #N sits under an open issue of type Goal or Area that the owner opened, at any depth of sub-issues (up to `swarm.SCOPE_DEPTH`, 6 levels), in any repo of the org. A Goal or Area anyone else opened doesn't count;
    - none of its blocked-by issues is open (up to 50 are read; an issue with more isn't go);
    - the owner hasn't vetoed it: no `hold` label and no owner comment, as for a milestone below.
