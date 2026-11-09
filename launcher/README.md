@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, and `swarm status` (#457) prints what the loop is doing now, with cost. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, `swarm status` (#457) prints what the loop is doing now, with cost, and `swarm daily` (#707) counts the daily-report streak. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
 
 ## swarm up / ls / stop
 
@@ -194,6 +194,29 @@ Reverts: 1, 1 unreviewed
 - **Reviewed** means GOV-0027's test at the merged head: the latest approve or request-changes review on that commit by the reviewer App or the owner is an approval, and neither has changes requested there.
 
 It reads GitHub through one `gh pr list` search, which returns at most 1000 PRs, and it writes nothing.
+
+## swarm daily: M1's streak
+
+```bash
+launcher/swarm daily [--manifest swarm.toml] [--repo owner/name]
+```
+
+For each of the last 10 working days (Monday to Friday, this machine's local time), whether a daily report was posted on `[watch] report_issue`, when, and who started it. Then it gives the streak: the working days in a row, up to now, whose report `[daily]` started (#707). The daily report and M1's done test can count from this instead of by hand.
+
+```
+Daily reports on #249, last 10 working days (local time):
+  Mon 2026-11-09  posted 08:34  started by [daily]
+  Fri 2026-11-06  posted 21:48  started by [daily]
+  Thu 2026-11-05  missed
+  ...
+
+Streak: 2 working days in a row with a report [daily] started.
+```
+
+- **A report** is a comment on the report issue by a swarm App or the owner whose first line starts "Daily report" (bold or not). It counts for the first date on that line, or for the day it was posted if the line has no date. The time shown is when the day's first report was posted.
+- **Who started it** comes from `swarm.db`. If `watch_acted` holds a `[daily]` key `daily:<report issue>:<date>`, `[daily]` started it. The watcher never prunes these keys, unlike run records, which it drops after 7 days. A report posted with no such key was started **by hand**. A day with a `[daily]` start but no report says so.
+- **Today** shows `not yet posted` until its report appears, and doesn't break the streak.
+- `swarm.db` holds no comments, so the reports and their times are read from GitHub, one call for the report issue's comments. Only `report_issue` is needed in `[watch]`: `daily` may be off.
 
 ## swarm watch: the wake-up loop
 
@@ -649,7 +672,7 @@ It prints one line per open PR: `#N <head sha> merge (standing grant)`, `merge (
 **Standing grant** (GOV-0027, keeping GOV-0022's other conditions), checked in this order:
 
 - the author is `productswarm-builder[bot]` and the base is `main`;
-- it closes exactly one issue in this repo, and that issue is go by its milestone: `swarm.milestone_refusal()`, the check `swarm launch` uses (GOV-0026, #582). The owner's `ready` alone doesn't count, since GOV-0027 says "under an approved milestone", and a `gov:question` never counts;
+- it closes exactly one issue in this repo, and that issue is go under GOV-0031 (GOV-0034, #702): `swarm.go_refusals()`, the check `swarm launch` and `swarm watch` use, so the merger and the watcher agree on what is go. That is the owner's most recent `ready`, or a Task, Bug, Feature or untyped issue under an open Goal or Area the owner opened, with no open blocked-by issue and no veto (and, until `swarm.MILESTONE_UNTIL`, a `**Milestone:**` line as above). A miss names the check that failed, e.g. `not go under GOV-0031: #N isn't a sub-issue of anything`. A `gov:question` never counts;
 - the reviewer approved at the current head (a dismissed approval doesn't count), and no one's latest review requests changes;
 - no line starting `Overstep:` in any PR comment, review or review comment;
 - the newest `tests` check run from GitHub Actions at the current head succeeded;
@@ -686,6 +709,8 @@ If the table or either key is missing or bad, the merger is off and every PR is 
 - **`off`**, or a missing or bad `[merger]` table: nothing.
 
 **The shadow bar.** GOV-0027 has the merger post "would merge" for one day or 10 PRs, whichever comes first, before it goes live. `run` reads the `Would merge` comments by `productswarm-merger[bot]` across the repo's issue and PR comments and counts the distinct PRs they are on: once there are 10 PRs, or a day has passed since the first comment, the bar is met. A PR counts once however many heads it was posted for. Until then `live` acts as `shadow` and logs `live acts as shadow: ...` with the count. If the comments can't be read, `live` also acts as `shadow`. Comments by anyone else don't count, and don't stop the merger posting its own.
+
+**The standing grant's own shadow** (GOV-0034). Reading GOV-0031's go is new, so the standing grant gets a second bar of the same shape that counts only `Would merge (standing grant)` comments by the merger App: 10 distinct PRs, or a day since the first. Until it is met, `live` acts as `shadow` for standing grants only and logs `live acts as shadow for the standing grant (GOV-0034): ...`; approved asks still merge once GOV-0027's bar is met. The run's last line then reads `N PR(s) merged, M would merge`.
 
 Every comment ends `-- merger`. "Once per head" means a comment of that kind from the merger App naming that SHA is already on the PR; a new head gets a new one.
 

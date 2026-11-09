@@ -3,6 +3,7 @@ data only; no test calls GitHub.
 
 Run: python3 -m unittest discover -s launcher
 """
+import datetime as dt
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,15 @@ AGENTS = frozenset({"productswarm-builder[bot]", "productswarm-reviewer[bot]",
 HEAD, OLD = "a" * 40, "b" * 40
 PLAN = "# Plan\n\n## M1: one\n\n- **Outcome:** x\n\n## M2: two\n\n- **Outcome:** y\n"
 ON = merger.Switch("shadow", 100)
+NOW = swarm.MILESTONE_UNTIL + dt.timedelta(days=1)   # GOV-0031's milestone week is over
+
+
+def parent(n, type_="Goal", state="open", author=OWNER):
+    return {"repo": REPO, "number": n, "state": state, "type": type_, "author": author}
+
+
+def ready(by=OWNER):
+    return {"event": "labeled", "label": {"name": "ready"}, "actor": {"login": by}}
 
 
 class World:
@@ -39,8 +49,12 @@ class World:
                         "app": {"slug": "github-actions"}}]
         self.closes = [(REPO, 9)]
         self.issue = {"number": 9, "state": "open", "labels": [],
-                      "user": {"login": "productswarm-planner[bot]"},
-                      "body": "What\n\n**Milestone:** M2\n**Waits on:** #5\n"}
+                      "user": {"login": "productswarm-planner[bot]"}, "body": "What\n"}
+        self.events = []
+        # #9 is a Task under the owner's open Goal #3, blocked by #5, now closed (GOV-0031).
+        self.scope = {"author": "productswarm-planner[bot]", "type": "Task", "deep": False,
+                      "parents": [parent(3)], "blockers_complete": True,
+                      "blocked_by": [{"repo": REPO, "number": 5, "state": "closed"}]}
         self.plan, self.states, self.issue_comments = PLAN, {5: "closed"}, []
 
     def reader(self):
@@ -48,13 +62,14 @@ class World:
             pr=lambda n: self.pr, files=lambda n: self.files, reviews=lambda n: self.reviews,
             comments=lambda n: self.comments, review_comments=lambda n: self.review_comments,
             checks=lambda sha: self.checks if sha == HEAD else [], closes=lambda n: self.closes,
-            issue=lambda k: self.issue,
+            issue=lambda k: self.issue, events=lambda k: self.events,
             go_reader=lambda k: swarm.GoReader(plan=lambda: self.plan,
                                                state=lambda w: self.states.get(w),
-                                               comments=lambda: self.issue_comments))
+                                               comments=lambda: self.issue_comments,
+                                               scope=lambda: self.scope))
 
-    def decide(self, switch=ON, agents=AGENTS | {"productswarm-planner[bot]"}):
-        ctx = merger.Context(REPO, OWNER, frozenset(agents), switch)
+    def decide(self, switch=ON, agents=AGENTS | {"productswarm-planner[bot]"}, now=NOW):
+        ctx = merger.Context(REPO, OWNER, frozenset(agents), switch, now)
         return merger.decide(self.pr, ctx, self.reader())
 
     def protect(self, path="roles/builder.md"):
@@ -100,40 +115,71 @@ class StandingGrant(unittest.TestCase):
         self.w.issue["state"] = "closed"
         self.miss("#9 isn't an open issue")
 
-    def test_issue_without_milestone(self):
-        self.w.issue["body"] = "What\n"
-        self.miss("not under an approved milestone", "no `**Milestone:** M<n>` line")
+    def test_goal_issue_is_go(self):
+        """The default World: a Task under the owner's open Goal, its blocker closed."""
+        self.assertEqual(self.w.decide(), merger.GRANT)
+        self.w.scope["type"] = None                       # untyped counts too
+        self.assertEqual(self.w.decide(), merger.GRANT)
+        self.w.scope["parents"] = [parent(20, "Mission", author="productswarm-lead[bot]"),
+                                   parent(4, "Area")]     # at any depth, and an Area counts
+        self.assertEqual(self.w.decide(), merger.GRANT)
 
-    def test_ready_alone_is_not_a_milestone(self):
-        self.w.issue["body"] = "What\n"
+    def test_ready_issue_is_go(self):
+        """GOV-0034's option 3: the owner's most recent `ready` counts with no Goal above."""
+        self.w.scope["parents"] = []
         self.w.issue["labels"] = [{"name": "ready"}]
-        self.miss("not under an approved milestone")
+        self.w.events = [ready()]
+        self.assertEqual(self.w.decide(), merger.GRANT)
+        self.w.events = [ready(), ready("productswarm-planner[bot]")]
+        self.miss("not go under GOV-0031", "added by productswarm-planner[bot], not @mattmcalister")
 
-    def test_milestone_not_in_plan_or_done(self):
-        self.w.issue["body"] = "**Milestone:** M7\n"
-        self.miss("M7 isn't in PLAN.md")
-        self.w.issue["body"] = "**Milestone:** M2\n"
-        self.w.plan = PLAN.replace("## M2: two", "## M2: two (done)")
-        self.miss("marked done")
+    def test_not_a_sub_issue(self):
+        self.w.scope["parents"] = []
+        self.assertEqual(self.w.decide(),
+                         "miss: not go under GOV-0031: #9 isn't a sub-issue of anything, "
+                         "so no Goal or Area makes it go")
 
-    def test_no_plan_on_main(self):
-        self.w.plan = None
-        self.miss("PLAN.md isn't on main")
+    def test_scope_unreadable(self):
+        self.w.scope = None
+        self.miss("not go under GOV-0031", "sub-issue links couldn't be read")
+
+    def test_brief_under_a_goal_is_refused(self):
+        self.w.scope["type"] = "Brief"
+        self.miss("not go under GOV-0031", "#9 is a Brief, not an implementation issue")
+
+    def test_goal_closed_or_not_the_owners(self):
+        self.w.scope["parents"] = [parent(3, state="closed")]
+        self.miss("not go under GOV-0031", "Goal #3 is closed")
+        self.w.scope["parents"] = [parent(3, author="productswarm-lead[bot]")]
+        self.miss("not go under GOV-0031", "opened by productswarm-lead[bot]")
+
+    def test_issue_blocked(self):
+        self.w.scope["blocked_by"][0]["state"] = "open"
+        self.miss("not go under GOV-0031", "#9 is blocked by #5, still open")
+        self.w.scope["blocked_by"][0]["state"] = "closed"
+        self.w.scope["blockers_complete"] = False
+        self.miss("not all could be read")
 
     def test_issue_vetoed(self):
         self.w.issue["labels"] = [{"name": "hold"}]
-        self.miss("`hold`")
+        self.miss("not go under GOV-0031", "`hold`")
         self.w.issue["labels"] = []
         self.w.issue_comments = [{"user": {"login": OWNER}, "body": "wait"}]
-        self.miss("veto")
-
-    def test_issue_waits_on_open(self):
-        self.w.states[5] = "open"
-        self.miss("waits on #5")
+        self.miss("not go under GOV-0031", "veto")
 
     def test_issue_opened_by_outsider(self):
         self.w.issue["user"]["login"] = "stranger"
-        self.miss("not a swarm App")
+        self.miss("not go under GOV-0031", "not a swarm App")
+
+    def test_milestone_counts_only_in_gov_0031s_week(self):
+        """The go is the watcher's: a GOV-0026 milestone line counts until MILESTONE_UNTIL."""
+        self.w.scope["parents"] = []
+        self.w.issue["body"] = "What\n\n**Milestone:** M2\n"
+        before = swarm.MILESTONE_UNTIL - dt.timedelta(hours=1)
+        self.assertEqual(self.w.decide(now=before), merger.GRANT)
+        got = self.w.decide()
+        self.assertTrue(got.startswith("miss: not go under GOV-0031: #9's `**Milestone:**` "
+                                       "line stopped counting"), got)
 
     def test_gov_question(self):
         self.w.issue["labels"] = [{"name": "gov:question"}]
@@ -414,8 +460,8 @@ def iso(t):
     return merger.actions_review.utc(t)
 
 
-def would(t, head="c" * 40, who=merger.MERGER, pr=1):
-    return {"user": {"login": who}, "body": f"Would merge (standing grant) at {head}.\n\n-- merger",
+def would(t, head="c" * 40, who=merger.MERGER, pr=1, kind="standing grant"):
+    return {"user": {"login": who}, "body": f"Would merge ({kind}) at {head}.\n\n-- merger",
             "created_at": iso(t), "issue_url": f"https://api.github.com/repos/{REPO}/issues/{pr}"}
 
 
@@ -554,6 +600,38 @@ class Run(unittest.TestCase):
         w, fw = World(), FakeWriter(history)
         self.run_run(w, fw, mode="live")
         self.assertEqual(fw.merges, [])
+
+    def test_grant_shadow_holds_only_the_standing_grant(self):
+        """GOV-0034: GOV-0027's bar met by approved asks alone leaves standing grants in shadow."""
+        asks = [would(T0 - 60 * i, pr=i, kind="approved ask") for i in range(10)]
+        grants = [would(T0 - 60 * i, pr=100 + i) for i in range(9)]
+        w, fw = World(), FakeWriter(asks + grants)
+        code, out = self.run_run(w, fw, mode="live")
+        self.assertEqual(code, 0)
+        self.assertEqual(fw.merges, [])
+        self.assertEqual(fw.posts, [(70, f"Would merge (standing grant) at {HEAD}.\n\n-- merger")])
+        self.assertIn("merger: live acts as shadow for the standing grant (GOV-0034): the shadow bar "
+                      "isn't met (9 of 10 PRs with a \"would merge (standing grant)\" comment, the "
+                      f"first at {iso(T0 - 8 * 60)}; or a day since the first)", out)
+        self.assertEqual(out[-1], "merger: mode live: 0 PR(s) merged, 1 would merge")
+        # The same history doesn't hold an approved ask back.
+        w, fw = World(), FakeWriter(asks + grants)
+        w.protect()
+        self.run_run(w, fw, mode="live")
+        self.assertEqual(fw.merges, [(70, HEAD)])
+
+    def test_grant_shadow_count(self):
+        """Ten distinct PRs with a standing-grant "would merge", or a day since the first."""
+        for history, merges in (([would(T0 - 60 * i, pr=i) for i in range(10)], True),
+                                ([would(T0 - 60 * i, pr=i % 9) for i in range(10)], False),
+                                ([would(T0 - merger.SHADOW_SECONDS, pr=1),
+                                  would(T0 - 60, pr=2, kind="approved ask")], True),
+                                ([would(T0 - merger.SHADOW_SECONDS, pr=1, kind="approved ask"),
+                                  would(T0 - 60, pr=2)], False)):
+            w, fw = World(), FakeWriter(history)
+            _, out = self.run_run(w, fw, mode="live")
+            self.assertEqual(fw.merges, [(70, HEAD)] if merges else [], (history, out))
+            self.assertEqual(any("live acts as shadow" in x for x in out), not merges)
 
     def test_shadow_bar_unreadable_holds_live_back(self):
         w, fw = World(), FakeWriter()

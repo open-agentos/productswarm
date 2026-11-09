@@ -14,6 +14,8 @@
     launcher/swarm merges [--last]  this UTC week's merges into main by the merger and by the
                                     owner, and each revert and whether it was reviewed (#710);
                                     --last for the week before
+    launcher/swarm daily            the last 10 working days' daily reports and who started
+                                    each, and M1's streak (#707)
     launcher/swarm watch [--dry-run] [--serve]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
@@ -918,6 +920,119 @@ def merges(launcher: Launcher, repo: str, last: bool = False, now: dt.datetime |
     return 0
 
 
+# ---------------------------------------------------------------- daily (#707)
+
+DAILY_DAYS = 10                # M1's streak window: the goal's 10 working days
+REPORT_RE = re.compile(r"^\W*daily report\b", re.IGNORECASE)
+REPORT_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+
+
+def working_days(today: dt.date, n: int = DAILY_DAYS) -> list[dt.date]:
+    """The last n working days (Monday to Friday) up to and including today, newest first."""
+    out, day = [], today
+    while len(out) < n:
+        if day.weekday() < 5:
+            out.append(day)
+        day -= dt.timedelta(days=1)
+    return out
+
+
+def report_day(c: dict, tz: dt.tzinfo | None = None) -> tuple[dt.date, dt.datetime] | None:
+    """(the day it reports on, when it was posted, local) for a daily report comment, else None.
+    A report is a comment whose first line starts "Daily report" (bold or not). Its day is the
+    first date on that line, so a late report still counts for its day; else the posting date."""
+    first = ((c.get("body") or "").strip().splitlines() or [""])[0]
+    if not REPORT_RE.match(first) or not c.get("created_at"):
+        return None
+    posted = dt.datetime.fromisoformat(c["created_at"].replace("Z", "+00:00"))
+    posted = posted.astimezone(tz) if tz else posted.astimezone()
+    m = REPORT_DATE_RE.search(first)
+    try:
+        return (dt.date.fromisoformat(m.group(1)) if m else posted.date()), posted
+    except ValueError:
+        return posted.date(), posted
+
+
+def daily_rows(days: list[dt.date], comments: list[dict], acted: dict, report_issue: int,
+               trusted: set[str], tz: dt.tzinfo | None = None) -> list[dict]:
+    """One row per day: {day, posted (local time of the first report, or None), by}. by is
+    "[daily]" when swarm.db records a [daily] start for that day (its `daily:<issue>:<date>` key
+    in watch_acted, which the watcher never prunes), "by hand" when a report was posted without
+    one, and None when there was no report. Only comments by a swarm App or the owner count."""
+    first: dict[dt.date, dt.datetime] = {}
+    for c in comments:
+        if (c.get("user") or {}).get("login") not in trusted:
+            continue
+        r = report_day(c, tz)
+        if r and (r[0] not in first or r[1] < first[r[0]]):
+            first[r[0]] = r[1]
+    rows = []
+    for day in days:
+        started = str(acted.get(f"daily:{report_issue}:{day}", "")).startswith("started")
+        posted = first.get(day)
+        by = None if posted is None else "[daily]" if started else "by hand"
+        rows.append({"day": day, "posted": posted, "by": by, "ran": started})
+    return rows
+
+
+def daily_streak(rows: list[dict], today: dt.date) -> int:
+    """Working days in a row, newest first, with a report [daily] started. Today counts only
+    once it has a report, so a report not yet written doesn't break the streak."""
+    n = 0
+    for r in rows:
+        if r["by"] == "[daily]":
+            n += 1
+        elif not (r["day"] == today and r["posted"] is None):
+            break
+    return n
+
+
+def daily_text(rows: list[dict], report_issue: int, today: dt.date) -> str:
+    """`swarm daily`'s output: a line per working day, newest first, then the streak."""
+    out = [f"Daily reports on #{report_issue}, last {len(rows)} working days (local time):"]
+    for r in rows:
+        when = f"{r['day']:%a %Y-%m-%d}"
+        if r["posted"] is not None:
+            who = "[daily]" if r["by"] == "[daily]" else "the owner, by hand (no [daily] run)"
+            out.append(f"  {when}  posted {r['posted']:%H:%M}  started by {who}")
+        elif r["day"] == today:
+            out.append(f"  {when}  not yet posted" + ("  ([daily] run started)" if r["ran"] else ""))
+        else:
+            out.append(f"  {when}  missed" + ("  ([daily] ran but posted no report)" if r["ran"] else ""))
+    n = daily_streak(rows, today)
+    out.append(f"\nStreak: {n} working day{'' if n == 1 else 's'} in a row with a report "
+               f"[daily] started.")
+    return "\n".join(out)
+
+
+def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DEFAULT_PATH,
+          get_comments: Callable | None = None, now: dt.datetime | None = None,
+          tz: dt.tzinfo | None = None, owner: str | None = None,
+          agents: set[str] | None = None) -> int:
+    """`swarm daily` (#707): for each of the last 10 working days, whether a daily report was
+    posted on the report issue, when, and who started it, so M1's streak isn't a hand count.
+    Who started it comes from swarm.db; the reports and their times come from the report
+    issue's comments (swarm.db holds no comments). Only reads."""
+    import watch
+    try:
+        limits = manifest.load_watch(manifest_path)
+    except manifest.ManifestError as e:
+        launcher.out(f"swarm daily: {e}")
+        return 1
+    if not (limits and limits.report_issue):
+        launcher.out(f"swarm daily: {manifest_path} has no [watch] report_issue to count reports on")
+        return 1
+    n = limits.report_issue
+    now = now or dt.datetime.now(dt.timezone.utc)
+    today = (now.astimezone(tz) if tz else now.astimezone()).date()
+    trusted = (agents if agents is not None else agent_logins()) | {owner or owner_login()}
+    acted = watch.load_state(launcher)["acted"]
+    comments = (get_comments or watch.gh_comments)(repo, n)
+    rows = daily_rows(working_days(today), comments, acted, n, trusted, tz)
+    launcher.out(daily_text(rows, n, today))
+    return 0
+
+
 # ---------------------------------------------------------------- launch (L3)
 
 JURISDICTIONS = ROOT / "governance" / "jurisdictions.yml"
@@ -1303,6 +1418,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_merges.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_status = sub.add_parser("status", help="swarm watch's state with cost, from local files only")
     p_status.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
+    p_daily = sub.add_parser("daily", help="the last 10 working days' daily reports and the streak")
+    p_daily.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_daily.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
     p_launch.add_argument("role")
     p_launch.add_argument("--issue", type=int, required=True, help="the issue to work on")
@@ -1357,7 +1475,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                      "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")
         return 2
     repo = None
-    if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges"):
+    if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges", "daily"):
         repo = args.repo or dashboard().default_repo()
         if not repo:
             launcher.out(f"swarm {args.cmd}: can't tell the repo; pass --repo owner/name")
@@ -1391,6 +1509,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return merges(launcher, repo, args.last)
         if args.cmd == "status":
             return status(launcher, args.manifest)
+        if args.cmd == "daily":
+            return daily(launcher, repo, args.manifest)
         if args.cmd == "watch":
             import watch
             try:
