@@ -997,7 +997,7 @@ class LockTest(unittest.TestCase):
 
 
 def _save_states(home: str, tag: str, n: int) -> None:
-    """One process writing watch.json n times, as a second watcher would (#296)."""
+    """One process writing the watch state n times, as a second watcher would (#296)."""
     l = swarm.Launcher(Path(home), root=Path(home) / "repo", proc=lambda pid: None,
                        clock=time.time, out=lambda s: None, git=lambda a: (0, ""))
     for i in range(n):
@@ -1006,7 +1006,7 @@ def _save_states(home: str, tag: str, n: int) -> None:
 
 
 class SaveStateTest(unittest.TestCase):
-    """#296: watch.json is written through a temp file of each writer's own."""
+    """#296 and #659: the watch state is replaced whole, one writer at a time."""
 
     def setUp(self):
         d = tempfile.TemporaryDirectory()
@@ -1157,7 +1157,7 @@ class ReviewInActionsTest(unittest.TestCase):
     def test_off_or_missing_starts_the_review(self):
         for value in (False, None):
             with self.subTest(review_in_actions=value):
-                (self.home / "launcher" / "watch.json").unlink(missing_ok=True)
+                watch.state_path(self.l).unlink(missing_ok=True)
                 self.l.save([])
                 for f in (self.home / "launcher").glob("*.pid"):   # else live() recovers it (#272)
                     f.unlink()
@@ -1700,7 +1700,7 @@ class RunRecordTest(unittest.TestCase):
         return e
 
     def state(self):
-        return json.loads((self.home / "launcher" / "watch.json").read_text())
+        return watch.load_state(self.l)
 
     def transcript(self, sid):
         """Claude Code wrote a transcript for sid: it got as far as starting (#550)."""
@@ -3241,7 +3241,7 @@ class PublicStateTest(unittest.TestCase):
                          [("#49", "build", "at_cap", later.isoformat()),
                           ("#88", "answer", "error", later.isoformat())])
         self.assertEqual([r["role"] for r in pub["running"]], ["reviewer"])
-        self.assertIn("cost_usd", (self.home / "launcher" / "watch.json").read_text())
+        self.assertTrue(any(r.get("cost_usd") is not None for r in watch.load_state(self.l)["runs"].values()))
         self.assert_no_cost(pub)
 
     def test_dry_run_writes_nothing(self):

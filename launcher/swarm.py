@@ -14,6 +14,8 @@
     launcher/swarm watch [--dry-run]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
+    launcher/swarm webhooks         the GitHub webhook receiver on the engine host (#658)
+    launcher/swarm backup [--out P] a consistent copy of swarm.db (#659; statedb.py)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
 unchanged, in a new Terminal window: the owner's answer on #43.
@@ -46,8 +48,10 @@ What the launcher started is recorded locally, never on GitHub:
     ~/.productswarm/launcher/<id>.pid        written by the window's shell before exec
     ~/.productswarm/launcher/<id>.result.json  a headless run's stdout: ops/swarm-session's
                                              one-line banner, then the JSON result (#147)
-    ~/.productswarm/launcher/watch.json      triggers `swarm watch` acted on or is holding,
-                                             and how each run it started ended (#149)
+    ~/.productswarm/launcher/swarm.db        triggers `swarm watch` acted on or is holding,
+                                             how each run it started ended (#149), and the
+                                             webhook deliveries (#658); watch.json before #659
+    ~/.productswarm/launcher/backups/        `swarm backup`'s copies of swarm.db (#659)
 (PRODUCTSWARM_HOME moves ~/.productswarm, as for the heartbeat.)
 
 `stop` sends SIGTERM. Claude Code then runs its SessionEnd hook, so the heartbeat
@@ -64,6 +68,7 @@ import os
 import re
 import shlex
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -77,6 +82,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 import manifest  # noqa: E402
+import statedb  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "heartbeat"))
 import install  # noqa: E402
@@ -784,7 +790,7 @@ def inbox_text(items: list[dict], now: dt.datetime, g, held: tuple | None = None
 
 
 def cost(launcher: Launcher, repo: str, get_prs: Callable | None = None) -> int:
-    """`swarm cost` (#176): the runs in watch.json, costed per PR. Only prints: no cost
+    """`swarm cost` (#176): the runs in the watch state, costed per PR. Only prints: no cost
     goes to GitHub or the repo (GOV-0002, GOV-0003, GOV-0004, GOV-0014)."""
     import watch
     runs = watch.runs(launcher)
@@ -1082,9 +1088,20 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_hooks = sub.add_parser("webhooks", help="receive GitHub webhooks and nudge the watcher (engine host)")
     p_hooks.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (Caddy in front)")
     p_hooks.add_argument("--port", type=int, default=8081)
+    p_backup = sub.add_parser("backup", help="copy swarm.db consistently, for the nightly timer")
+    p_backup.add_argument("--out", help=f"default: backups/swarm-<UTC time>.db, keeping the newest "
+                                        f"{statedb.KEEP_BACKUPS}")
     args = ap.parse_args(argv)
 
     launcher = launcher or Launcher(home())
+    if args.cmd == "backup":
+        try:
+            out = statedb.backup(launcher.dir, Path(args.out) if args.out else None)
+        except (RuntimeError, OSError, sqlite3.Error) as e:
+            launcher.out(f"swarm backup: {e}")
+            return 1
+        launcher.out(f"swarm backup: wrote {out}")
+        return 0
     if args.cmd == "webhooks":
         import webhooks
         return webhooks.serve(launcher.dir, os.environ.get("WEBHOOK_SECRET", ""), args.host,

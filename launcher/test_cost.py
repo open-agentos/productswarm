@@ -1,5 +1,5 @@
-"""Tests for `swarm cost` (#176): recorded run costs from watch.json, grouped by PR.
-Canned watch.json and PR data only; nothing reads or writes GitHub.
+"""Tests for `swarm cost` (#176): recorded run costs from the watch state, grouped by PR.
+Canned watch state and PR data only; nothing reads or writes GitHub.
 
 Run: python3 -m unittest discover -s launcher
 """
@@ -84,7 +84,7 @@ class CostTextTest(unittest.TestCase):
 
     def test_no_runs(self):
         t = self.text({}, [])
-        self.assertTrue(t.startswith("no runs recorded in watch.json"))
+        self.assertTrue(t.startswith("no runs recorded in the watch state"))
         self.assertIn("sessions you start by hand have none", t)
 
     def test_prs_come_first_then_issues_with_no_pr(self):
@@ -116,12 +116,12 @@ class CostCommandTest(unittest.TestCase):
 
     def test_prints_and_writes_nothing(self):
         self.write({"review:70:a": run("review", "PR #70", 0.75)})
-        before = watch.state_path(self.l).read_text()
-        files = sorted(self.l.dir.iterdir())
+        before = watch.load_state(self.l)
+        files = sorted(f.name for f in self.l.dir.iterdir() if not f.name.startswith("swarm.db-"))
         self.assertEqual(swarm.cost(self.l, REPO, get_prs=lambda r: PRS), 0)
         self.assertIn("PR #70", self.lines[0])
-        self.assertEqual(watch.state_path(self.l).read_text(), before)
-        self.assertEqual(sorted(self.l.dir.iterdir()), files)
+        self.assertEqual(watch.load_state(self.l), before)
+        self.assertEqual(sorted(f.name for f in self.l.dir.iterdir() if not f.name.startswith("swarm.db-")), files)
 
     def test_cli_dispatches_cost(self):
         self.write({})
