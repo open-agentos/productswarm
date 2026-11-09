@@ -1,6 +1,6 @@
 # Product brief: productswarm
 
-**Owner:** @mattmcalister · **Status:** goal set: the department that reports to you (#526) · Q2–Q4 in force (GOV-0026, GOV-0027, GOV-0029), Q5 to come · v0–v3 shipped or in progress (History)
+**Owner:** @mattmcalister · **Status:** goal set: the department that reports to you (#526) · Q2–Q4 in force (GOV-0031, GOV-0027, GOV-0029), Q5 to come · v0–v3 shipped or in progress (History)
 
 This brief follows the owner's direction on #526 (Option 2). That question is `gov:ruled` with no merged record, so it is direction for #526 only, not precedent (GOV-0006). Every in-force record still holds, and GOV-0015 still sets v3's order. Where this brief describes something a later ruling must allow, it says which one.
 
@@ -18,7 +18,7 @@ v0–v3 solved "I can't see my sessions". The owner still directs the swarm one 
 
 ## Goal
 
-**An AI team run like a department.** A lead agent keeps a milestone plan with the owner. The swarm works that plan under authority the owner delegates, not with the owner approving each issue or merge. The lead reports daily and checks in against the plan weekly, with the owner as its C-team.
+**An AI team run like a department.** A lead agent keeps the plan with the owner: the Goals and Areas the owner opens (GOV-0031). The swarm works that plan under authority the owner delegates, not with the owner approving each issue or merge. The lead reports daily and checks in against the plan weekly, with the owner as its C-team.
 
 **Done when:** productswarm runs itself that way for 10 working days in a row, with the owner acting only as the C-team (plan, report, asks, protected merges) and under 5 owner acts a day, down from about 40. It ends in a readiness review for the first outside project, the finance and scenario planner.
 
@@ -38,8 +38,8 @@ v0–v3 solved "I can't see my sessions". The owner still directs the swarm one 
 
 | Habit | What it is | Who runs it | Needs |
 |---|---|---|---|
-| **Milestone plan** | [`PLAN.md`](PLAN.md) holds the goal and its milestones. Each has an outcome, a hard date or "when ready", a done test and an owner role. The lead proposes changes as PRs; the owner approves them. The lead replans within the milestones. | Lead | [`PLAN.md`](PLAN.md) |
-| **Weekly check-in** | Each Monday, per milestone: moved, at risk or slipped; what changes; asks. A `PLAN.md` PR comes with any milestone change. | Lead | GOV-0029: `swarm watch`'s `[daily]` (#588) |
+| **The plan** | The owner's open Goal and Area issues and their sub-issues, on the org Project (GOV-0031): today the M1–M4 Goals (#683–#686) and the Engine host Area (#687). Each Goal has an outcome, a hard date or "when ready", a done test and an owner role. The owner opens, edits and closes Goals and Areas; the lead proposes changes in Discussions › Strategy and replans within them. | Lead | GOV-0031 |
+| **Weekly check-in** | Each Monday, per Goal and Area: moved, at risk or slipped; what changes; asks. A Strategy proposal comes with any change to a Goal. | Lead | GOV-0029: `swarm watch`'s `[daily]` (#588) |
 | **Daily report** | Comment-sized, on the pinned report issue: done against the milestones, next, risks and mitigations, what agents did under delegated authority, and asks (at most 5). It replaces the digest's content (#249). | Lead | GOV-0029: `swarm watch`'s `[daily]` (#588); Q5 for where it runs |
 | **Delegated authority** | Standing grants (what `jurisdictions.yml` and the rulings already allow, listed in one place) and approved asks (a role asks, the owner approves, and the approval lets that role act with the owner's authority). Every use shows in the daily report. | Any role asks; the lead batches | GOV-0027 (merges by the `productswarm-merger` App, GOV-0028); GOV-0026 for which issues are go |
 | **One-on-ones** | `Ask: <role>: <question>` on the report issue starts that role once, and it answers in plain words. Extends GOV-0023's call-in. | Any role | GOV-0029: `swarm watch`'s `[ask]` (#590) |
@@ -49,7 +49,7 @@ v0–v3 solved "I can't see my sessions". The owner still directs the swarm one 
 
 **Rulings in force** (#526 §3):
 
-- **Q2 is GOV-0026.** An implementation issue is go when the owner labels it `ready`, or when its milestone is open in the merged `PLAN.md`, a swarm App or the owner opened it, its waits-on issues are closed and the owner hasn't vetoed it. The lead opens and orders milestone issues. `gov:question`s keep `ready` and `gov:ruled`. Amends GOV-0006 and GOV-0009.
+- **Q2 is GOV-0031** (it superseded GOV-0026). An implementation issue is go when the owner labels it `ready`, or when a swarm App or the owner opened it, it sits under an open Goal or Area the owner opened (any depth of sub-issues, any org repo), none of its blocked-by issues is open and the owner hasn't vetoed it. The lead opens and orders the issues under them. `gov:question`s keep `ready` and `gov:ruled`. The milestone plan file is retired (#708). GOV-0034 counts the same go for GOV-0027's standing grant.
 - **Q3 is GOV-0027.** Standing grants: the merger merges a PR under an approved milestone once the reviewer approved it at head, `tests` pass, there is no overstep, it touches no protected path and it is under the size limit. Approved asks: it merges a protected-path PR once the owner approved it at head, except `GOVERNANCE.md`, `jurisdictions.yml` and workflows. Shadow first, for one day or 10 PRs. GOV-0028 sets the `productswarm-merger` App's permissions. Amends GOV-0022 and GOV-0011.
 - **Q4 is GOV-0029.** `swarm watch` starts the daily report and Monday check-in (`[daily]`, #588), an owner's `Ask:` (`[ask]`, #590) and a `Research:` line (`[research]`, #591), and counts call-ins on milestone issues (#594). Each has a `swarm.toml` switch. Amends GOV-0009 and GOV-0023.
 
