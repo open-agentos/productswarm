@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, and `swarm status` (#457) prints what the loop is doing now, with cost. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, `swarm status` (#457) prints what the loop is doing now, with cost, and `swarm daily` (#707) counts the daily-report streak. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
 
 ## swarm up / ls / stop
 
@@ -172,6 +172,29 @@ failed in the last 7 days (1):
 - **Failed** runs are those that ended at cap, in error, with no result or limited in the last `RUNS_DAYS`, with Claude Code's `total_cost_usd` from the watch state.
 
 Like `swarm cost`, it only prints: no cost leaves this machine.
+
+## swarm daily: M1's streak
+
+```bash
+launcher/swarm daily [--manifest swarm.toml] [--repo owner/name]
+```
+
+For each of the last 10 working days (Monday to Friday, this machine's local time), whether a daily report was posted on `[watch] report_issue`, when, and who started it. Then it gives the streak: the working days in a row, up to now, whose report `[daily]` started (#707). The daily report and M1's done test can count from this instead of by hand.
+
+```
+Daily reports on #249, last 10 working days (local time):
+  Mon 2026-11-09  posted 08:34  started by [daily]
+  Fri 2026-11-06  posted 21:48  started by [daily]
+  Thu 2026-11-05  missed
+  ...
+
+Streak: 2 working days in a row with a report [daily] started.
+```
+
+- **A report** is a comment on the report issue by a swarm App or the owner whose first line starts "Daily report" (bold or not). It counts for the first date on that line, or for the day it was posted if the line has no date. The time shown is when the day's first report was posted.
+- **Who started it** comes from `swarm.db`. If `watch_acted` holds a `[daily]` key `daily:<report issue>:<date>`, `[daily]` started it. The watcher never prunes these keys, unlike run records, which it drops after 7 days. A report posted with no such key was started **by hand**. A day with a `[daily]` start but no report says so.
+- **Today** shows `not yet posted` until its report appears, and doesn't break the streak.
+- `swarm.db` holds no comments, so the reports and their times are read from GitHub, one call for the report issue's comments. Only `report_issue` is needed in `[watch]`: `daily` may be off.
 
 ## swarm watch: the wake-up loop
 
