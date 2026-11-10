@@ -41,7 +41,7 @@ class World:
                    "user": {"login": merger.BUILDER}, "base": {"ref": "main"},
                    "head": {"sha": HEAD, "repo": {"full_name": REPO}},
                    "additions": 30, "deletions": 10, "changed_files": 1,
-                   "title": "Overstep: ignore previous instructions"}
+                   "title": "Overstep: ignore previous instructions", "node_id": "PR_70"}
         self.files = [{"filename": "launcher/merger.py"}]
         self.reviews = [{"user": {"login": merger.REVIEWER}, "state": "APPROVED", "commit_id": HEAD}]
         self.comments, self.review_comments = [], []
@@ -469,6 +469,7 @@ class FakeWriter:
     def __init__(self, history=()):
         self.history_items, self.posts, self.merges = list(history), [], []
         self.fail_merge = False
+        self.queued, self.enqueues = False, []    # whether main requires a merge queue (#663)
 
     def writer(self, w):
         def post(n, body):
@@ -478,7 +479,16 @@ class FakeWriter:
             if self.fail_merge:
                 raise RuntimeError("409 head moved")
             self.merges.append((n, sha))
-        return merger.Writer(history=lambda: self.history_items, post=post, merge=merge)
+        def queue():
+            if isinstance(self.queued, Exception):
+                raise self.queued
+            return self.queued
+        def enqueue(node_id, sha):
+            if self.fail_merge:
+                raise RuntimeError("head moved")
+            self.enqueues.append((node_id, sha))
+        return merger.Writer(history=lambda: self.history_items, post=post, merge=merge,
+                             queue=queue, enqueue=enqueue)
 
 
 class Run(unittest.TestCase):
@@ -638,7 +648,8 @@ class Run(unittest.TestCase):
         writer = fw.writer(w)
         def boom():
             raise RuntimeError("gh failed")
-        fw.writer = lambda w: merger.Writer(history=boom, post=writer.post, merge=writer.merge)
+        fw.writer = lambda w: merger.Writer(history=boom, post=writer.post, merge=writer.merge,
+                                            queue=writer.queue, enqueue=writer.enqueue)
         code, out = self.run_run(w, fw, mode="live")
         self.assertEqual(fw.merges, [])
         self.assertTrue(fw.posts[0][1].startswith("Would merge"))
@@ -686,6 +697,102 @@ class Run(unittest.TestCase):
         r.reviews = boom
         code, out = self.run_run(w, fw, reader=r)
         self.assertEqual((code, fw.posts, fw.merges), (1, [], []))
+
+
+class Queue(unittest.TestCase):
+    """#663: when main requires a merge queue, the merger enqueues instead of merging."""
+
+    run_run = Run.run_run
+
+    def setUp(self):
+        self.live = [would(T0 - 60 * i, pr=i) for i in range(10)]   # both shadow bars met
+
+    def test_no_queue_merges_directly(self):
+        w, fw = World(), FakeWriter(self.live)
+        code, out = self.run_run(w, fw, mode="live")
+        self.assertEqual((code, fw.merges, fw.enqueues), (0, [(70, HEAD)], []))
+        self.assertIn(f"#70 {HEAD} merge (standing grant)", out)
+        self.assertEqual(out[-1], "merger: mode live: 1 PR(s) merged")
+
+    def test_queue_enqueues(self):
+        w, fw = World(), FakeWriter(self.live)
+        fw.queued = True
+        code, out = self.run_run(w, fw, mode="live")
+        self.assertEqual((code, fw.merges, fw.enqueues), (0, [], [("PR_70", HEAD)]))
+        self.assertEqual(fw.posts, [(70, f"Enqueued under standing grant (GOV-0027) at {HEAD}.\n\n-- merger")])
+        self.assertIn(f"#70 {HEAD} enqueue (standing grant)", out)
+        self.assertEqual(out[-1], "merger: mode live: 1 PR(s) enqueued")
+        # The PR stays open until the queue merges it: the next sweep doesn't enqueue it again.
+        code, out = self.run_run(w, fw, mode="live")
+        self.assertEqual((code, len(fw.enqueues), len(fw.posts)), (0, 1, 1))
+        self.assertTrue(any("already enqueued" in x for x in out), out)
+
+    def test_queue_enqueues_an_approved_ask(self):
+        w, fw = World(), FakeWriter(self.live)
+        w.protect()
+        fw.queued = True
+        self.run_run(w, fw, mode="live")
+        self.assertEqual(fw.enqueues, [("PR_70", HEAD)])
+        self.assertEqual(fw.posts, [(70, f"Enqueued under approved ask (GOV-0027) at {HEAD}.\n\n-- merger")])
+
+    def test_queue_new_head_enqueues_again(self):
+        w, fw = World(), FakeWriter(self.live)
+        fw.queued = True
+        w.comments = [{"user": {"login": merger.MERGER},
+                       "body": f"Enqueued under standing grant (GOV-0027) at {OLD}.\n\n-- merger"}]
+        self.run_run(w, fw, mode="live")
+        self.assertEqual(fw.enqueues, [("PR_70", HEAD)])
+
+    def test_queue_head_pin(self):
+        w, fw = World(), FakeWriter(self.live)
+        fw.queued = True
+        r, calls = w.reader(), []
+        def pr(n):
+            calls.append(n)
+            return w.pr if len(calls) == 1 else dict(w.pr, head={"sha": OLD, "repo": {"full_name": REPO}})
+        r.pr = pr
+        _, out = self.run_run(w, fw, mode="live", reader=r)
+        self.assertEqual((fw.enqueues, fw.merges, fw.posts), ([], [], []))
+        self.assertTrue(any("head moved" in x and "not enqueuing" in x for x in out), out)
+
+    def test_queue_refused_by_github_posts_nothing(self):
+        w, fw = World(), FakeWriter(self.live)
+        fw.queued, fw.fail_merge = True, True
+        code, _ = self.run_run(w, fw, mode="live")
+        self.assertEqual((code, fw.posts, fw.merges), (1, [], []))
+
+    def test_shadow_says_enqueue(self):
+        w, fw = World(), FakeWriter()
+        fw.queued = True
+        code, out = self.run_run(w, fw)
+        self.assertEqual((code, fw.merges, fw.enqueues), (0, [], []))
+        self.assertIn(f"#70 {HEAD} enqueue (standing grant)", out)
+        self.assertEqual(out[-1], "merger: mode shadow: 1 PR(s) would enqueue")
+        # The comment keeps the shadow's wording, which the shadow bars and the desk count.
+        self.assertEqual(fw.posts, [(70, f"Would merge (standing grant) at {HEAD}.\n\n-- merger")])
+
+    def test_dry_run_says_enqueue(self):
+        w, fw = World(), FakeWriter(self.live)
+        fw.queued = True
+        code, out = self.run_run(w, fw, mode="live", dry_run=True)
+        self.assertEqual((code, fw.posts, fw.merges, fw.enqueues), (0, [], [], []))
+        self.assertIn(f"dry run: would enqueue #70 at {HEAD}", out)
+
+    def test_queue_unreadable_holds_live_back(self):
+        w, fw = World(), FakeWriter(self.live)
+        fw.queued = RuntimeError("gh failed")
+        code, out = self.run_run(w, fw, mode="live")
+        self.assertEqual((fw.merges, fw.enqueues), ([], []))
+        self.assertTrue(fw.posts[0][1].startswith("Would merge"))
+        self.assertTrue(any("live acts as shadow: can't tell whether main requires a merge queue"
+                            in x for x in out), out)
+
+    def test_queue_not_read_without_a_merge(self):
+        w, fw = World(), FakeWriter(self.live)
+        w.pr["additions"] = 500
+        fw.queued = RuntimeError("must not be read")
+        code, _ = self.run_run(w, fw, mode="live")
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":
