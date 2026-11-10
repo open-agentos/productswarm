@@ -1709,6 +1709,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_desk.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (Caddy in front)")
     p_desk.add_argument("--port", type=int, default=8080)
     p_desk.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    sub.add_parser("spent", help="today's and this month's run spend, and Spent per Mission, Goal and Area (#662)")
     p_backup = sub.add_parser("backup", help="copy swarm.db consistently, for the nightly timer")
     p_backup.add_argument("--out", help=f"default: backups/swarm-<UTC time>.db, keeping the newest "
                                         f"{statedb.KEEP_BACKUPS}")
@@ -1722,6 +1723,16 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             launcher.out(f"swarm backup: {e}")
             return 1
         launcher.out(f"swarm backup: wrote {out}")
+        return 0
+    if args.cmd == "spent":
+        import ledger
+        try:
+            rows = ledger.rows(launcher.dir)
+        except (OSError, ValueError, sqlite3.Error) as e:
+            launcher.out(f"swarm spent: can't read the runs ledger: {e}")
+            return 1
+        now = dt.datetime.now(dt.timezone.utc)
+        launcher.out(ledger.spent_text(ledger.totals(rows, now), dashboard().default_repo() or "", now))
         return 0
     if args.cmd == "webhooks":
         import webhooks

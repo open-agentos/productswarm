@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, `swarm status` (#457) prints what the loop is doing now, with cost, and `swarm daily` (#707) counts the daily-report streak. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, `swarm status` (#457) prints what the loop is doing now, with cost, `swarm daily` (#707) counts the daily-report streak, and `swarm spent` (#662) prints run spend from the runs ledger. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
 
 ## swarm up / ls / stop
 
@@ -172,6 +172,26 @@ failed in the last 7 days (1):
 - **Failed** runs are those that ended at cap, in error, with no result or limited in the last `RUNS_DAYS`, with Claude Code's `total_cost_usd` from the watch state.
 
 Like `swarm cost`, it only prints: no cost leaves this machine.
+
+## swarm spent: the runs ledger (#662)
+
+```
+launcher/swarm spent
+```
+
+`swarm watch` adds every run it started to a `runs` table in `swarm.db` once the run has ended: its session id, kind, ref, issue, start and end times, ending and `total_cost_usd`. A run's issue is its trigger's issue, or for a review or respond run, the issue its PR closes (the first one GitHub lists, if it closes more than one). If the PR has merged or closed by the time the run is added, the watcher reads that issue from GitHub on a later check, so the run still counts toward its Mission. Unlike the watch state, which drops runs after 7 days, the ledger keeps them all. A run is added once, by session id, so a check that runs again changes nothing.
+
+On each check the watcher also reads the Mission, Goal and Area issues above up to 25 ledger issues it hasn't placed yet, from the same sub-issue links GOV-0031's go check reads (from GitHub, never from a webhook's payload). If GitHub can't be read, the run is still recorded and its scopes are read on a later check.
+
+`swarm spent` prints:
+
+- what runs cost today and this calendar month, in this machine's time zone;
+- **Spent** for each Mission, Goal and Area: every run under it, at any depth, so a run under a Mission also counts for that Mission's Goal;
+- how much is on runs not placed yet, and how many runs recorded no cost.
+
+**Reporting only.** Per GOV-0033 the engine has no daily, per-mission or monthly spend total: nothing in the ledger holds or stops a run. Per-run caps (GOV-0012), the concurrency ceiling (GOV-0010) and the Console workspace's monthly limit are the limits.
+
+**The Project's Spent field isn't written yet.** No identity the engine has may write to the org Project (the host's `GH_TOKEN` is read-only, and GOV-0025 limits the owner's login to the `[watch]` issue). #731 asks which may. Until then, `swarm spent` prints the values, and like `swarm cost` it writes nothing to GitHub.
 
 ## swarm merges: who merged this week, and its reverts (#710)
 
@@ -617,7 +637,7 @@ On the engine host, `swarm watch --serve --container IMAGE` starts each run in i
 
 ## The watch state: swarm.db and swarm backup (#659)
 
-`swarm watch` keeps its state in `~/.productswarm/launcher/swarm.db`, a SQLite database it shares with the webhook receiver. Until #659 the state was in `watch.json`. The meaning is unchanged: what the loop acted on (`watch_acted`), what it is holding or skipping (`watch_waiting`), how each run ended (`watch_runs`), and `checked`, `asks_since` and `research_since` (`watch_meta`, `watch_asks_since`). Each check replaces the whole state in one transaction, so a reader never sees half a check and a failed write keeps the old state. The database uses WAL, so `swarm status`, `swarm inbox` and `swarm cost` can read while the watcher or the receiver writes. Read-only commands never create it.
+`swarm watch` keeps its state in `~/.productswarm/launcher/swarm.db`, a SQLite database it shares with the webhook receiver. Until #659 the state was in `watch.json`. The meaning is unchanged: what the loop acted on (`watch_acted`), what it is holding or skipping (`watch_waiting`), how each run ended (`watch_runs`, kept 7 days), and `checked`, `asks_since` and `research_since` (`watch_meta`, `watch_asks_since`). Each check replaces the whole state in one transaction, so a reader never sees half a check and a failed write keeps the old state. The database uses WAL, so `swarm status`, `swarm inbox` and `swarm cost` can read while the watcher or the receiver writes. Read-only commands never create it. The same file holds the runs ledger (`runs`, see [swarm spent](#swarm-spent-the-runs-ledger-662)), which a state save leaves alone.
 
 - **Upgrading from watch.json.** While `watch.json` exists, it is read in place of the database, so `--dry-run` still writes nothing. The first real check writes its state to `swarm.db` and renames the file to `watch.json.bak`. Delete the `.bak` once you're happy.
 - **`swarm backup [--out PATH]`** writes a consistent copy with SQLite's online backup API, safe while the watcher and receiver run. Without `--out` it writes `backups/swarm-<UTC time>.db` (mode 0600) and keeps the newest 14. On the engine host a nightly systemd timer runs it (#660). To restore, stop the watcher and receiver and copy a backup over `swarm.db`.

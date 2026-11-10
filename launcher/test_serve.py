@@ -10,11 +10,21 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import swarm  # noqa: E402
 import watch  # noqa: E402
+
+
+def setUpModule():
+    # #662: the runs ledger reads its scopes with swarm.gh_scopes and its PRs' issues with
+    # watch.gh_pr_closes; never GitHub in a test.
+    for target, name in ((swarm, "gh_scopes"), (watch, "gh_pr_closes")):
+        patcher = mock.patch.object(target, name, lambda repo, numbers: {})
+        patcher.start()
+        unittest.addModuleCleanup(patcher.stop)
 import webhooks  # noqa: E402
 from test_swarm import Fake, FakeGit  # noqa: E402
 from test_watch import ALL_CAPPED, NOW, OWNER, REPO, ROLES, Scene, ev, issue, write_manifest  # noqa: E402
