@@ -20,6 +20,13 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import swarm  # noqa: E402
 import watch  # noqa: E402
+
+
+def setUpModule():
+    # #662: the runs ledger reads its scopes with swarm.gh_scopes; never GitHub in a test.
+    patcher = mock.patch.object(swarm, "gh_scopes", lambda repo, numbers: {})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 from test_swarm import Fake, FakeGit  # noqa: E402
 
 G = swarm.dashboard()

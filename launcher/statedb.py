@@ -10,8 +10,9 @@ tick and two writers can't mix their states (#296). Tables:
     watch_runs        trigger key -> run record (JSON)
     watch_asks_since  report issue -> ISO time
 
-The same file holds the webhook receiver's `deliveries` (webhooks.py). The database uses WAL,
-so `swarm status` can read while the watcher or the receiver writes.
+The same file holds the webhook receiver's `deliveries` (webhooks.py) and the runs ledger
+(ledger.py, #662), which save() leaves alone. The database uses WAL, so `swarm status` can
+read while the watcher or the receiver writes.
 
 watch.json is imported once. While it exists, load() reads it rather than the database, so a
 dry run still writes nothing. The next save() writes its state to the database and renames the
