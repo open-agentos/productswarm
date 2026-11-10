@@ -11,10 +11,17 @@
     launcher/swarm inbox            what's waiting on the owner, most urgent first (L5)
     launcher/swarm cost             cost per PR of the runs swarm watch recorded (#176; local only)
     launcher/swarm status           swarm watch's state with cost, from local files only (#457)
+    launcher/swarm merges [--last]  this UTC week's merges into main by the merger and by the
+                                    owner, and each revert and whether it was reviewed (#710);
+                                    --last for the week before
+    launcher/swarm daily            the last 10 working days' daily reports and who started
+                                    each, and M1's streak (#707)
     launcher/swarm watch [--dry-run] [--serve] [--container IMAGE]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
     launcher/swarm webhooks         the GitHub webhook receiver on the engine host (#658)
+    launcher/swarm desk             the live, read-only Desk on the engine host, rebuilt on
+                                    each webhook nudge (#664; desk.py)
     launcher/swarm backup [--out P] a consistent copy of swarm.db (#659; statedb.py)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
@@ -52,6 +59,7 @@ What the launcher started is recorded locally, never on GitHub:
                                              how each run it started ended (#149), and the
                                              webhook deliveries (#658); watch.json before #659
     ~/.productswarm/launcher/backups/        `swarm backup`'s copies of swarm.db (#659)
+    ~/.productswarm/launcher/desk/           `swarm desk`'s builds and the live symlink (#664)
 (PRODUCTSWARM_HOME moves ~/.productswarm, as for the heartbeat.)
 
 `stop` sends SIGTERM. Claude Code then runs its SessionEnd hook, so the heartbeat
@@ -146,7 +154,9 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
                 f"on #{issue}, and stop")
     elif issue and daily:
         then = (f"write {daily} on issue #{issue}, as roles/{role}.md says. swarm watch started "
-                f"this run from its [daily] trigger (GOV-0029); post on #{issue} and stop")
+                f"this run from its [daily] trigger (GOV-0029). Run launcher/swarm daily first: its "
+                f"\"M1: day N of 5\" goes in the report's first line and its Goal and Area edits "
+                f"under Risks (#709). Post on #{issue} and stop")
     elif issue and called_by:
         # "issue #M" in the why would give the heartbeat two issues and so none: say "#M".
         safe = ISSUE_WORD_RE.sub(r"#\1", call_why) if call_why else ""
@@ -884,6 +894,310 @@ def status(launcher: Launcher, manifest_path: Path | str = manifest.DEFAULT_PATH
     return 0
 
 
+# ---------------------------------------------------------------- merges (#710)
+
+MERGER_LOGIN = "productswarm-merger[bot]"     # merger.MERGER; not imported, merger imports swarm
+REVIEWER_LOGIN = "productswarm-reviewer[bot]"
+REVERT_TITLE_RE = re.compile(r'^\s*Revert\b', re.IGNORECASE)
+REVERTS_RE = re.compile(r'^\s*(?:Reverts\s+(?:[\w.-]+/[\w.-]+)?#(\d+)|This reverts commit\b)',
+                        re.IGNORECASE | re.MULTILINE)
+MERGE_FIELDS = "number,title,body,mergedAt,mergedBy,headRefOid,reviews"
+
+
+def bare(login: str | None) -> str:
+    """A login without GitHub's `[bot]` suffix: GraphQL (and so `gh pr list`) drops it, REST
+    keeps it, and the two must compare equal."""
+    return (login or "").removesuffix("[bot]")
+
+
+def week_of(now: dt.datetime, last: bool = False) -> tuple[dt.datetime, dt.datetime]:
+    """The UTC week (Monday 00:00 to the next Monday 00:00) holding now, or the one before."""
+    monday = (now.astimezone(dt.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+              - dt.timedelta(days=now.astimezone(dt.timezone.utc).weekday()))
+    if last:
+        monday -= dt.timedelta(days=7)
+    return monday, monday + dt.timedelta(days=7)
+
+
+def reverted(pr: dict) -> int | None | bool:
+    """False if pr isn't a revert; else the PR number it reverts (GitHub's Revert button
+    writes `Reverts owner/repo#N`), or None when it reverts by commit or names no PR."""
+    m = REVERTS_RE.search(pr.get("body") or "")
+    if m:
+        return int(m.group(1)) if m.group(1) else None
+    return None if REVERT_TITLE_RE.match(pr.get("title") or "") else False
+
+
+def reviewed_at_head(pr: dict, owner: str) -> bool:
+    """Whether the reviewer App or the owner approved at the merged head: their latest
+    approve-or-request-changes review on that commit is an approval (GOV-0027's test)."""
+    head, who = pr.get("headRefOid"), {bare(REVIEWER_LOGIN), bare(owner)}
+    latest: dict[str, str] = {}
+    for r in pr.get("reviews") or []:
+        login = bare((r.get("author") or {}).get("login"))
+        if (login in who and (r.get("commit") or {}).get("oid") == head
+                and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")):
+            latest[login] = r["state"]
+    return "APPROVED" in latest.values() and "CHANGES_REQUESTED" not in latest.values()
+
+
+def merges_text(prs: list[dict], owner: str, start: dt.datetime, end: dt.datetime) -> str:
+    """`swarm merges`' report: the week's merges into main split by who clicked merge, then
+    each revert and whether it was reviewed at head. PRs merged outside [start, end) are
+    dropped, so the caller's search may be loose."""
+    def merged_at(p):
+        return dt.datetime.fromisoformat((p.get("mergedAt") or "").replace("Z", "+00:00"))
+    week = sorted((p for p in prs if p.get("mergedAt") and start <= merged_at(p) < end),
+                  key=lambda p: (p["mergedAt"], p["number"]))
+    by = [bare((p.get("mergedBy") or {}).get("login")) for p in week]
+    n_merger, n_owner = by.count(bare(MERGER_LOGIN)), by.count(bare(owner))
+    others = sorted({b or "unknown" for b in by} - {bare(MERGER_LOGIN), bare(owner)})
+    last_day = (end - dt.timedelta(days=1)).date()
+    out = [f"Merges into main, week of {start.date()} to {last_day} (UTC): {len(week)}",
+           f"  by the merger ({MERGER_LOGIN}): {n_merger}",
+           f"  by the owner (@{owner}): {n_owner}"]
+    if others:
+        out.append(f"  by anyone else: {len(week) - n_merger - n_owner} "
+                   f"({', '.join('@' + o for o in others)})")
+    reverts = [(p, reverted(p)) for p in week if reverted(p) is not False]
+    unreviewed = sum(not reviewed_at_head(p, owner) for p, _ in reverts)
+    out.append(f"Reverts: {len(reverts)}" + (f", {unreviewed} unreviewed" if reverts else ""))
+    for p, of in reverts:
+        who = bare((p.get("mergedBy") or {}).get("login")) or "unknown"
+        what = f"reverts #{of}" if of else "reverts a commit"
+        state = ("reviewed (approved at head)" if reviewed_at_head(p, owner)
+                 else "not reviewed (no approval at head by the reviewer or the owner)")
+        out.append(f"  #{p['number']} {what}, merged by @{who}: {state}")
+    return "\n".join(out)
+
+
+def gh_merged(repo: str, start: dt.datetime, end: dt.datetime) -> list[dict]:
+    """PRs merged into main in [start, end), from GitHub search (at most 1000)."""
+    span = f"{start:%Y-%m-%dT%H:%M:%SZ}..{end:%Y-%m-%dT%H:%M:%SZ}"
+    return dashboard().gh_json("pr", "list", "--repo", repo, "--state", "merged", "--base", "main",
+                               "--search", f"merged:{span}", "--limit", "1000",
+                               "--json", MERGE_FIELDS) or []
+
+
+def merges(launcher: Launcher, repo: str, last: bool = False, now: dt.datetime | None = None,
+           get_merged: Callable | None = None, owner: Callable[[], str] | None = None) -> int:
+    """`swarm merges` (#710): this week's (or last week's) merges by the merger and by the
+    owner, and its reverts. Reads GitHub; writes nothing."""
+    start, end = week_of(now or dt.datetime.now(dt.timezone.utc), last)
+    prs = (get_merged or gh_merged)(repo, start, end)
+    launcher.out(merges_text(prs, (owner or owner_login)(), start, end))
+    return 0
+
+
+# ---------------------------------------------------------------- daily (#707)
+
+DAILY_DAYS = 10                # M1's streak window: the goal's 10 working days
+REPORT_RE = re.compile(r"^\W*daily report\b", re.IGNORECASE)
+REPORT_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+
+
+def working_days(today: dt.date, n: int = DAILY_DAYS) -> list[dt.date]:
+    """The last n working days (Monday to Friday) up to and including today, newest first."""
+    out, day = [], today
+    while len(out) < n:
+        if day.weekday() < 5:
+            out.append(day)
+        day -= dt.timedelta(days=1)
+    return out
+
+
+def report_day(c: dict, tz: dt.tzinfo | None = None) -> tuple[dt.date, dt.datetime] | None:
+    """(the day it reports on, when it was posted, local) for a daily report comment, else None.
+    A report is a comment whose first line starts "Daily report" (bold or not). Its day is the
+    first date on that line, so a late report still counts for its day; else the posting date."""
+    first = ((c.get("body") or "").strip().splitlines() or [""])[0]
+    if not REPORT_RE.match(first) or not c.get("created_at"):
+        return None
+    posted = dt.datetime.fromisoformat(c["created_at"].replace("Z", "+00:00"))
+    posted = posted.astimezone(tz) if tz else posted.astimezone()
+    m = REPORT_DATE_RE.search(first)
+    try:
+        return (dt.date.fromisoformat(m.group(1)) if m else posted.date()), posted
+    except ValueError:
+        return posted.date(), posted
+
+
+def daily_rows(days: list[dt.date], comments: list[dict], acted: dict, report_issue: int,
+               trusted: set[str], tz: dt.tzinfo | None = None) -> list[dict]:
+    """One row per day: {day, posted (local time of the first report, or None), by}. by is
+    "[daily]" when swarm.db records a [daily] start for that day (its `daily:<issue>:<date>` key
+    in watch_acted, which the watcher never prunes), "by hand" when a report was posted without
+    one, and None when there was no report. Only comments by a swarm App or the owner count."""
+    first: dict[dt.date, dt.datetime] = {}
+    for c in comments:
+        if (c.get("user") or {}).get("login") not in trusted:
+            continue
+        r = report_day(c, tz)
+        if r and (r[0] not in first or r[1] < first[r[0]]):
+            first[r[0]] = r[1]
+    rows = []
+    for day in days:
+        started = str(acted.get(f"daily:{report_issue}:{day}", "")).startswith("started")
+        posted = first.get(day)
+        by = None if posted is None else "[daily]" if started else "by hand"
+        rows.append({"day": day, "posted": posted, "by": by, "ran": started})
+    return rows
+
+
+def daily_streak(rows: list[dict], today: dt.date) -> int:
+    """Working days in a row, newest first, with a report [daily] started. Today counts only
+    once it has a report, so a report not yet written doesn't break the streak."""
+    n = 0
+    for r in rows:
+        if r["by"] == "[daily]":
+            n += 1
+        elif not (r["day"] == today and r["posted"] is None):
+            break
+    return n
+
+
+def daily_text(rows: list[dict], report_issue: int, today: dt.date) -> str:
+    """`swarm daily`'s output: a line per working day, newest first, then the streak."""
+    out = [f"Daily reports on #{report_issue}, last {len(rows)} working days (local time):"]
+    for r in rows:
+        when = f"{r['day']:%a %Y-%m-%d}"
+        if r["posted"] is not None:
+            who = "[daily]" if r["by"] == "[daily]" else "the owner, by hand (no [daily] run)"
+            out.append(f"  {when}  posted {r['posted']:%H:%M}  started by {who}")
+        elif r["day"] == today:
+            out.append(f"  {when}  not yet posted" + ("  ([daily] run started)" if r["ran"] else ""))
+        else:
+            out.append(f"  {when}  missed" + ("  ([daily] ran but posted no report)" if r["ran"] else ""))
+    n = daily_streak(rows, today)
+    out.append(f"\nStreak: {n} working day{'' if n == 1 else 's'} in a row with a report "
+               f"[daily] started.")
+    return "\n".join(out)
+
+
+M1_DAYS = 5                    # M1's done test: 5 working days in a row (Goal #683)
+
+
+def m1_day(rows: list[dict], today: dt.date) -> str:
+    """The daily report's "M1: day N of 5" (#709). N is the streak, counting today's report
+    once a [daily] run has started it, since the report that run writes is that day."""
+    n = daily_streak(rows, today)
+    now = rows[0] if rows and rows[0]["day"] == today else None
+    note = ""
+    if now is not None and now["posted"] is None:
+        if now["ran"]:
+            n += 1
+            note = " (counting today's report, which [daily] started)"
+        else:
+            note = " (today isn't counted: no [daily] run has started its report)"
+    return f"M1: day {n} of {M1_DAYS}" + (" (done test met)" if n >= M1_DAYS else note)
+
+
+# Goal and Area edits (#709, GOV-0031): the report flags any edit to one by anyone but the owner.
+SCOPE_EDITS_QUERY = (
+    "query($q: String!) { search(query: $q, type: ISSUE, first: 100) { issueCount nodes { "
+    "... on Issue { number title repository { nameWithOwner } author { login __typename } "
+    "issueType { name } userContentEdits(first: 50) { totalCount nodes { editedAt "
+    "editor { login __typename } } } timelineItems(last: 50, itemTypes: [RENAMED_TITLE_EVENT, "
+    "CLOSED_EVENT, REOPENED_EVENT]) { totalCount nodes { __typename "
+    "... on RenamedTitleEvent { createdAt actor { login __typename } } "
+    "... on ClosedEvent { createdAt actor { login __typename } } "
+    "... on ReopenedEvent { createdAt actor { login __typename } } } } } } } }")
+SCOPE_EDIT_WHAT = {"edit": "edited the body", "RenamedTitleEvent": "renamed it",
+                   "ClosedEvent": "closed it", "ReopenedEvent": "reopened it"}
+
+
+def scope_edits(nodes: list[dict], owner: str, since: dt.datetime) -> tuple[list[dict], list[dict]]:
+    """Edits since `since` to a Goal or Area the owner opened, by anyone but the owner (GOV-0031):
+    body edits, title renames, closes and reopens. Returns (edits oldest first, each {repo,
+    number, title, type, what, by, at}; the issues whose history was too long to read whole)."""
+    def login(a: dict | None) -> str:
+        return "ghost" if not a else a["login"] + "[bot]" if a.get("__typename") == "Bot" else a["login"]
+
+    def when(s: str) -> dt.datetime:
+        return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    out, partial = [], []
+    for n in nodes:
+        kind = ((n or {}).get("issueType") or {}).get("name")
+        if kind not in SCOPE_TYPES or login(n.get("author")) != owner:
+            continue
+        ref = {"repo": (n.get("repository") or {}).get("nameWithOwner"), "number": n.get("number"),
+               "title": n.get("title"), "type": kind}
+        edits = n.get("userContentEdits") or {}
+        items = n.get("timelineItems") or {}
+        if (edits.get("totalCount", 0) > len(edits.get("nodes") or [])
+                or items.get("totalCount", 0) > len(items.get("nodes") or [])):
+            partial.append(ref)
+        found = [("edit", e.get("editor"), e.get("editedAt")) for e in edits.get("nodes") or []]
+        found += [(t.get("__typename"), t.get("actor"), t.get("createdAt"))
+                  for t in items.get("nodes") or []]
+        for what, who, at in found:
+            if at and login(who) != owner and when(at) >= since and what in SCOPE_EDIT_WHAT:
+                out.append({**ref, "what": SCOPE_EDIT_WHAT[what], "by": login(who), "at": when(at)})
+    return sorted(out, key=lambda e: e["at"]), partial
+
+
+def gh_scope_nodes(repo: str, since: dt.date) -> list[dict]:
+    """The Goal and Area issues in the repo owner's account updated since `since`, open or closed:
+    one search per type (search can't OR two types)."""
+    g = dashboard()
+    nodes = []
+    for kind in sorted(SCOPE_TYPES):
+        q = f"user:{repo.split('/', 1)[0]} is:issue type:{kind} updated:>={since}"
+        d = g.gh_json("api", "graphql", "-f", f"query={SCOPE_EDITS_QUERY}", "-f", f"q={q}")
+        nodes += ((d or {}).get("data") or {}).get("search", {}).get("nodes") or []
+    return nodes
+
+
+def scope_edits_text(edits: list[dict], partial: list[dict], owner: str, since: dt.datetime,
+                     repo: str | None = None, tz: dt.tzinfo | None = None) -> str:
+    """The Goal and Area edits for the report's Risks, or a line saying there were none."""
+    head = f"Goal and Area edits not made by @{owner} since {since:%a %Y-%m-%d %H:%M} (GOV-0031):"
+    lines = [f"  {e['at'].astimezone(tz) if tz else e['at'].astimezone():%a %Y-%m-%d %H:%M}  "
+             f"{e['by']} {e['what']}: {e['type']} {scope_ref(e, repo)} {e['title']}" for e in edits]
+    lines += [f"  {r['type']} {scope_ref(r, repo)}: history too long to read whole; check it by hand" for r in partial]
+    return "\n".join([head, *(lines or ["  none"])])
+
+
+def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DEFAULT_PATH,
+          get_comments: Callable | None = None, now: dt.datetime | None = None,
+          tz: dt.tzinfo | None = None, owner: str | None = None,
+          agents: set[str] | None = None, get_scopes: Callable | None = None) -> int:
+    """`swarm daily` (#707): for each of the last 10 working days, whether a daily report was
+    posted on the report issue, when, and who started it, so M1's streak isn't a hand count.
+    Who started it comes from swarm.db; the reports and their times come from the report
+    issue's comments (swarm.db holds no comments). Then the report's "M1: day N of 5", and
+    the edits to a Goal or Area by anyone but the owner since the last working day began
+    (#709). Only reads."""
+    import watch
+    try:
+        limits = manifest.load_watch(manifest_path)
+    except manifest.ManifestError as e:
+        launcher.out(f"swarm daily: {e}")
+        return 1
+    if not (limits and limits.report_issue):
+        launcher.out(f"swarm daily: {manifest_path} has no [watch] report_issue to count reports on")
+        return 1
+    n = limits.report_issue
+    now = now or dt.datetime.now(dt.timezone.utc)
+    today = (now.astimezone(tz) if tz else now.astimezone()).date()
+    owner = owner or owner_login()
+    trusted = (agents if agents is not None else agent_logins()) | {owner}
+    acted = watch.load_state(launcher)["acted"]
+    comments = (get_comments or watch.gh_comments)(repo, n)
+    days = working_days(today)
+    rows = daily_rows(days, comments, acted, n, trusted, tz)
+    # From the start of the working day before the latest one, so a weekend's edits count Monday.
+    prev = days[1] if days[0] == today else days[0]
+    since = dt.datetime.combine(prev, dt.time(), tz or now.astimezone().tzinfo)
+    try:
+        edits = scope_edits_text(*scope_edits((get_scopes or gh_scope_nodes)(repo, prev), owner, since),
+                                 owner, since, repo, tz)
+    except RuntimeError as e:
+        edits = f"Goal and Area edits couldn't be read: {e}"
+    launcher.out(f"{daily_text(rows, n, today)}\n{m1_day(rows, today)}\n\n{edits}")
+    return 0
+
+
 # ---------------------------------------------------------------- launch (L3)
 
 JURISDICTIONS = ROOT / "governance" / "jurisdictions.yml"
@@ -968,11 +1282,117 @@ def plan_milestones(plan: str) -> dict[int, bool]:
 
 @dataclass
 class GoReader:
-    """What the milestone go needs beyond the issue and its events, read only when asked:
-    PLAN.md on main (None if it isn't there), an issue's state, and the issue's comments."""
+    """What the go needs beyond the issue and its events, read only when asked: PLAN.md on
+    main (None if it isn't there), an issue's state, the issue's comments, and its scope
+    (GOV-0031: its sub-issue parents and blocked-by links, parse_scope(); None if unread)."""
     plan: Callable[[], str | None]
     state: Callable[[int], str | None]
     comments: Callable[[], list[dict]]
+    scope: Callable[[], dict | None] = lambda: None
+
+
+# GOV-0031 (#681): an issue under an open Goal or Area the owner opened is go. For one week
+# after it merged (#668, 2026-11-09 13:54 UTC) the GOV-0026 milestone lines count too.
+SCOPE_TYPES = {"Goal", "Area"}
+BUILD_TYPES = {None, "Task", "Bug", "Feature"}   # implementation issues (#690); None: no type set
+SCOPE_DEPTH = 6               # sub-issue levels read above an issue; deeper ones don't count
+BLOCKERS_MAX = 50             # blocked-by issues read; an issue with more isn't go
+MILESTONE_UNTIL = dt.datetime(2026, 11, 16, 13, 54, 22, tzinfo=dt.timezone.utc)
+_SCOPE_NODE = "number state author { login __typename } issueType { name } repository { nameWithOwner }"
+
+
+def scope_field(depth: int = SCOPE_DEPTH) -> str:
+    """The GraphQL for one issue's scope, as `field % (n, n)` for ghql.batched()."""
+    chain = ""
+    for _ in range(depth):
+        chain = f"parent {{ {_SCOPE_NODE} {chain} }}"
+    return ("i%d: issue(number: %d) { author { login __typename } issueType { name } "
+            f"blockedBy(first: {BLOCKERS_MAX}) {{ totalCount nodes {{ number state "
+            f"repository {{ nameWithOwner }} }} }} {chain} }}")
+
+
+def parse_scope(node: dict | None) -> dict | None:
+    """An issue's scope from scope_field()'s data: {"author", "type", "parents": [nearest first, each
+    {repo, number, state, type, author}], "deep": the chain may go on past SCOPE_DEPTH,
+    "blocked_by": [{repo, number, state}], "blockers_complete"}. States are lower case and
+    logins are REST's. None if the query didn't return the issue."""
+    if not node:
+        return None
+
+    def login(a: dict | None) -> str:   # REST's login, as dashboard/ghql.login (the stop hook can't import it)
+        return "ghost" if not a else a["login"] + "[bot]" if a.get("__typename") == "Bot" else a["login"]
+    parents, p = [], node.get("parent")
+    while p:
+        parents.append({"repo": (p.get("repository") or {}).get("nameWithOwner"),
+                        "number": p.get("number"), "state": (p.get("state") or "").lower(),
+                        "type": (p.get("issueType") or {}).get("name"),
+                        "author": login(p.get("author"))})
+        p = p.get("parent")
+    conn = node.get("blockedBy") or {}
+    nodes = conn.get("nodes") or []
+    return {"author": login(node.get("author")), "type": (node.get("issueType") or {}).get("name"),
+            "parents": parents,
+            "deep": len(parents) >= SCOPE_DEPTH,
+            "blocked_by": [{"repo": (b.get("repository") or {}).get("nameWithOwner"),
+                            "number": b.get("number"), "state": (b.get("state") or "").lower()}
+                           for b in nodes],
+            "blockers_complete": conn.get("totalCount", 0) <= len(nodes)}
+
+
+def scope_ref(x: dict, repo: str | None = None) -> str:
+    """#n, or owner/name#n for an issue in another repo."""
+    return f"#{x['number']}" if x.get("repo") in (None, repo) else f"{x['repo']}#{x['number']}"
+
+
+def scope_goal(scope: dict | None, owner: str) -> dict | None:
+    """The nearest open Goal or Area above the issue that the owner opened, or None."""
+    return next((p for p in (scope or {}).get("parents") or []
+                 if p["state"] == "open" and p["type"] in SCOPE_TYPES and p["author"] == owner), None)
+
+
+def scope_refusal(n: int, issue: dict, scope: dict | None, owner: str, agents: set[str],
+                  comments: Callable[[], list[dict]] | None, blockers: bool = True,
+                  repo: str | None = None) -> str | None:
+    """Why issue n isn't go under a Goal or Area (GOV-0031), or None if it is. blockers=False
+    leaves its open blocked-by issues out (the watcher holds those, #490), and comments=None
+    leaves the owner's comments out (a call-in's own comment mustn't veto it, #594)."""
+    if scope is None:
+        return f"#{n}'s sub-issue links couldn't be read"
+    author = (issue.get("user") or {}).get("login")
+    if author != owner and author not in agents:
+        return (f"#{n} was opened by {author or 'nobody we can see'}, not a swarm App or "
+                f"@{owner}, so a Goal or Area above it doesn't make it go")
+    if scope.get("type") not in BUILD_TYPES:
+        return (f"#{n} is a {scope['type']}, not an implementation issue (Task, Bug or Feature), "
+                f"so a Goal or Area above it doesn't make it go (GOV-0031)")
+    if scope_goal(scope, owner) is None:
+        if not scope["parents"]:
+            return f"#{n} isn't a sub-issue of anything, so no Goal or Area makes it go"
+        near = next((p for p in scope["parents"] if p["type"] in SCOPE_TYPES), None)
+        if near and near["author"] != owner:
+            return (f"#{n}'s {near['type']} {scope_ref(near, repo)} was opened by {near['author']}, "
+                    f"not @{owner}, so it doesn't count (GOV-0031)")
+        if near:
+            return f"#{n}'s {near['type']} {scope_ref(near, repo)} is closed"
+        deep = f" within {SCOPE_DEPTH} levels" if scope["deep"] else ""
+        return f"#{n} isn't under an open Goal or Area that @{owner} opened{deep}"
+    labels = {lb.get("name") for lb in issue.get("labels") or []}
+    if "hold" in labels:
+        return f"#{n} is labelled `hold`: the owner's veto"
+    if blockers:
+        if not scope["blockers_complete"]:
+            return f"#{n} has more than {BLOCKERS_MAX} blocked-by issues; not all could be read"
+        still = [b for b in scope["blocked_by"] if b["state"] != "closed"]
+        if still:
+            return f"#{n} is blocked by {', '.join(scope_ref(b, repo) for b in still)}, still open"
+    if comments is not None and any((c.get("user") or {}).get("login") == owner for c in comments()):
+        return (f"@{owner} commented on #{n}: that's a veto until @{owner} labels it `ready`")
+    return None
+
+
+def milestone_open(now: dt.datetime | None) -> bool:
+    """Whether GOV-0031's week for the GOV-0026 milestone lines is still running."""
+    return (now or dt.datetime.now(dt.timezone.utc)) < MILESTONE_UNTIL
 
 
 def milestone_refusal(n: int, issue: dict, owner: str, agents: set[str], r: GoReader) -> str | None:
@@ -1005,22 +1425,40 @@ def milestone_refusal(n: int, issue: dict, owner: str, agents: set[str], r: GoRe
 
 
 def go_refusals(n: int, issue: dict | None, events: list[dict], owner: str,
-                agents: set[str], r: GoReader) -> list[str]:
-    """Reasons issue n isn't go for a [build], or [] if it is (GOV-0026).
+                agents: set[str], r: GoReader, now: dt.datetime | None = None,
+                repo: str | None = None) -> list[str]:
+    """Reasons issue n isn't go for a [build], or [] if it is (GOV-0031).
 
-    Go is the owner's `ready` (GOV-0006), or, for an implementation issue, its milestone:
-    opened by a swarm App or the owner, `**Milestone:** M<n>` naming a milestone in PLAN.md
-    on main that isn't marked done, its `**Waits on:**` issues closed, and no veto (a `hold`
-    label or any owner comment; a closed issue is refused anyway). A gov:question is go
-    only by `ready`. When the issue names a milestone, the first reason is why that failed."""
+    Go is the owner's `ready` (GOV-0006), or, for an implementation issue, its scope: opened
+    by a swarm App or the owner, under an open Goal or Area the owner opened (at any depth
+    of sub-issues), none of its blocked-by issues open, and no veto (a `hold` label or any
+    owner comment; a closed issue is refused anyway). Until MILESTONE_UNTIL its GOV-0026
+    milestone still counts as well. A gov:question is go only by `ready`. When the issue
+    names a milestone, the first reason is why that failed; then why its scope did, if it
+    has a parent at all."""
     refused = issue_refusals(n, issue, events, owner)
     if not refused or issue is None or "pull_request" in issue or issue.get("state") != "open":
         return refused
     labels = {lb.get("name") for lb in issue.get("labels") or []}
-    if "gov:question" in labels or milestone_of(issue.get("body")) is None:
+    if "gov:question" in labels:
         return refused
-    why = milestone_refusal(n, issue, owner, agents, r)
-    return [why, *refused] if why else []
+    reasons = []
+    if milestone_of(issue.get("body")) is not None:
+        if milestone_open(now):
+            why = milestone_refusal(n, issue, owner, agents, r)
+            if why is None:
+                return []
+            reasons.append(why)
+        else:
+            reasons.append(f"#{n}'s `**Milestone:**` line stopped counting at "
+                           f"{MILESTONE_UNTIL:%Y-%m-%d %H:%M} UTC (GOV-0031)")
+    scope = r.scope() if r is not None else None
+    if scope is not None and scope["parents"]:
+        why = scope_refusal(n, issue, scope, owner, agents, r.comments, repo=repo)
+        if why is None:
+            return []
+        reasons.append(why)
+    return [*reasons, *refused]
 
 
 def gh_plan(repo: str) -> str | None:
@@ -1035,11 +1473,19 @@ def gh_plan(repo: str) -> str | None:
     return base64.b64decode(d["content"]).decode()
 
 
+def gh_scopes(repo: str, numbers: list[int]) -> dict[int, dict | None]:
+    """parse_scope() for each issue: one GraphQL query per 25 issues (ghql.batched)."""
+    dashboard()
+    import ghql
+    return {n: parse_scope(x) for n, x in ghql.batched(repo, numbers, scope_field(), 25).items()}
+
+
 def gh_go_reader(repo: str, n: int) -> GoReader:
     g = dashboard()
     return GoReader(plan=lambda: gh_plan(repo),
                     state=lambda w: (g.gh_json("api", f"repos/{repo}/issues/{w}") or {}).get("state"),
-                    comments=lambda: g.gh_items(f"repos/{repo}/issues/{n}/comments?per_page=100"))
+                    comments=lambda: g.gh_items(f"repos/{repo}/issues/{n}/comments?per_page=100"),
+                    scope=lambda: gh_scopes(repo, [n]).get(n))
 
 
 def holders(n: int, model: dict, started: list[Started], role: str | None = None) -> list[str]:
@@ -1082,7 +1528,8 @@ def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, forc
            owner: Callable[[], str] = owner_login, agents: Callable[[], set[str]] = agent_logins,
            get_reader: Callable[[str, int], GoReader] = gh_go_reader) -> int:
     issue, events = get_issue(repo, n)
-    refused = go_refusals(n, issue, events, owner(), agents(), get_reader(repo, n))
+    refused = go_refusals(n, issue, events, owner(), agents(), get_reader(repo, n),
+                          now=dt.datetime.fromtimestamp(launcher.clock(), dt.timezone.utc), repo=repo)
     if refused:
         launcher.out(f"swarm launch: refused: {refused[0]}")
         return 1
@@ -1131,8 +1578,14 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_inbox.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_cost = sub.add_parser("cost", help="cost per PR of the runs swarm watch recorded (local only)")
     p_cost.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_merges = sub.add_parser("merges", help="this week's merges by the merger and by the owner, and reverts")
+    p_merges.add_argument("--last", action="store_true", help="last week (Monday to Sunday, UTC) instead")
+    p_merges.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_status = sub.add_parser("status", help="swarm watch's state with cost, from local files only")
     p_status.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
+    p_daily = sub.add_parser("daily", help="the last 10 working days' daily reports and the streak")
+    p_daily.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_daily.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
     p_launch.add_argument("role")
     p_launch.add_argument("--issue", type=int, required=True, help="the issue to work on")
@@ -1160,6 +1613,10 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_hooks = sub.add_parser("webhooks", help="receive GitHub webhooks and nudge the watcher (engine host)")
     p_hooks.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (Caddy in front)")
     p_hooks.add_argument("--port", type=int, default=8081)
+    p_desk = sub.add_parser("desk", help="serve the Desk read-only, rebuilt on each webhook nudge (engine host)")
+    p_desk.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (Caddy in front)")
+    p_desk.add_argument("--port", type=int, default=8080)
+    p_desk.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_backup = sub.add_parser("backup", help="copy swarm.db consistently, for the nightly timer")
     p_backup.add_argument("--out", help=f"default: backups/swarm-<UTC time>.db, keeping the newest "
                                         f"{statedb.KEEP_BACKUPS}")
@@ -1178,6 +1635,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
         import webhooks
         return webhooks.serve(launcher.dir, os.environ.get("WEBHOOK_SECRET", ""), args.host,
                               args.port, out=launcher.out)
+    if args.cmd == "desk":
+        import desk
+        return desk.serve(launcher.dir, args.host, args.port, args.repo, out=launcher.out)
     if args.cmd == "watch" and not args.dry_run and args.interval is not None:
         launcher.out("swarm watch: --interval works only with --dry-run; the interval for real "
                      "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")
@@ -1189,7 +1649,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             launcher.out(f"swarm watch: {e}")
             return 2
     repo = None
-    if args.cmd in ("ls", "launch", "inbox", "watch", "cost"):
+    if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges", "daily"):
         repo = args.repo or dashboard().default_repo()
         if not repo:
             launcher.out(f"swarm {args.cmd}: can't tell the repo; pass --repo owner/name")
@@ -1219,8 +1679,12 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return inbox(launcher, repo, args.idle_minutes, args.manifest)
         if args.cmd == "cost":
             return cost(launcher, repo)
+        if args.cmd == "merges":
+            return merges(launcher, repo, args.last)
         if args.cmd == "status":
             return status(launcher, args.manifest)
+        if args.cmd == "daily":
+            return daily(launcher, repo, args.manifest)
         if args.cmd == "watch":
             import watch
             try:

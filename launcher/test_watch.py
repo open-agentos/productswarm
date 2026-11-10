@@ -580,7 +580,7 @@ class StartTest(unittest.TestCase):
     def watcher(self):
         return watch.Watch(self.l, REPO, OWNER, ROLES, dry_run=False, manifest_path=self.path,
                            read=self.scene.read, get_issue=self.scene.get_issue,
-                           get_heartbeat=self.scene.heartbeat)
+                           get_heartbeat=self.scene.heartbeat, get_reader=self.scene.get_reader)
 
     def started(self):
         return [(e.name, e.role, e.model, e.issue, e.by) for e in self.l.load()]

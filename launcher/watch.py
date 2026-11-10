@@ -13,8 +13,9 @@ it has none (for example, the role has no spend_cap_usd).
 |--------|-------------------------------------------------------------------------|----------------------|
 | review | open, non-draft PR whose head the reviewer App hasn't reviewed          | a reviewer pass      |
 | build  | issue whose most recent `ready` was added by the owner (GOV-0006), or   | builder on the issue |
-|        | that is go by its PLAN.md milestone (GOV-0026, #583), with no open PR   |                      |
-|        | closing it                                                              |                      |
+|        | under an open Goal or Area the owner opened (GOV-0031, #681), or (until |                      |
+|        | swarm.MILESTONE_UNTIL) go by its PLAN.md milestone (GOV-0026, #583),    |                      |
+|        | with no open PR closing it                                              |                      |
 | record | gov:question whose most recent `gov:ruled` was added by the owner, that | docs on the question |
 |        | needs a record (GOV-0007), with no open PR closing it                   |                      |
 | answer | gov:question whose most recent `ready` was added by the owner, again    | its "Raised by" role |
@@ -165,6 +166,13 @@ held while N's title shares a GOV id with the title of
 The hold is listed in `swarm inbox` with what it waits on, logged once per reason, and
 starts held-longest-first once the overlap clears. An issue whose title cites no GOV id
 is never held this way, and [respond], [review], [record] and [answer] never are.
+
+[build] under a Goal or Area (#681, GOV-0031): gather() reads every candidate issue's
+sub-issue parents and blocked-by links (swarm.gh_scopes, 25 issues a query). An issue
+without the owner's `ready` builds when swarm.scope_refusal() passes, leaving its blocked-by
+issues to link_blocked(), which holds the build as blocked() does for `**Waits on:**`. Its
+key is `build:N:G<repo>#<goal>` and its why "go under Goal #<goal> (GOV-0031)". The
+milestone build below runs only until swarm.MILESTONE_UNTIL.
 
 [build] by milestone (#583, GOV-0026): an open, non-question, non-tracking issue without
 the owner's `ready` builds when swarm.milestone_refusal() passes on this tick's reading:
@@ -433,6 +441,8 @@ class World:
     comments: dict[int, list[dict]] = field(default_factory=dict)   # gov:ruled question -> comments (#501)
     recent: list[dict] | None = None                 # the repo's recent comments, for [research] (#591)
     plan: str | None = None                          # PLAN.md on main, None if absent (#583)
+    scopes: dict[int, dict | None] = field(default_factory=dict)   # issue -> swarm.parse_scope() (#681)
+    repo: str | None = None                          # the repo read, for naming issues elsewhere
 
 
 def owner_label(events: list[dict], name: str, owner: str) -> dict | None:
@@ -586,7 +596,8 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
 
     # Builds: open, non-question, non-tracking issues with no open PR closing them (that
     # work is done and waits on the owner's merge) that are go: the owner's `ready`
-    # (GOV-0006), or else their PLAN.md milestone (GOV-0026, #583).
+    # (GOV-0006), or else an open Goal or Area the owner opened above them (GOV-0031, #681),
+    # or, until swarm.MILESTONE_UNTIL, their PLAN.md milestone (GOV-0026, #583).
     agents = set(apps or {})
     for it in sorted(w.issues, key=lambda i: i["number"]):
         n = it["number"]
@@ -599,16 +610,22 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         if ready:
             key, why = f"build:{n}:{ready.get('id')}", "ready by the owner"
         else:
-            mile = milestone_go(it, w, owner, agents)
-            if mile is None:
-                continue
             lift = next((e for e in reversed(events) if e.get("event") == "unlabeled"
                          and (e.get("label") or {}).get("name") == "hold"), None)
-            key = f"build:{n}:M{mile}" + (f":{lift.get('id')}" if lift else "")
-            why = f"go by milestone M{mile} (GOV-0026)"
+            lifted = f":{lift.get('id')}" if lift else ""
+            goal = scope_go(it, w, owner, agents)
+            mile = None if goal else milestone_go(it, w, owner, agents) if swarm.milestone_open(now) else None
+            if goal:
+                key = f"build:{n}:G{goal['repo']}#{goal['number']}{lifted}"
+                why = f"go under {goal['type']} {swarm.scope_ref(goal, w.repo)} (GOV-0031)"
+            elif mile is not None:
+                key = f"build:{n}:M{mile}{lifted}"
+                why = f"go by milestone M{mile} (GOV-0026)"
+            else:
+                continue
         t = hold(Trigger(key=key, kind="build", ref=f"#{n}", why=why, role="builder",
                          command=launch_cmd("builder", n), issue=n), n)
-        waits = None if t.held else blocked(it.get("body"), w)
+        waits = None if t.held else blocked(it.get("body"), w) or link_blocked(w.scopes.get(n), w.repo)
         out.append(replace(t, held=waits, once=waits) if waits else t)
 
     # Call-ins (#520, GOV-0023): `Call in:` lines on ready issues, questions included, and
@@ -620,8 +637,9 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
             continue
         ready = owner_label(w.events.get(n, []), "ready", owner) if "ready" in labels else None
         since = None
-        if call_milestone(it, owner, agents, lambda: w.plan) is None:
-            since = it.get("created_at") or ""     # when its milestone line came isn't readable
+        if (call_scope(it, w.scopes.get(n), owner, agents, w.repo) is None
+                or swarm.milestone_open(now) and call_milestone(it, owner, agents, lambda: w.plan) is None):
+            since = it.get("created_at") or ""     # when it came under its scope isn't readable
         elif ready:
             since = ready.get("created_at") or ""
         if since is None:
@@ -920,6 +938,39 @@ def call_milestone(it: dict, owner: str, agents: set[str],
     return swarm.milestone_refusal(n, it, owner, agents, r)
 
 
+def scope_go(it: dict, w: World, owner: str, agents: set[str]) -> dict | None:
+    """The Goal or Area that makes issue `it` go on this tick's reading (GOV-0031, #681),
+    else None. Its open blocked-by issues aren't checked here: link_blocked() holds the
+    build until they close, as blocked() does for `**Waits on:**` (#490)."""
+    n, scope = it["number"], w.scopes.get(it["number"])
+    if not scope or not scope["parents"]:
+        return None
+    why = swarm.scope_refusal(n, it, scope, owner, agents, lambda: w.comments.get(n, []),
+                              blockers=False, repo=w.repo)
+    return None if why else swarm.scope_goal(scope, owner)
+
+
+def link_blocked(scope: dict | None, repo: str | None = None) -> str | None:
+    """Why a [build] is held because a blocked-by issue is still open (#681), or None."""
+    still = [b for b in (scope or {}).get("blocked_by") or [] if b["state"] != "closed"]
+    return (f"held: waits on {', '.join(swarm.scope_ref(b, repo) for b in still)} (blocked by)"
+            if still else None)
+
+
+def call_scope(it: dict, scope: dict | None, owner: str, agents: set[str],
+               repo: str | None = None) -> str | None:
+    """Why `Call in:` lines on issue `it` don't count by its Goal or Area (GOV-0031), or None
+    if they do: as call_milestone(), with its blocked-by issues and the owner's comments
+    left out."""
+    n = it["number"]
+    labels = {lb.get("name") for lb in it.get("labels") or []}
+    if "gov:question" in labels:
+        return f"#{n} is a gov:question, which only `ready` opens to call-ins"
+    if not scope or not scope["parents"]:
+        return f"#{n} isn't a sub-issue of anything"
+    return swarm.scope_refusal(n, it, scope, owner, agents, None, blockers=False, repo=repo)
+
+
 def open_issues(w: World) -> set[int]:
     return {i["number"] for i in w.issues if i.get("state") == "open" and "pull_request" not in i}
 
@@ -1031,13 +1082,17 @@ def gather(repo: str, idle_minutes: int, now: dt.datetime) -> World:
     g = swarm.dashboard()
     data, model = swarm.snapshot(repo, idle_minutes, now)
     issues = [i for i in data["issues"] if i.get("state") == "open"]
-    w = World(model=model, issues=issues, plan=swarm.gh_plan(repo))   # PLAN.md once per check (#583)
+    w = World(model=model, issues=issues, plan=swarm.gh_plan(repo), repo=repo)   # PLAN.md once per check (#583)
+    # GOV-0031 (#681): every candidate's sub-issue parents and blocked-by links, 25 issues a query.
+    w.scopes = swarm.gh_scopes(repo, [it["number"] for it in issues if "pull_request" not in it
+                                      and not g.is_tracking(it)])
     for it in issues:
         labels = {lb.get("name") for lb in it.get("labels") or []}
-        # A milestone issue (#583) needs its events (ready, a lifted hold) and its comments
-        # (the owner's veto), like a ready one.
+        # A milestone issue (#583) or one under a Goal or Area (#681) needs its events (ready,
+        # a lifted hold) and its comments (the owner's veto), like a ready one.
         milestone = ("gov:question" not in labels and not g.is_tracking(it)
-                     and swarm.milestone_of(it.get("body")) is not None)
+                     and (swarm.milestone_of(it.get("body")) is not None
+                          or bool((w.scopes.get(it["number"]) or {}).get("parents"))))
         if (labels & {"ready", "gov:ruled"} and not g.is_tracking(it)) or milestone or HALT in labels:
             w.events[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/events?per_page=100")
         if ({"gov:question", "gov:ruled"} <= labels or ("ready" in labels and not g.is_tracking(it))
@@ -2032,16 +2087,23 @@ class Watch:
         elif t.kind in ("build", "respond"):
             # The owner's `ready`, or the issue's milestone (GOV-0026, #583), as `swarm launch`.
             refused = swarm.go_refusals(t.issue, issue, events, self.owner, set(self.apps()),
-                                        self.get_reader(self.repo, t.issue))
+                                        self.get_reader(self.repo, t.issue), now=now, repo=self.repo)
         else:
             label = "gov:ruled" if t.kind == "record" else "ready"
             refused = swarm.issue_refusals(t.issue, issue, events, self.owner, label)
             if refused and t.kind == CALL_IN and issue and "pull_request" not in issue \
-                    and issue.get("state") == "open" and swarm.milestone_of(issue.get("body")) is not None:
-                # #594: a call-in counts on an issue under an open milestone, too.
-                why = call_milestone(issue, self.owner, set(self.apps()),
-                                     self.get_reader(self.repo, t.issue).plan)
-                refused = [why, *refused] if why else []
+                    and issue.get("state") == "open":
+                # #594, #681: a call-in counts on an issue under an open Goal or Area, or
+                # (until swarm.MILESTONE_UNTIL) an open milestone, too.
+                r = self.get_reader(self.repo, t.issue)
+                scope = r.scope()
+                whys = [call_scope(issue, scope, self.owner, set(self.apps()), self.repo)]
+                if swarm.milestone_open(now) and swarm.milestone_of(issue.get("body")) is not None:
+                    whys.append(call_milestone(issue, self.owner, set(self.apps()), r.plan))
+                if None in whys:
+                    refused = []
+                elif swarm.milestone_of(issue.get("body")) is not None or (scope or {}).get("parents"):
+                    refused = [whys[-1], *refused]
         if refused:
             return refused[0], False
         taken = swarm.holders(t.issue, hb, live, own_role(t))

@@ -117,6 +117,7 @@ class GitHub:
     get: Callable[[str], object]            # one REST GET
     items: Callable[[str], list]            # every item of a paginated REST list
     closing_prs: Callable[[str, int], list] # PRs (open or merged) that close an issue
+    scope: Callable[[str, int], dict | None] = lambda repo, n: None   # swarm.parse_scope() (#681)
 
 
 def gh(*args: str) -> str:
@@ -138,7 +139,15 @@ def live_github() -> GitHub:
         d = json.loads(gh("issue", "view", str(n), "--repo", repo, "--json", "closedByPullRequestsReferences"))
         return d.get("closedByPullRequestsReferences") or []
 
-    return GitHub(get=get, items=items, closing_prs=closing_prs)
+    def scope(repo, n):
+        owner, name = repo.split("/", 1)
+        q = ("query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { %s } }"
+             % (swarm.scope_field() % (n, n)))
+        d = json.loads(gh("api", "graphql", "-f", f"query={q}", "-f", f"owner={owner}",
+                          "-f", f"name={name}") or "null") or {}
+        return swarm.parse_scope(((d.get("data") or {}).get("repository") or {}).get(f"i{n}"))
+
+    return GitHub(get=get, items=items, closing_prs=closing_prs, scope=scope)
 
 
 # ---------------------------------------------------------------- done-conditions
@@ -290,7 +299,8 @@ def go_reader(g: GitHub, repo: str, n: int) -> swarm.GoReader:
     """swarm.go_refusals' reads, through the run's GitHub (#582)."""
     return swarm.GoReader(plan=lambda: plan_on_main(g, repo),
                           state=lambda w: (g.get(f"repos/{repo}/issues/{w}") or {}).get("state"),
-                          comments=lambda: g.items(f"repos/{repo}/issues/{n}/comments?per_page=100"))
+                          comments=lambda: g.items(f"repos/{repo}/issues/{n}/comments?per_page=100"),
+                          scope=lambda: g.scope(repo, n))
 
 
 def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
@@ -318,7 +328,7 @@ def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
         events = g.items(f"repos/{repo}/issues/{e.issue}/events?per_page=100")
         refused = (swarm.issue_refusals(e.issue, issue, events, owner, "gov:ruled") if record
                    else swarm.go_refusals(e.issue, issue, events, owner, swarm.agent_logins(),
-                                          go_reader(g, repo, e.issue)))
+                                          go_reader(g, repo, e.issue), repo=repo))
         if refused:
             return None      # it was right to refuse the issue (GOV-0006, GOV-0026)
         if blocked_on_prerequisite(g, repo, e, login):

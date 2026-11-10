@@ -15,6 +15,9 @@ instructions. `plan` (#589) writes nothing to GitHub. `run` (#592) runs plan, th
 - live: merge with the head SHA pinned, then post `Merged under <kind> (GOV-0027) at <sha>.`
   Until GOV-0027's shadow bar is met ("would merge" by the merger App on SHADOW_PRS
   distinct PRs, or a day since the first), live acts as shadow and says so in the log.
+  GOV-0034 adds a second bar for the standing grant only: until "Would merge (standing
+  grant)" is on SHADOW_PRS distinct PRs, or a day since the first, live acts as shadow for
+  standing grants (and says so in the log) while approved asks still merge.
 - off: nothing.
 
 Every comment ends `-- merger`. `--dry-run` prints each comment or merge instead of making
@@ -29,9 +32,10 @@ touches a protected path; then it is judged as an approved ask.
 Standing grant (GOV-0027, GOV-0022), in the order checked:
 
 - the author is productswarm-builder[bot], and the base is main;
-- it closes exactly one issue in this repo, and that issue is go by its milestone
-  (swarm.milestone_refusal, GOV-0026, #582). The owner's `ready` alone doesn't count: the
-  record says "under an approved milestone". A gov:question never counts;
+- it closes exactly one issue in this repo, and that issue is go under GOV-0031 (GOV-0034):
+  the owner added its most recent `ready`, or it sits under an open Goal or Area the owner
+  opened with no open blocked-by issue and no veto (swarm.go_refusals, the watcher's own
+  check, so the two agree). A gov:question never counts;
 - the reviewer approved at the current head, and no one's latest review requests changes;
 - no `Overstep:` line in any PR comment, review or review comment;
 - the `tests` check (from GitHub Actions) passed at the current head;
@@ -60,6 +64,8 @@ PR is a miss and it exits 1.
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import datetime as dt
 import os
 import re
 import subprocess
@@ -73,7 +79,7 @@ from typing import Callable
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import actions_review  # noqa: E402  (eligible(), head_sha(), trusted_authors())
-import swarm  # noqa: E402  (milestone_refusal(), GOV-0026)
+import swarm  # noqa: E402  (go_refusals(), GOV-0031)
 import watch  # noqa: E402
 
 BUILDER = "productswarm-builder[bot]"
@@ -217,6 +223,7 @@ class Reader:
     checks: Callable[[str], list[dict]]         # check runs at a commit
     closes: Callable[[int], list[tuple[str, int]]]  # (repo, number) of each issue the PR closes
     issue: Callable[[int], dict]
+    events: Callable[[int], list[dict]]         # the issue's events (who added `ready`)
     go_reader: Callable[[int], "swarm.GoReader"]
 
 
@@ -226,6 +233,7 @@ class Context:
     owner: str                    # humans.owner's login, without the @
     agents: frozenset[str]        # identities.agents
     switch: Switch
+    now: dt.datetime | None = None  # for GOV-0031's milestone week; None: the real time
 
 
 def common(n: int, head: str, who: str, r: Reader) -> str | None:
@@ -244,7 +252,7 @@ def common(n: int, head: str, who: str, r: Reader) -> str | None:
 
 def grant_issue(n: int, ctx: Context, r: Reader) -> str | None:
     """Why PR n's issue doesn't make it a standing grant, or None: exactly one closing
-    issue in this repo, open, not a gov:question, go by its milestone (GOV-0026)."""
+    issue in this repo, open, not a gov:question, go under GOV-0031 (GOV-0034)."""
     closes = r.closes(n)
     if len(closes) != 1:
         return f"it closes {len(closes)} issues, not exactly one"
@@ -255,9 +263,29 @@ def grant_issue(n: int, ctx: Context, r: Reader) -> str | None:
     if not isinstance(issue, dict) or issue.get("state") != "open" or "pull_request" in issue:
         return f"#{k} isn't an open issue"
     if "gov:question" in {lb.get("name") for lb in issue.get("labels") or []}:
-        return f"#{k} is a gov:question, not under a milestone"
-    why = swarm.milestone_refusal(k, issue, ctx.owner, set(ctx.agents), r.go_reader(k))
-    return f"not under an approved milestone: {why}" if why else None
+        return f"#{k} is a gov:question, which the standing grant never covers"
+    reader = r.go_reader(k)
+    read: list = []
+
+    def scope():                  # read the scope once: go_refusals and the reason below share it
+        if not read:
+            read.append(reader.scope())
+        return read[0]
+    agents = set(ctx.agents)
+    refused = swarm.go_refusals(k, issue, r.events(k), ctx.owner, agents,
+                                dataclasses.replace(reader, scope=scope),
+                                now=ctx.now, repo=ctx.repo)
+    if not refused:
+        return None
+    why = refused[0]
+    s = scope()
+    labels = {lb.get("name") for lb in issue.get("labels") or []}
+    if "ready" not in labels and swarm.milestone_of(issue.get("body")) is None \
+            and not (s or {}).get("parents"):
+        # go_refusals gave only "not labelled `ready`"; most work is go by its scope, so say
+        # why that failed (e.g. "isn't a sub-issue of anything") instead.
+        why = swarm.scope_refusal(k, issue, s, ctx.owner, agents, None, repo=ctx.repo) or why
+    return f"not go under GOV-0031: {why}"
 
 
 def decide(pr: dict, ctx: Context, r: Reader) -> str:
@@ -362,6 +390,7 @@ def live(repo: str) -> Reader:
                                       "&per_page=100", ".check_runs[]"),
         closes=closes,
         issue=lambda k: g.gh_json("api", f"repos/{repo}/issues/{k}"),
+        events=lambda k: g.gh_items(f"repos/{repo}/issues/{k}/events?per_page=100"),
         go_reader=lambda k: swarm.gh_go_reader(repo, k))
 
 
@@ -415,6 +444,7 @@ SIGN = "\n\n-- merger"
 WOULD, MERGED, LEFT = "Would merge", "Merged under", "Left for the owner"
 SHADOW_PRS = 10                       # GOV-0027: "would merge" on 10 PRs ...
 SHADOW_SECONDS = 24 * 3600            # ... or a day since the first, whichever comes first
+GRANT_WOULD = f"{WOULD} (standing grant)"   # GOV-0034's own shadow counts only these
 
 
 def kind(verdict: str) -> str:
@@ -439,19 +469,20 @@ def posted(comments: list[dict], prefix: str, head: str) -> bool:
                and f" at {head}" in (c.get("body") or "") for c in comments if isinstance(c, dict))
 
 
-def shadow_bar(comments: list[dict], now: float) -> str | None:
-    """None once GOV-0027's shadow is over ("would merge" by the merger App on SHADOW_PRS
+def shadow_bar(comments: list[dict], now: float, prefix: str = WOULD) -> str | None:
+    """None once a shadow is over (a `prefix` comment by the merger App on SHADOW_PRS
     distinct PRs, or SHADOW_SECONDS since the first), else why live is still held back.
+    GOV-0027's shadow counts every "Would merge"; GOV-0034's counts only GRANT_WOULD.
     A PR counts once however many heads it was posted for; a comment without an
     issue_url names no PR, so it doesn't count towards the PRs (it still dates the first)."""
     mine = [c for c in comments if isinstance(c, dict) and login(c) == MERGER
-            and (c.get("body") or "").startswith(WOULD)]
+            and (c.get("body") or "").startswith(prefix)]
     prs = {u for c in mine if isinstance(u := c.get("issue_url"), str) and u}
     times = sorted(t for c in mine if (t := actions_review.iso_time(c.get("created_at"))) is not None)
     if len(prs) >= SHADOW_PRS or (times and now - times[0] >= SHADOW_SECONDS):
         return None
     since = f", the first at {actions_review.utc(times[0])}" if times else ""
-    return (f"the shadow bar isn't met ({len(prs)} of {SHADOW_PRS} PRs with a \"would merge\" "
+    return (f"the shadow bar isn't met ({len(prs)} of {SHADOW_PRS} PRs with a \"{prefix.lower()}\" "
             f"comment{since}; or a day since the first)")
 
 
@@ -510,16 +541,22 @@ def run(repo: str, dry_run: bool = False, pr: int | None = None,
     if mode == "off":
         out(f"merger: off ({ctx.switch.why_off}): nothing posted or merged")
         return 0
-    held = None
+    held = held_grant = None
     if mode == "live":
         try:
-            held = shadow_bar(w.history(), clock())
+            history, now = w.history(), clock()
+            held = shadow_bar(history, now)
+            held_grant = shadow_bar(history, now, GRANT_WOULD)
         except UNREADABLE as e:
             held = f"can't count the shadow's comments ({e.__class__.__name__})"
         if held:
             out(f"merger: live acts as shadow: {held}")
-    merging = mode == "live" and not held
-    failed = 0
+        elif held_grant:
+            out(f"merger: live acts as shadow for the standing grant (GOV-0034): {held_grant}")
+
+    def merging(d: Decision) -> bool:
+        return mode == "live" and not held and not (d.verdict == GRANT and held_grant)
+    failed = merged = 0
 
     def write(what: str, act: Callable[[], None]) -> bool:
         nonlocal failed
@@ -542,13 +579,14 @@ def run(repo: str, dry_run: bool = False, pr: int | None = None,
         if d.verdict.startswith("skip: "):
             continue
         try:
-            if d.merges and merging:
+            if d.merges and merging(d):
                 now_head = actions_review.head_sha(r.pr(d.number))
                 if now_head != d.head:
                     out(f"merger: #{d.number}'s head moved since the decision "
                         f"({d.head[:7]} to {(now_head or '-')[:7]}); not merging")
                     continue
                 if write(f"merge #{d.number} at {d.head}", lambda: w.merge(d.number, d.head)):
+                    merged += 1
                     comment(d.number, merged_body(d))
             elif d.merges:
                 if not posted(r.comments(d.number), WOULD, d.head):
@@ -559,9 +597,11 @@ def run(repo: str, dry_run: bool = False, pr: int | None = None,
         except UNREADABLE as e:
             failed += 1
             out(f"merger: #{d.number}: can't read GitHub ({e.__class__.__name__}); left alone")
-    verb = "merged" if merging else "would merge"
-    out(f"merger: mode {mode}{' (dry run)' if dry_run else ''}: "
-        f"{sum(d.merges for d in decisions)} PR(s) {verb}" + (f", {failed} failure(s)" if failed else ""))
+    shadowed = sum(d.merges and not merging(d) for d in decisions)
+    did = f"{merged} PR(s) merged" + (f", {shadowed} would merge" if shadowed else "") \
+        if mode == "live" and not dry_run else f"{sum(d.merges for d in decisions)} PR(s) would merge"
+    out(f"merger: mode {mode}{' (dry run)' if dry_run else ''}: {did}"
+        + (f", {failed} failure(s)" if failed else ""))
     return 1 if failed else 0
 
 

@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, and `swarm status` (#457) prints what the loop is doing now, with cost. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, `swarm status` (#457) prints what the loop is doing now, with cost, and `swarm daily` (#707) counts the daily-report streak. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
 
 ## swarm up / ls / stop
 
@@ -44,18 +44,24 @@ It refuses, and says why, if:
 - #N isn't go (see "Two ways an issue is go" below);
 - a live session is already on #N. "Live" means a heartbeat session that isn't stopped and whose current issue is #N, or a session `launch` started on #N that hasn't sent a heartbeat yet. The refusal names the session.
 
-`--force` overrides only the last of these. No flag makes an issue go: add `ready` to the issue, or put it under an open milestone.
+`--force` overrides only the last of these. No flag makes an issue go: add `ready` to the issue, or put it under an open Goal or Area you opened.
 
-**Two ways an issue is go** (`swarm.go_refusals`, #582). `swarm launch` and the stop hook (`stophook.py`) share this check:
+**How an issue is go** (`swarm.go_refusals`, #582, #681). `swarm launch` and the stop hook (`stophook.py`) share this check:
 
 1. **The owner's `ready`** (GOV-0006): the most recent `ready` label on #N was added by the owner named in `governance/jurisdictions.yml`. This is checked first, and is enough on its own.
-2. **Its milestone** (GOV-0026), for an implementation issue only. All of these hold:
+2. **Its Goal or Area** (GOV-0031, #681), for an implementation issue only. All of these hold:
+   - the owner or a swarm App opened #N;
+   - #N is an implementation issue: of type Task, Bug or Feature, or with no type. A Mission, Brief, Question, Lesson, Goal or Area is never go this way, though the owner's `ready` still works on any type (#690);
+   - #N sits under an open issue of type Goal or Area that the owner opened, at any depth of sub-issues (up to `swarm.SCOPE_DEPTH`, 6 levels), in any repo of the org. A Goal or Area anyone else opened doesn't count;
+   - none of its blocked-by issues is open (up to 50 are read; an issue with more isn't go);
+   - the owner hasn't vetoed it: no `hold` label and no owner comment, as for a milestone below.
+3. **Its milestone** (GOV-0026), until 2026-11-16 13:54 UTC only (`swarm.MILESTONE_UNTIL`: GOV-0031's week after #668 merged). After that a `**Milestone:**` line is refused as `stopped counting`. The plan file these lines were read against was deleted from `main` by #708 (GOV-0031 retired it), so from that merge every milestone line fails the second condition below, and only the owner's `ready` or a Goal or Area makes an issue go. Until then, for an implementation issue only, all of these hold:
    - the owner or a swarm App (a login under `identities.agents` in `jurisdictions.yml`) opened #N, and its body has a line `**Milestone:** M<n>`;
-   - `PLAN.md` on `main` has a `## M<n>` section that isn't marked done. `PLAN.md`'s format (#574) doesn't yet say how a milestone is marked done, so either form counts: `(done)` or ✅ in the heading, or a `**Status:** done` line in the section;
+   - the plan file on `main` has a `## M<n>` section that isn't marked done. Its format (#574) didn't say how a milestone is marked done, so either form counts: `(done)` or ✅ in the heading, or a `**Status:** done` line in the section;
    - every issue on its `**Waits on:**` line is closed (read as `swarm watch` reads it, #490);
    - the owner hasn't vetoed it: it has no `hold` label, and the owner hasn't commented on it. Any owner comment is a veto, whatever it says, until the owner labels the issue `ready` (the record says "a comment" without narrowing it, so this reads it strictly).
 
-A `gov:question` is go only by `ready`, even with a milestone line (GOV-0026 leaves GOV-0006's rule for questions unchanged). When #N has a milestone line and neither way passes, the refusal names the milestone condition that failed, for example `#N's milestone M2 is marked done in PLAN.md`. Without a milestone line it names the `ready` check, as before. `swarm watch` starts `[build]` on an issue that is go either way (#583; see "Builds by milestone" under `swarm watch`).
+A `gov:question` is go only by `ready`, even under a Goal or with a milestone line (GOV-0006's rule for questions is unchanged). When nothing passes, the refusal names the milestone condition that failed first (with the plan file deleted, that it isn't on `main`), then the Goal or Area condition if #N is a sub-issue at all (for example `#N's Goal #3 was opened by productswarm-planner[bot], not @owner`). With neither, it names the `ready` check, as before. `swarm watch` starts `[build]` on an issue that is go any of these ways (#583, #681; see "Builds under a Goal or Area" under `swarm watch`).
 
 ## Spend cap (warn only)
 
@@ -167,6 +173,57 @@ failed in the last 7 days (1):
 
 Like `swarm cost`, it only prints: no cost leaves this machine.
 
+## swarm merges: who merged this week, and its reverts (#710)
+
+```bash
+launcher/swarm merges [--last] [--repo owner/name]
+```
+
+This week's merges into `main`, split into the merger App's and the owner's. That split is M2's done test, and it feeds the daily report's section 4. Each revert is listed with whether it was reviewed. `--last` gives the week before. A week runs from Monday 00:00 to the next Monday 00:00, UTC. For example, `--last` on 2026-11-09:
+
+```
+Merges into main, week of 2026-11-02 to 2026-11-08 (UTC): 169
+  by the merger (productswarm-merger[bot]): 0
+  by the owner (@mattmcalister): 169
+Reverts: 1, 1 unreviewed
+  #646 reverts #640, merged by @mattmcalister: not reviewed (no approval at head by the reviewer or the owner)
+```
+
+- **Who merged** is each PR's `merged_by` on GitHub. The owner is `humans.owner` in `jurisdictions.yml`. Anyone else gets a `by anyone else` line with their logins.
+- **A revert** is a merged PR whose body has GitHub's `Reverts owner/repo#N` line or git's `This reverts commit` line, or whose title starts with `Revert`.
+- **Reviewed** means GOV-0027's test at the merged head: the latest approve or request-changes review on that commit by the reviewer App or the owner is an approval, and neither has changes requested there.
+
+It reads GitHub through one `gh pr list` search, which returns at most 1000 PRs, and it writes nothing.
+
+## swarm daily: M1's streak
+
+```bash
+launcher/swarm daily [--manifest swarm.toml] [--repo owner/name]
+```
+
+For each of the last 10 working days (Monday to Friday, this machine's local time), whether a daily report was posted on `[watch] report_issue`, when, and who started it. Then it gives the streak: the working days in a row, up to now, whose report `[daily]` started (#707). The daily report and M1's done test can count from this instead of by hand.
+
+```
+Daily reports on #249, last 10 working days (local time):
+  Mon 2026-11-09  posted 08:34  started by [daily]
+  Fri 2026-11-06  posted 21:48  started by [daily]
+  Thu 2026-11-05  missed
+  ...
+
+Streak: 2 working days in a row with a report [daily] started.
+M1: day 2 of 5
+
+Goal and Area edits not made by @mattmcalister since Fri 2026-11-06 00:00 (GOV-0031):
+  Mon 2026-11-09 10:00  productswarm-planner[bot] edited the body: Goal #683 M1: Daily report runs without the owner
+```
+
+- **A report** is a comment on the report issue by a swarm App or the owner whose first line starts "Daily report" (bold or not). It counts for the first date on that line, or for the day it was posted if the line has no date. The time shown is when the day's first report was posted.
+- **Who started it** comes from `swarm.db`. If `watch_acted` holds a `[daily]` key `daily:<report issue>:<date>`, `[daily]` started it. The watcher never prunes these keys, unlike run records, which it drops after 7 days. A report posted with no such key was started **by hand**. A day with a `[daily]` start but no report says so.
+- **Today** shows `not yet posted` until its report appears, and doesn't break the streak.
+- `swarm.db` holds no comments, so the reports and their times are read from GitHub, one call for the report issue's comments. Only `report_issue` is needed in `[watch]`: `daily` may be off.
+- **`M1: day N of 5`** goes in the daily report's first line (#709). N is the streak, plus today once a `[daily]` run has started today's report, since that run's report is the day being counted. Before any `[daily]` run today it says today isn't counted; a report started by hand today makes it day 0. At 5 or more it says the done test is met.
+- **Goal and Area edits** (#709, GOV-0031): edits since the start of the previous working day to an open or closed Goal or Area issue the owner opened, by anyone but the owner: body edits, renames, closes and reopens. It searches the repo owner's account, so Goals in any of its repos count, with one GraphQL search per type. The planner lists them under Risks. If an issue's history is too long to read whole, it says to check that one by hand; if the search fails, it says so in one line and the rest still prints.
+
 ## swarm watch: the wake-up loop
 
 ```bash
@@ -180,16 +237,18 @@ This is v2 (GOV-0009; #89 is `--dry-run`, #90 the real starts, #113 adds `[respo
 | Trigger | Starts |
 |---|---|
 | `[review]` An open, non-draft PR whose current head `productswarm-reviewer[bot]` hasn't reviewed (the check in `roles/reviewer.md` step 2) | a reviewer pass: one reviewer session with its usual opener |
-| `[build]` An open, non-question issue with no open PR closing it, that is go: its most recent `ready` label was added by the owner (GOV-0006), or it is go by its `PLAN.md` milestone (GOV-0026, #583) | `builder` on #N, as `swarm launch builder --issue N` would |
+| `[build]` An open, non-question issue with no open PR closing it, that is go: its most recent `ready` label was added by the owner (GOV-0006), or it is go under a Goal or Area (GOV-0031, #681), or until `swarm.MILESTONE_UNTIL` by its milestone (GOV-0026, #583) | `builder` on #N, as `swarm launch builder --issue N` would |
 | `[record]` A `gov:question` whose most recent `gov:ruled` was added by the owner and that needs a record (GOV-0007), with no open PR closing it | `docs` on the question |
 | `[answer]` A `gov:question` whose most recent `ready` was added by the owner, and again when the owner then adds `gov:ruled` (#495) | the role in its "Raised by" field, on the question. If the field starts with `owner` or the owner's login, `planner` (#455) |
 | `[respond]` An open, non-draft PR that `productswarm-builder[bot]` opened, whose latest `productswarm-reviewer[bot]` review at its current head is "changes requested", and whose **Authority** line isn't `fail`, for at most 2 rounds (GOV-0011) | `builder` on the PR, as `swarm launch builder --issue N --pr M` would, where #N is the one issue the PR closes |
-| `[call-in]` A comment on an issue whose most recent `ready` was added by the owner, posted since that label, or on an issue under an open `PLAN.md` milestone (GOV-0029, #594), by a swarm App or the owner, with a line `Call in: <role>, <role>: <why>` (GOV-0023, #520). Off unless `call_ins = true` (see "Call-ins" below) | each named role on the issue, once per call, with a prompt that says who called it in and why, and that it posts one comment |
+| `[call-in]` A comment on an issue whose most recent `ready` was added by the owner, posted since that label, or on an issue under an open Goal or Area (GOV-0031, #681) or an open milestone (GOV-0029, #594), by a swarm App or the owner, with a line `Call in: <role>, <role>: <why>` (GOV-0023, #520). Off unless `call_ins = true` (see "Call-ins" below) | each named role on the issue, once per call, with a prompt that says who called it in and why, and that it posts one comment |
 | `[daily]` A working day (Monday to Friday, this machine's local time) at or after `daily_at`, once per day (GOV-0029, #588). Off unless `daily = true` (see "The daily report" below) | `planner` on the report issue, to write the daily report; on Mondays, the daily report and the Monday check-in |
 | `[ask]` The owner's comment on the report issue with a line `Ask: <role>: <question>` (GOV-0029, #590). Off unless `asks = true` (see "Owner asks" below) | the named role on the report issue, once per comment, with a prompt that quotes the question and says it answers in one comment there |
 | `[research]` A comment by the owner or `productswarm-planner[bot]` on an open issue with a line `Research: <question>` (GOV-0029, #591). Off unless `research = true` (see "Research briefs" below) | `analyst` on that issue, once per comment, with a prompt that quotes the question and says the brief goes in `research/` as a PR that closes the issue |
 
-**Builds by milestone** (#583, GOV-0026). The watcher reads `PLAN.md` from `main` once per check, and the events and comments of every open, non-question issue with a `**Milestone:** M<n>` line. An issue without the owner's `ready` gets a `[build]` when the milestone check under "Two ways an issue is go" passes on that reading: opened by the owner or a swarm App, `M<n>` in `PLAN.md` and not marked done, no `hold` label and no owner comment. Its `**Waits on:**` issues hold the build, as for a `ready` issue, rather than stopping it. So do a live session on the issue, an overlapping GOV record and the GOV-0010 and GOV-0012 limits, as for any `[build]`.
+**Builds under a Goal or Area** (#681, GOV-0031). Once per check the watcher reads every open issue's sub-issue parents (6 levels), their issue types, authors and states, and its blocked-by links, in one GraphQL query per 25 issues. An issue without the owner's `ready` gets a `[build]` when the Goal or Area check under "How an issue is go" passes on that reading, keyed `build:N:G<repo>#<goal>` (plus a `hold` lift, as below) and reading `[build] #N go under Goal #3 (GOV-0031)`. An open blocked-by issue holds the build (`held: waits on #5 (blocked by)`) rather than stopping it, and it holds a `ready` build too, as `**Waits on:**` does (#490). `Call in:` lines count on these issues as on milestone issues, blocked or not.
+
+**Builds by milestone** (#583, GOV-0026), until `swarm.MILESTONE_UNTIL`. The watcher reads the plan file from `main` once per check (deleted by #708, so no milestone build starts after that merges), and the events and comments of every open, non-question issue with a `**Milestone:** M<n>` line. An issue without the owner's `ready` gets a `[build]` when the milestone check under "Two ways an issue is go" passes on that reading: opened by the owner or a swarm App, `M<n>` in the plan file and not marked done, no `hold` label and no owner comment. Its `**Waits on:**` issues hold the build, as for a `ready` issue, rather than stopping it. So do a live session on the issue, an overlapping GOV record and the GOV-0010 and GOV-0012 limits, as for any `[build]`.
 
 - The owner's `ready` is read first: a `ready` issue builds as before, keyed on that label event, whatever its milestone.
 - The trigger reads `[build] #N go by milestone M<n> (GOV-0026)`. Its key is `build:N:M<n>`, plus the id of the latest event removing `hold` if there is one. A change of milestone, or a `hold` veto then its removal, is a new trigger, so it starts at most one new build. An owner comment stays a veto until the owner labels the issue `ready`, which is then a `ready` build.
@@ -360,7 +419,7 @@ review_in_actions = true   # optional; default false
 
 ### Call-ins
 
-GOV-0023 lets a swarm App or the owner bring other roles into a `ready` issue by commenting `Call in: <role>, <role>: <why>` (#520). GOV-0029 adds issues under an open `PLAN.md` milestone (#594). One switch in `[watch]` turns both on:
+GOV-0023 lets a swarm App or the owner bring other roles into a `ready` issue by commenting `Call in: <role>, <role>: <why>` (#520). GOV-0029 adds issues under an open milestone (#594), and GOV-0031 issues under an open Goal or Area (#681). One switch in `[watch]` turns them all on:
 
 ```toml
 [watch]
@@ -371,7 +430,7 @@ call_ins = true   # optional; default false
 - **Who.** The owner, or a login under `identities.agents` in `governance/jurisdictions.yml` (the list GOV-0024 trusts). Anyone else's call is skipped with a reason. `gov:question`s the owner labelled `ready` count too.
 - **Which issues.** Either source opens an issue to calls:
   - **`ready`:** the owner added its most recent `ready`. Calls count from that label.
-  - **A milestone:** an open, non-question issue that is go by its milestone (GOV-0026): opened by a swarm App or the owner, its `**Milestone:** M<n>` names a milestone in `PLAN.md` on `main` that isn't marked done, and no `hold` label. Unlike a milestone build, an open `**Waits on:**` issue doesn't stop it, and nor does an owner comment (so the owner's own `Call in:` counts). GitHub doesn't say when a body gained its milestone line, so calls count from the issue's creation.
+  - **A milestone:** an open, non-question issue that is go by its milestone (GOV-0026): opened by a swarm App or the owner, its `**Milestone:** M<n>` names a milestone in the plan file on `main` that isn't marked done (never, once #708 deleted it), and no `hold` label. Unlike a milestone build, an open `**Waits on:**` issue doesn't stop it, and nor does an owner comment (so the owner's own `Call in:` counts). GitHub doesn't say when a body gained its milestone line, so calls count from the issue's creation.
   - **Both:** the issue is read once, from its creation, so each call starts each role once and the daily limit counts calls from both. Just before the start, the issue is checked again on fresh data: the owner's `ready`, or else its milestone.
 - **Once per call.** Each named role is one trigger, keyed on the comment id and the role, so it starts once. A role naming itself, or a name with no prompt in `roles/`, is skipped with a reason.
 - **At most 2 calls per issue per UTC day**, by when the comment was posted. A call that names no role it could start doesn't count. Later calls that day are skipped with a reason.
@@ -531,6 +590,16 @@ It never stops a session itself (GOV-0008): a headless run ends at its budget or
 
 **`swarm:halt`** on the report issue (`report_issue` in `[watch]`, #249) holds every start at the next check: each trigger waits with code `halted`, said once in the log and listed in `swarm inbox`, `watch-public.json` and the `[watch]` issue. Nothing running is stopped (GOV-0008). It counts only while the most recent `swarm:halt` label event is the owner's, checked as `ready` is (GOV-0006). Anyone else's is ignored, and the log says so once. Take the label off and the next check starts what was held.
 
+## swarm desk: the Desk served live (#664)
+
+`swarm desk [--host 127.0.0.1] [--port 8080] [--repo owner/name]` serves the Desk on the engine host behind Caddy (`ops/vps`), in place of the GitHub Pages publish. The pages are the ones `dashboard/generate.py` has always built, so they show only what GitHub already shows (GOV-0002, GOV-0004).
+
+- **Built from GitHub, nudged by webhooks.** It builds at start, on each change to `~/.productswarm/launcher/nudge` (which `swarm webhooks` touches) and every 10 minutes as a backstop. A nudge only starts a build early: generate.py re-reads everything from GitHub, never from the webhook, so a forged or replayed delivery can at most cause one extra build.
+- **At most one build every 120 seconds** (`desk.MIN_GAP`). A build makes about 25 to 45 REST calls and 20 to 25 GraphQL queries (`dashboard/README.md`), so at 30 builds an hour the desk stays under about 1,400 REST calls, leaving most of the read token's 5,000 for the watcher. A nudge inside the gap builds when it ends, not never.
+- **Swapped whole.** Each build goes into a new `~/.productswarm/launcher/desk/build-<n>/`, and the `desk/live` symlink moves to it only if generate.py wrote the pages and `state.json`. A skipped build (low allowance) or a failed one leaves the last good desk up. The build before the live one is kept for requests still reading it; older ones are deleted. Each build carries precedent's counts forward from the live `state.json` (`generate.py --prev`), not from Pages.
+- **Read-only.** It answers GET and HEAD for `/`, the four pages, `state.json` and `fonts/`, and nothing else: any other path is 404 and any other method 405. There is no form and no POST route until Google login. Before the first build finishes, `/` is 503 with `Retry-After: 60`.
+- generate.py reads GitHub with `gh`, so the desk needs `GH_TOKEN` in its environment and nothing else: on the host, the read-only token.
+
 ## swarm watch --container: each run in its own container (#661)
 
 On the engine host, `swarm watch --serve --container IMAGE` starts each run in its own container instead of a Terminal window. The run is started in the background, and the watcher's log gets its stderr. Everything else about a run is unchanged: the worktree at `origin/main`, the opener, GOV-0012's budget and turn ceiling, GOV-0013's permissions, the Stop hook, the result file and `swarm stop`. Runs you start with `swarm up` or `swarm launch` never use containers.
@@ -621,11 +690,11 @@ It prints one line per open PR: `#N <head sha> merge (standing grant)`, `merge (
 **Standing grant** (GOV-0027, keeping GOV-0022's other conditions), checked in this order:
 
 - the author is `productswarm-builder[bot]` and the base is `main`;
-- it closes exactly one issue in this repo, and that issue is go by its milestone: `swarm.milestone_refusal()`, the check `swarm launch` uses (GOV-0026, #582). The owner's `ready` alone doesn't count, since GOV-0027 says "under an approved milestone", and a `gov:question` never counts;
+- it closes exactly one issue in this repo, and that issue is go under GOV-0031 (GOV-0034, #702): `swarm.go_refusals()`, the check `swarm launch` and `swarm watch` use, so the merger and the watcher agree on what is go. That is the owner's most recent `ready`, or a Task, Bug, Feature or untyped issue under an open Goal or Area the owner opened, with no open blocked-by issue and no veto (and, until `swarm.MILESTONE_UNTIL`, a `**Milestone:**` line as above). A miss names the check that failed, e.g. `not go under GOV-0031: #N isn't a sub-issue of anything`. A `gov:question` never counts;
 - the reviewer approved at the current head (a dismissed approval doesn't count), and no one's latest review requests changes;
 - no line starting `Overstep:` in any PR comment, review or review comment;
 - the newest `tests` check run from GitHub Actions at the current head succeeded;
-- it touches no protected path: `ops/`, `.github/`, `governance/`, `GOVERNANCE.md`, `roles/`, `CLAUDE.md` (anywhere), `swarm.toml`, `PLAN.md` (until it is deleted), or a dependency file (`requirements*.txt`, `pyproject.toml`, `package.json`, lock files and the like). Renamed files count by their old path too;
+- it touches no protected path: `ops/`, `.github/`, `governance/`, `GOVERNANCE.md`, `roles/`, `CLAUDE.md` (anywhere), `swarm.toml`, the retired plan file at the repo root (so a PR can't bring it back unseen), or a dependency file (`requirements*.txt`, `pyproject.toml`, `package.json`, lock files and the like). Renamed files count by their old path too;
 - additions plus deletions are at most `[merger] max_changed_lines`.
 
 **Approved ask** (GOV-0027), for a PR that touches a protected path:
@@ -658,6 +727,8 @@ If the table or either key is missing or bad, the merger is off and every PR is 
 - **`off`**, or a missing or bad `[merger]` table: nothing.
 
 **The shadow bar.** GOV-0027 has the merger post "would merge" for one day or 10 PRs, whichever comes first, before it goes live. `run` reads the `Would merge` comments by `productswarm-merger[bot]` across the repo's issue and PR comments and counts the distinct PRs they are on: once there are 10 PRs, or a day has passed since the first comment, the bar is met. A PR counts once however many heads it was posted for. Until then `live` acts as `shadow` and logs `live acts as shadow: ...` with the count. If the comments can't be read, `live` also acts as `shadow`. Comments by anyone else don't count, and don't stop the merger posting its own.
+
+**The standing grant's own shadow** (GOV-0034). Reading GOV-0031's go is new, so the standing grant gets a second bar of the same shape that counts only `Would merge (standing grant)` comments by the merger App: 10 distinct PRs, or a day since the first. Until it is met, `live` acts as `shadow` for standing grants only and logs `live acts as shadow for the standing grant (GOV-0034): ...`; approved asks still merge once GOV-0027's bar is met. The run's last line then reads `N PR(s) merged, M would merge`.
 
 Every comment ends `-- merger`. "Once per head" means a comment of that kind from the merger App naming that SHA is already on the PR; a new head gets a new one.
 

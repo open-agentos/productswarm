@@ -757,7 +757,9 @@ class LaunchTest(Base):
         self.assertEqual(o, "You are the planner for productswarm. Read CLAUDE.md, PRODUCT.md and "
                             "roles/planner.md, then write the daily report on issue #600, as "
                             "roles/planner.md says. swarm watch started this run from its [daily] "
-                            "trigger (GOV-0029); post on #600 and stop.")
+                            "trigger (GOV-0029). Run launcher/swarm daily first: its \"M1: day N "
+                            "of 5\" goes in the report's first line and its Goal and Area edits "
+                            "under Risks (#709). Post on #600 and stop.")
         self.assertIn("write the daily report and the Monday check-in on issue #600",
                       swarm.opener("planner", 600, daily="the daily report and the Monday check-in"))
 
@@ -921,6 +923,9 @@ class GoTest(unittest.TestCase):
     def setUp(self):
         self.plan, self.states, self.comments = PLAN, {}, []
         self.reads = []
+        # GOV-0031's week for milestone lines (swarm.MILESTONE_UNTIL): read here as still open,
+        # since these tests use the real clock (#681).
+        self.enterContext(mock.patch.object(swarm, "MILESTONE_UNTIL", swarm.MILESTONE_UNTIL.replace(year=2100)))
 
     def reader(self):
         def plan():
@@ -1005,10 +1010,6 @@ class GoTest(unittest.TestCase):
                            ("**Milestone:** no milestone yet\n", None), (None, None),
                            ("See `**Milestone:** M1` in prose.\n", None)]:
             self.assertEqual(swarm.milestone_of(body), want, body)
-
-    def test_plan_on_main_has_four_open_milestones(self):
-        text = (Path(__file__).resolve().parent.parent / "PLAN.md").read_text()
-        self.assertEqual(swarm.plan_milestones(text), {1: False, 2: False, 3: False, 4: False})
 
     def test_agent_logins_from_jurisdictions(self):
         logins = swarm.agent_logins()

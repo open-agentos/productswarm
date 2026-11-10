@@ -17,7 +17,7 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
 
 Builds four pages in one look (layout.py), each headed by a red LIVE mark, the build time
 and the owner's last act (#402), and copies the self-hosted fonts beside them:
-  - index.html, the desk: on the floor (floor.py), the wire (wire.py, #405), the committee desk while one is open (#404),
+  - index.html, the desk: on the floor (floor.py), grants in use (grants.py, #713), the wire (wire.py, #405), the committee desk while one is open (#404),
     what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
     committee (#409), and a pointer to the other pages (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
@@ -50,10 +50,13 @@ import committees
 import floor
 import ghql
 import governance
+import grants
 import layout
+import plan
 import precedent
 import progress
 import questions
+import report
 import reviewer_runs
 import spend
 import trends
@@ -126,15 +129,18 @@ def tracking_comments(repo: str, numbers: list[int]) -> dict[int, list[dict]]:
 def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
           with_actions: bool = False, with_committees: bool = False,
           with_questions: bool = False, with_precedent: bool = False,
-          with_activity: bool = False) -> dict:
+          with_activity: bool = False, with_grants: bool = False,
+          with_plan: bool = False, prev: Path | None = None) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
     also reads the v3 progress section's data (progress.py), `with_actions` the Actions
     reviewer section's (reviewer_runs.py), `with_committees` the committee Discussions
     (committees.py, GraphQL), `with_questions` the gov:question history the desk's trends
     read (questions.py, REST, search and GraphQL), and `with_precedent` the GOV citations
-    (precedent.py), and `with_activity` the repo's events for the header (activity.py). Only
-    the page shows them, so swarm's snapshot() and the digest leave all six off and make none
-    of those calls; main() asks for them."""
+    (precedent.py), `with_activity` the repo's events for the header (activity.py), and
+    `with_plan` the desk's plan and today's report (plan.py, report.py, #712), and `with_grants`
+    the merger's comments for grants in use (grants.py, #713). Only the page shows them, so
+    swarm's snapshot() and the digest leave all eight off and make none of those calls;
+    main() asks for them."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
     items: dict[int, dict] = {}   # issues and PRs, for precedent.py's bodies
@@ -164,20 +170,43 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
             "actions": reviewer_runs.fetch(repo, now, reviews) if with_actions else None,
             "committees": committees.fetch(repo, gh_items, gh_json) if with_committees else None,
             "questions": questions.fetch(repo, now, days, gh_items) if with_questions else None,
-            "precedent": fetch_precedent(repo, now, days, list(items.values()))
+            "precedent": fetch_precedent(repo, now, days, list(items.values()), prev)
                          if with_precedent else None,
             "activity": activity.fetch(repo, gh_json, committees.owner_login(), wire.midnight(now))
-                        if with_activity else None}
+                        if with_activity else None,
+            "grants": grants.fetch(repo, now, gh_items, gh_json,
+                                   {p["number"]: p.get("title") or "" for p in prs or []})
+                      if with_grants else None,
+            "plan": plan.fetch(repo) if with_plan else None,
+            "report": fetch_report(repo, now) if with_plan else None}
 
 
-def fetch_precedent(repo: str, now: dt.datetime, days: int, items: list[dict]) -> dict:
+def fetch_report(repo: str, now: dt.datetime) -> dict:
+    """report.py's data: swarm.toml's report issue and daily_at, and the issue's recent comments."""
+    issue, daily_at = report.config()
+    return {"issue": issue, "daily_at": daily_at, "comments": report.fetch(repo, issue, now, gh_items)}
+
+
+def fetch_precedent(repo: str, now: dt.datetime, days: int, items: list[dict],
+                    prev: Path | None = None) -> dict:
     """precedent.py's data, leaving out tracking issues and the digest issue, and carrying
-    counts forward from the last published state.json."""
+    counts forward from the last published state.json: the Pages copy, or with `prev` (the
+    hosted desk, #664) that file on disk."""
     import digest   # here, not at the top: digest imports this module
     skip = ({t["issue"] for t in tracking_issues(items)}
             | {i["number"] for i in items if (i.get("body") or "").lstrip().startswith(digest.MARKER)})
     return precedent.fetch(repo, now, days, items, skip, gh_items, ghql, load_owner(),
-                           precedent.published(repo))
+                           precedent.published(repo) if prev is None else read_state(prev))
+
+
+def read_state(path: Path) -> dict | None:
+    """A state.json on disk, or None if it is missing or unreadable: the build then reads
+    precedent's whole window again."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def load_owner() -> str | None:
@@ -449,6 +478,12 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
          "wire": wire.build(data.get("activity"), data.get("questions"), data.get("reviews"), comms,
                             committees.records(), owner, repo, now)   # #405: today's governance events
                  if data.get("activity") is not None or data.get("questions") is not None else None,
+         "grants": grants.build(data["grants"], now)   # #713: the merger's calls
+                   if data.get("grants") is not None else None,
+         "report": report.build(data["report"]["comments"], now, data["report"]["issue"],   # #712
+                                data["report"]["daily_at"]) if data.get("report") else None,
+         # with_plan reads both; the plan's own None means its read failed, which the panel says
+         "plan": plan.build(data.get("plan"), owner, repo) if data.get("report") else None,
          "spend": {"per_day": per_day, "today": per_day[today],
                    "unpriced": [s for s in sessions if s["cost"] is None]}}
     m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
@@ -657,13 +692,17 @@ def rfc3339(t: dt.datetime) -> str:
 
 
 def desk_panels(m: dict) -> dict[str, str]:
-    """The desk's panels by name, in page order: on the floor (#403), the wire (#405), the
+    """The desk's panels by name, in page order: today's report and the plan (#712), on the
+    floor (#403) and grants in use (#713), as #711 lays them out, then the wire (#405), the
     committee desk while a committee is open (#404), what the numbers say (#406), how the
     questions went (#407), precedent in use (#408) and a card per past committee (#409). Each is drawn into a
     `data-panel` box that the live refresh redraws from state.json (#411), so an empty one
     still gets its box. #397's later panels join here."""
     repo = m["repo"]
-    return {"floor": floor.render(m.get("floor"), repo, m.get("watcher")),
+    return {"report": report.render(m.get("report"), repo),
+            "plan": plan.render(m.get("plan")),
+            "floor": floor.render(m.get("floor"), repo, m.get("watcher")),
+            "grants": grants.render(m.get("grants"), repo),
             "wire": wire.render(m.get("wire")),
             "committee_desk": committees.desk(m.get("committees"), repo),
             "trends": trends.render(m.get("trends")),
@@ -792,8 +831,10 @@ def default_repo() -> str | None:
 # rebuild made 23 REST calls and 19 GraphQL queries (before #392: 258 and 9), and the digest
 # 5 and 8. The workflow token's allowance is 1,000 an hour of each, shared with the digest.
 # precedent.py (#408) adds about 20 REST calls on a full read and 5 GraphQL queries, and the
-# header's repo events (#402, activity.py) 1 to 3 REST calls.
-PAGE_NEEDS = {"core": 100, "graphql": 55}
+# header's repo events (#402, activity.py) 1 to 3 REST calls. The desk's report panel (#712)
+# adds 1 or 2 REST calls and its plan panel 3 or 4 GraphQL queries. Grants in use (#713,
+# grants.py) adds 1 or 2, plus one per merged or closed PR the merger called in the last 24 hours.
+PAGE_NEEDS = {"core": 120, "graphql": 60}
 DIGEST_NEEDS = {"core": 30, "graphql": 30}
 SPACING = dt.timedelta(minutes=5)       # a nudged rebuild waits this long after a published one
 WORKFLOW = "dashboard.yml"
@@ -866,6 +907,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--days", type=int, default=DAYS, help="include sessions closed in the last N days")
     ap.add_argument("--idle-minutes", type=int, default=IDLE_MINUTES,
                     help="a live session is idle after this long without an event")
+    ap.add_argument("--prev", help="carry precedent counts from this state.json, not the Pages "
+                                   "copy (the hosted desk, #664)")
     args = ap.parse_args(argv)
 
     repo = args.repo or default_repo()
@@ -881,7 +924,8 @@ def main(argv: list[str]) -> int:
     try:
         data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
                      with_committees=True, with_questions=True, with_precedent=True,
-                     with_activity=True)
+                     with_activity=True, with_grants=True, with_plan=True,
+                     prev=Path(args.prev) if args.prev else None)
         data["records"] = precedent.load_records()
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)

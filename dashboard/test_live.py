@@ -16,6 +16,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import committees  # noqa: E402
 import floor  # noqa: E402
+import grants  # noqa: E402
 import generate as g  # noqa: E402
 import live  # noqa: E402
 import precedent  # noqa: E402
@@ -97,12 +98,14 @@ class EveryPanelTest(unittest.TestCase):
                    mock.patch.object(committees, "desk", checked(committees.desk)),
                    mock.patch.object(committees, "past", checked(committees.past)),
                    mock.patch.object(trends, "render", checked(trends.render)),
-                   mock.patch.object(precedent, "render", checked(precedent.render))]
+                   mock.patch.object(precedent, "render", checked(precedent.render)),
+                   mock.patch.object(grants, "render", checked(grants.render))]
         for p in patches:
             p.start()
         try:
             suite = unittest.defaultTestLoader.loadTestsFromNames(
-                ["test_floor", "test_committees", "test_trends", "test_precedent", "test_generate"])
+                ["test_floor", "test_committees", "test_trends", "test_precedent", "test_generate",
+                 "test_grants"])
             result = unittest.TestResult()
             suite.run(result)
         finally:
