@@ -62,7 +62,7 @@ research = true
 call_ins = true
 
 [merger] 
-mode = "shadow"
+mode = "live"
 max_changed_lines = 500
 
 [[session]]
