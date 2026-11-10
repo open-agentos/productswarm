@@ -87,7 +87,9 @@ class FakeGit:
         sub = args[2] if args[:1] == ["-C"] else args[0]
         if sub == self.fail:
             return 1, f"fatal: {sub} failed"
-        if args[2:4] == ["worktree", "add"]:
+        if sub == "clone":                    # #661: a container run's clone has a .git directory
+            (Path(args[-1]) / ".git").mkdir(parents=True)
+        elif args[2:4] == ["worktree", "add"]:
             Path(args[-2]).mkdir(parents=True)
             (Path(args[-2]) / ".git").write_text("gitdir: x\n")
         elif args[2:4] == ["worktree", "remove"]:
@@ -313,15 +315,16 @@ class CommandTest(Base):
         self.assertTrue(before.endswith(f' && tok=$({wt}/ops/swarm-token builder) && GH_TOKEN="$tok"'))
         argv, redirect = rest.split(" >| ")
         self.assertEqual(shlex.split(redirect), [str(result)])
-        uid, gid, home, projects = os.getuid(), os.getgid(), self.home, self.home / "claude" / "projects"
+        uid, gid, rh = os.getuid(), os.getgid(), self.home / "runs" / e.session_id
         self.assertEqual(shlex.split(argv), [
             "--rm", "--init", "--name", f"swarm-{e.session_id}", "--user", f"{uid}:{gid}",
             "--tmpfs", f"/home/run:uid={uid},gid={gid},mode=0700",
             "-e", "GH_TOKEN", "-e", "ANTHROPIC_API_KEY", "-e", "SWARM_ROLE=builder",
-            "-e", "HOME=/home/run", "-e", f"PRODUCTSWARM_HOME={home}",
-            "-v", f"{wt}:{wt}", "-v", f"{self.root}/.git:{self.root}/.git",
-            "-v", f"{home}:{home}", "-v", f"{home}/runtime:{home}/runtime:ro",
-            "-v", f"{projects}:/home/run/.claude/projects",
+            "-e", "HOME=/home/run", "-e", f"PRODUCTSWARM_HOME={rh}",
+            "-v", f"{wt}:{wt}", "-v", f"{rh}:{rh}",
+            "-v", f"{rh}/launcher/sessions.json:{rh}/launcher/sessions.json:ro",
+            "-v", f"{self.home}/runtime:{self.home}/runtime:ro",
+            "-v", f"{rh}/claude/projects:/home/run/.claude/projects",
             "-w", str(wt), self.IMAGE,
             "--model", "claude-opus-5-5", "--session-id", e.session_id,
             "-p", swarm.opener("builder", 49), *swarm.headless_flags(15.0, 200)])
@@ -343,10 +346,32 @@ class CommandTest(Base):
                 self.l.use_container(bad)
         self.assertIsNone(self.l.container)
 
-    def test_use_container_runs_in_the_background_and_reads_transcripts_from_home(self):
+    def test_a_container_run_never_mounts_the_checkouts_git_or_the_shared_home(self):
+        # #661, the owner on #679: no host .git (a planted hook would run on the host), and
+        # of PRODUCTSWARM_HOME only the run's own home read-write, the rest left out.
+        import shlex
+        self.l.use_container(self.IMAGE)
+        e = self.watch_entry()
+        argv = shlex.split(self.l.command(e)[len("exec /bin/bash -c "):])[0]
+        args = shlex.split(argv.split(" exec docker run ", 1)[1].split(" >| ")[0])
+        mounts = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
+        sources = [m.split(":")[0] for m in mounts]
+        rh = self.home / "runs" / e.session_id
+        self.assertFalse([x for x in sources if x.startswith(f"{self.root}/.git")], sources)
+        self.assertNotIn(str(self.home), sources)
+        self.assertNotIn(str(self.home / "launcher"), sources)
+        writable = [m.split(":")[0] for m in mounts if not m.endswith(":ro")]
+        self.assertEqual(writable, [str(self.root / ".worktrees" / e.session_id), str(rh),
+                                    f"{rh}/claude/projects"])
+
+    def test_use_container_runs_in_the_background_and_reads_transcripts_from_the_run_home(self):
         self.l.use_container(self.IMAGE)
         self.assertIs(self.l.run, swarm.run_detached)
-        self.assertEqual(self.l.claude_dir, self.home / "claude")
+        sid = "0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41"
+        t = self.home / "runs" / sid / "claude" / "projects" / "-x" / f"{sid}.jsonl"
+        t.parent.mkdir(parents=True)
+        t.write_text("{}\n")
+        self.assertEqual(self.l.transcript(sid), t)
 
     def test_applescript_string_escapes(self):
         self.assertEqual(swarm.applescript_string('a "b" \\c'), '"a \\"b\\" \\\\c"')
@@ -1038,7 +1063,86 @@ class LaunchHelpersTest(unittest.TestCase):
                          "docs-issue-7-3")
 
 
-@unittest.skipUnless(os.path.exists("/bin/bash"), "needs /bin/bash")
+class ContainerCloneTest(Base):
+    """#661, the owner on #679: a container run gets its own clone and home, and the host
+    never runs git in the clone, which the run could have rigged."""
+    IMAGE = "productswarm-run@sha256:" + "a" * 64
+
+    def setUp(self):
+        super().setUp()
+        self.docker_calls: list[list[str]] = []
+        self.docker_rc = 0
+        self.l.docker = lambda args: (self.docker_calls.append(args), (self.docker_rc, ""))[1]
+        self.l.hook = str(self.home / "runtime" / "heartbeat" / "hook.py")   # skip the refresh
+        self.l.use_container(self.IMAGE)
+
+    def entry(self, by="watch"):
+        return swarm.Started("builder-issue-49", "builder", "claude-opus-5-5",
+                             "0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41", 0, issue=49, by=by,
+                             budget_usd=15.0, max_turns=200)
+
+    def test_prepare_clones_at_origin_main_and_points_origin_at_github(self):
+        e = self.entry()
+        self.l.prepare(e)
+        wt = str(self.root / ".worktrees" / e.session_id)
+        self.assertEqual(self.git.calls, [
+            ["-C", str(self.root), "remote", "get-url", "origin"],
+            ["clone", "-q", "--no-hardlinks", "--no-checkout", str(self.root), wt],
+            ["-C", wt, "fetch", "-q", str(self.root), "+refs/remotes/origin/main:refs/remotes/origin/main"],
+            ["-C", wt, "checkout", "-q", "--detach", "origin/main"],
+            ["-C", wt, "remote", "set-url", "origin", ""]])
+        self.assertNotIn("worktree add", self.git.subs())
+
+    def test_prepare_gives_the_run_a_home_holding_only_its_own_entry(self):
+        e = self.entry()
+        self.l.prepare(e)
+        rh = self.home / "runs" / e.session_id
+        self.assertTrue((rh / "claude" / "projects").is_dir())
+        entries = json.loads((rh / "launcher" / "sessions.json").read_text())
+        self.assertEqual([swarm.Started.from_dict(d) for d in entries], [e])
+
+    def test_runs_not_started_by_the_watcher_keep_worktrees(self):
+        self.l.prepare(self.entry(by=None))
+        self.assertIn("worktree add", self.git.subs())
+        self.assertFalse((self.home / "runs").exists())
+
+    def clone(self, sid="11111111-2222-4333-8444-555555555555"):
+        wt = self.root / ".worktrees" / sid
+        (wt / ".git").mkdir(parents=True)
+        return wt
+
+    def test_tidy_checks_a_clone_inside_a_container_and_removes_it_if_clean(self):
+        wt = self.clone()
+        self.assertEqual(self.l.tidy([]), [])
+        self.assertFalse(wt.exists())
+        (args,) = self.docker_calls
+        self.assertEqual(args[:4], ["run", "--rm", "--network", "none"])
+        self.assertIn(f"{wt}:{wt}:ro", args)
+        self.assertIn(self.IMAGE, args)
+        self.assertFalse([c for c in self.git.calls if str(wt) in c], self.git.calls)
+
+    def test_tidy_keeps_a_clone_with_unpushed_work(self):
+        wt = self.clone()
+        self.docker_rc = 1
+        self.assertEqual(self.l.tidy([]), [wt])
+        self.assertTrue(wt.exists())
+
+    def test_without_an_image_tidy_keeps_a_clone_and_runs_nothing_in_it(self):
+        wt = self.clone()
+        self.l.container = None
+        self.assertEqual(self.l.tidy([]), [wt])
+        self.assertEqual(self.docker_calls, [])
+        self.assertFalse([c for c in self.git.calls if str(wt) in c], self.git.calls)
+
+    def test_heartbeat_stopped_reads_the_run_home(self):
+        sid = "11111111-2222-4333-8444-555555555555"
+        st = self.home / "runs" / sid / "state" / f"{sid}.json"
+        st.parent.mkdir(parents=True)
+        st.write_text(json.dumps({"stopped": True}))
+        self.assertTrue(self.l.heartbeat_stopped(sid))
+
+
+@unittest.skipUnless(os.path.exists("/bin/sh"), "needs /bin/sh")
 class RunDetachedTest(unittest.TestCase):
     def test_returns_at_once_and_the_command_runs_on_in_the_background(self):
         # #661: the engine host's runner. It must not wait for the run, and the run must
@@ -1057,6 +1161,7 @@ class RunDetachedTest(unittest.TestCase):
             self.assertEqual(out.read_text(), "done\n")
 
 
+@unittest.skipUnless(os.path.exists("/bin/bash"), "needs /bin/bash")
 class RealShellTest(unittest.TestCase):
     """Runs the real window command through a shell, with a stand-in ops/swarm-session
     that just sleeps: checks the pid file names the process that carries --session-id,
