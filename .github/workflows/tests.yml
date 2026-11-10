@@ -7,11 +7,12 @@ name: Tests
 on:
   pull_request:
     branches: [main]
+  merge_group:          # a merge queue reruns required checks on its group (#663)
 
 permissions: {}
 
 concurrency:
-  group: tests-${{ github.event.pull_request.number }}
+  group: tests-${{ github.event.pull_request.number || github.ref }}   # a queue run has no PR number
   cancel-in-progress: true
 
 jobs:

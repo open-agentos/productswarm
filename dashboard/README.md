@@ -91,6 +91,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `precedent` | [precedent in use](#precedent-in-use): `version`, `from` (the window's first day), `counts` (record → day → `n`, `agents`, `owner`, `reviewer`), `totals`, `findings`, `records` (`id`, `date`, `status`) and `read` (where this build started reading, what it carried from, and its calls). The next build carries `counts` forward |
 | `wire` | [the wire](#the-wire): `day`, `events` (whether the repo's events could be read) and `items`, newest first, each with `kind` (`opened`, `ruled`, `lapsed`, `record`, `red` or `convened`), `time`, `number`, `text` and `link`, plus `record` on a `record` item; `[]` items on a quiet day |
 | `past_committees` | each ended committee's card: `discussion`, `url`, `question`, `question_title`, `question_url`, `record` (`id`, `url`, or null), `summary` (the INDEX.md ruling, or null), `consensus` (`text`, `consensus`, `dissent`), `rounds_used`, `max_rounds`, `stopped_early`, `models`, `diversity_met`, `minutes`, `swing` and `seats`; `[]` when none has ended |
+| `grants` | [grants in use](#grants-in-use) (#713): `mode` (`off`, `shadow`, `live`, or null if `swarm.toml` couldn't be read), `read` (whether the merger's comments could be read) and `calls`, newest first, one per PR: `number`, `title` (null if it couldn't be read), `group` (`merged`, `would` or `left`), `reason` (the merger's words), `time` and `link` (the comment) |
 | `desk` | what the [live refresh](#live-refresh) draws: the desk's `mast` (masthead) and each panel (`floor`, `committee_desk`, `trends`, `precedent`, `past_committees`) as a node tree, or `null` for a panel that can't be one |
 
 It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
@@ -108,6 +109,106 @@ With JavaScript on, an open desk redraws itself from `state.json` every 15 secon
 - **JavaScript off.** Nothing changes: the page is complete as built, and the meta refresh stays.
 
 It adds **no API calls** per build: browser fetches hit Pages, not the API, and need no token.
+
+## Plan, report and grants: layout
+
+This is the spec for the desk's three M3 panels (#711, under #685). #712 built the report and plan panels (`report.py`, `plan.py`); #713 builds the grants panel.
+
+Two notes on #712's build. "Today" is the build machine's local time, as for `[daily]`, so a desk built in Actions needs `TZ` set to the owner's timezone. The plan panel's go is GOV-0031's scope and the owner's `ready`; it doesn't read GOV-0026's `**Milestone:**` lines, which stop counting on 2026-11-16.
+
+The owner opens the desk to answer three questions without opening Claude Code: *did today's report land, and what does it ask me?*, *where does the plan stand?* and *what did agents do on my authority?* The panels answer them in that order, above everything else on the desk:
+
+| # | Panel (`data-panel`) | Heading | Why here |
+|---|---|---|---|
+| 1 | `report` | Today's report | Its asks are the only thing on the desk that waits on the owner. |
+| 2 | `plan` | Plan | The state of every Goal and Area, and why any Task isn't moving. |
+| 3 | `floor` | On the floor | Who is on what (#403, unchanged). |
+| 4 | `grants` | Grants in use | What the merger did or would do without the owner's click. |
+
+The wire, the committee desk and the rest follow as today. Each new panel joins `generate.desk_panels()` in that order, so it gets its `data-panel` box and [live refresh](#live-refresh), and its markup stays inside `live.py`'s allow lists. Each fits a phone's width with no sideways scroll, and owner amber marks only what waits on the owner (the asks, and "Left for you").
+
+### Today's report
+
+**What counts.** The newest comment on `[watch] report_issue` (`swarm.toml`, #249 today) by `productswarm-planner[bot]` whose body starts `**Daily report`. A comment starting `**Monday check-in` is the check-in. "Today" and the 10:00 cut-off are in the owner's local time, the timezone `[daily]` uses (`daily_at`). Working days are Mon–Fri, as for `[daily]`.
+
+**What it shows**, top to bottom:
+
+1. The report's first line, its bold state sentence, as written, linking the comment, with `posted 08:34` in Plex Mono.
+2. **Asks**: the numbered items under the report's `Asks` heading, at most 5, in amber. Each is its bold lead-in (e.g. "#655 (GOV-0032)") and the rest of its first sentence, cut to about 120 characters, with a link to the first `#N` in it, or to the report if it has none.
+3. On a Monday, one line: "Monday check-in: " and the check-in's first line, linking it.
+
+**States** (exact words):
+
+| When | Shows |
+|---|---|
+| Today's report is posted | as above |
+| Working day, before 10:00, none yet | "Today's report is due at 08:30." (from `daily_at`), then the last report's first line, labelled "Last report, Fri 11-06:" |
+| Working day, 10:00 or later, none yet | "**No report yet today.** It was due at 08:30." in amber, then the last report's first line as above |
+| Saturday or Sunday | "No report on weekends." then the last report's first line as above |
+| No report at all in the comments read | "No daily report found on #249." |
+| A report with no `Asks` heading, or none it can read | "Asks: couldn't read them; open the report." linking it |
+| The report issue couldn't be read | "Couldn't read #249; the report may be there." |
+
+`[daily]` being off (`daily = false`) changes nothing here: the panel shows what was posted, not who started it.
+
+**API calls:** 1 or 2 REST calls, the report issue's comments since 4 days ago (`?since=`), enough to reach Friday's report on a Monday or Tuesday.
+
+### Plan
+
+**What counts.** The plan is the open Goal and Area issues the owner (`identities.humans.owner`) opened (GOV-0031). A Goal or Area opened by anyone else isn't listed as plan; it gets one quiet line at the panel's foot: "Not plan: #N, a Goal opened by productswarm-planner[bot] (GOV-0031)."
+
+**What it shows.** One block per Goal or Area, Goals first, then Areas, each by issue number:
+
+- **Its line:** `M3` (or whatever the title opens with) in Plex Mono, the title, linking the issue, then "4 open, 2 done" counting its direct sub-issues.
+- **Its open sub-issues**, one line each, by number: the number and title, linked, and a status:
+  - **go** (agents blue): go under GOV-0031 or by the owner's `ready`;
+  - **waiting on #711** (ink): its only reasons are open blocked-by issues;
+  - **not go:** and the reason (amber), in the words of `swarm.scope_refusal()`, so the desk and `swarm watch` say the same thing, e.g. "not go: @mattmcalister commented on #712: that's a veto until @mattmcalister labels it `ready`";
+  - **PR #714** after the status, when an open PR closes it.
+- **Sub-issues of a sub-issue** (a mission's Tasks) are indented one level under it, the same way. Deeper levels show only a count: "and 3 more below".
+- Closed sub-issues aren't listed; "2 done" carries them.
+
+**States:**
+
+| When | Shows |
+|---|---|
+| No open Goal or Area by the owner | "No plan: the owner has no open Goal or Area." |
+| A Goal with no open sub-issues | its line, then "Nothing open under it." |
+| A sub-issue's links couldn't be read | "status unknown: couldn't read its links" in place of its status |
+| The Goals couldn't be read | "Couldn't read the plan from GitHub." |
+
+**API calls:** GraphQL only, through `ghql.py`: one search for open Goal and Area issues in the repo, then each Goal's sub-issues two levels deep with each one's blocked-by, author, type, labels and closing PRs, batched about 20 to a query. About 2 to 4 queries for 5 Goals. Any repo of the org (GOV-0031) is left for later: today every Goal is in this repo.
+
+### Grants in use
+
+**What counts.** The merger's comments (`productswarm-merger[bot]`) on PRs in the last 24 hours, one line per PR, newest first, its latest call winning:
+
+| Comment starts | Group | Line |
+|---|---|---|
+| `Merged under` | Merged | "#701 merged under standing grant, 14:02" |
+| `Would merge` | Would merge (shadow) | "#701 would merge (standing grant), 14:02" |
+| `Left for the owner` | Left for you (amber) | "#653 left for you: not opened by productswarm-builder[bot], 09:15" |
+
+Each line links the comment; the PR number links the PR, and the PR's title follows the number. The reason is the merger's own words after the colon, without the sha or `-- merger`.
+
+The panel opens with one line for the merger's mode, from `[merger] mode` in `swarm.toml` on `main`: "The merger is in shadow: it says what it would merge and merges nothing." / "The merger is live." / "The merger is off."
+
+**States:**
+
+| When | Shows |
+|---|---|
+| No merger comments in 24 hours | the mode line, then "No merger calls in the last 24 hours." |
+| The comments couldn't be read | "Couldn't read the merger's calls." |
+
+Other uses of delegated authority (call-ins, `Research:`, agents' `decide`s) stay in the daily report's section 4; this panel shows only the merger.
+
+**Built** in `grants.py` (#713). It parses the three bodies `launcher/merger.py` writes (a test checks them against the merger's own `would_body`, `merged_body` and `left_body`), keeps comments on PRs only, and checks each comment's own time, since `?since=` filters on the last update. Times are UTC, like the wire's. The mode line reads `[merger]` with the merger's own `load_switch`, so a bad table shows "The merger is off." as the merger treats it; if `swarm.toml` can't be read it says "The merger's mode couldn't be read from swarm.toml." Until #712 adds the report and plan panels, the grants panel sits right after the floor.
+
+**API calls:** 1 or 2 REST calls, the repo's issue comments since 24 hours ago (`repos/{repo}/issues/comments?since=`), filtered to the merger. A PR's title comes from the open PRs the build already reads; a merged or closed PR's title costs one more REST call.
+
+### What each build needs
+
+The three panels add about 3 REST calls (plus one per merged or closed PR in the grants panel) and 2 to 4 GraphQL queries. #712 and #713 raise `PAGE_NEEDS` to match, and add their data to `state.json` under `report`, `plan` and `grants`.
 
 ## On the floor
 

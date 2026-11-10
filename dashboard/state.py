@@ -13,11 +13,14 @@ from pathlib import Path
 
 import activity
 import committees
+import grants
 import floor as floor_mod
 import generate
 import layout
 import live
+import plan
 import precedent
+import report
 import wire
 
 SCHEMA = 1
@@ -125,6 +128,9 @@ def state(m: dict) -> dict:
         "questions_went": m.get("questions_went"),   # #407: counts, and each question's categories
         "precedent": precedent.state(m.get("precedent")),   # #408; the next build carries it forward
         "owner_last_acted": activity.state(m.get("owner_last_acted")),   # #402: the header's line
-        "wire": wire.state(m.get("wire")),   # #405: today's governance events, newest first
+        "wire": wire.state(m.get("wire")),
+        "report": report.state(m.get("report")),   # #712: today's report, its asks, the check-in
+        "plan": plan.state(m.get("plan")),   # #712: the owner's Goals and Areas, each sub-issue's go   # #405: today's governance events, newest first
+        "grants": grants.state(m.get("grants")),   # #713: the merger's calls in the last 24 hours
         "desk": desk(m),   # #411: what the desk's live refresh draws
     })
