@@ -179,7 +179,7 @@ Like `swarm cost`, it only prints: no cost leaves this machine.
 launcher/swarm spent
 ```
 
-`swarm watch` adds every run it started to a `runs` table in `swarm.db` once the run has ended: its session id, kind, ref, issue, start and end times, ending and `total_cost_usd`. A run's issue is its trigger's issue, or for a review or respond run, the issue its PR closes. Unlike the watch state, which drops runs after 7 days, the ledger keeps them all. A run is added once, by session id, so a check that runs again changes nothing.
+`swarm watch` adds every run it started to a `runs` table in `swarm.db` once the run has ended: its session id, kind, ref, issue, start and end times, ending and `total_cost_usd`. A run's issue is its trigger's issue, or for a review or respond run, the issue its PR closes (the first one GitHub lists, if it closes more than one). If the PR has merged or closed by the time the run is added, the watcher reads that issue from GitHub on a later check, so the run still counts toward its Mission. Unlike the watch state, which drops runs after 7 days, the ledger keeps them all. A run is added once, by session id, so a check that runs again changes nothing.
 
 On each check the watcher also reads the Mission, Goal and Area issues above up to 25 ledger issues it hasn't placed yet, from the same sub-issue links GOV-0031's go check reads (from GitHub, never from a webhook's payload). If GitHub can't be read, the run is still recorded and its scopes are read on a later check.
 

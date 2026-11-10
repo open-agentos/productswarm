@@ -1516,6 +1516,17 @@ def gh_prs(repo: str) -> list[dict]:
                      "number,state,mergedAt,closingIssuesReferences") or []
 
 
+def gh_pr_closes(repo: str, numbers: list[int]) -> dict[int, list[int]]:
+    """The issues each PR closes, in GitHub's order, for a PR in any state: one GraphQL
+    query per 25 PRs. A number GitHub has no PR for closes nothing. Raises if GitHub can't
+    be read. For the runs ledger (#662)."""
+    swarm.dashboard()
+    import ghql
+    field = "p%d: pullRequest(number: %d) { closingIssuesReferences(first: 10) { nodes { number } } }"
+    return {n: [c["number"] for c in ((x or {}).get("closingIssuesReferences") or {}).get("nodes") or []]
+            for n, x in ghql.batched(repo, numbers, field, 25).items()}
+
+
 def served_pr(r: dict, prs: list[dict]) -> int | None:
     """The PR a run ended up serving: the trigger's PR for [review] and [respond]; for a
     run on an issue ([build], [record], [answer]), the PR that closes it, merged first,
@@ -1615,6 +1626,7 @@ class Watch:
     get_comments: Callable[[str, int], list[dict]] = gh_comments    # the report issue's, for [ask] (#590)
     get_recent: Callable[[str, dt.datetime], list[dict]] = gh_recent_comments   # for [research] (#591)
     get_scopes: Callable[[str, list[int]], dict] | None = None   # the runs ledger's scopes (#662); None: swarm.gh_scopes
+    get_pr_closes: Callable[[str, list[int]], dict] | None = None   # its PRs' issues (#662); None: gh_pr_closes
     serve: bool = False               # --serve (#660): a webhook nudge starts a check early
     clock: Callable[[], float] = time.monotonic
     nudged: int | None = None         # the nudge file's mtime when the last check started
@@ -2057,15 +2069,23 @@ class Watch:
         return kept
 
     def record_ledger(self, runs: dict, w: World) -> None:
-        """Add every ended run to the runs ledger (#662), then read the Mission, Goal and
-        Area above up to ledger.SCOPES_PER_TICK unscoped issues from GitHub. Adding is
-        idempotent, so a run already in the ledger is left alone. A failure is logged and
-        tried again next check; it never stops the tick. Reporting only (GOV-0033)."""
-        closes = {p["number"]: c["number"] for p in w.model.get("prs", []) for c in p.get("closes", [])
-                  if p.get("number") is not None and c.get("number") is not None}
+        """Add every ended run to the runs ledger (#662). Then read from GitHub the issue
+        each PR run's PR closes, where the open-PR model didn't have it (the PR has merged
+        or closed), and the Mission, Goal and Area above up to ledger.SCOPES_PER_TICK
+        unscoped issues. Adding is idempotent, so a run already in the ledger is left alone.
+        A failure is logged and tried again next check; it never stops the tick. Reporting
+        only (GOV-0033)."""
+        closes: dict[int, int] = {}
+        for p in w.model.get("prs", []):
+            first = next((c["number"] for c in p.get("closes", []) if c.get("number") is not None), None)
+            if p.get("number") is not None and first is not None:
+                closes[p["number"]] = first     # the first issue GitHub lists, as gh_pr_closes
         try:
             ledger.record(self.launcher.dir, [r for r in runs.values() if r.get("ended")],
-                                closes)
+                          closes)
+            prs = ledger.unresolved(self.launcher.dir)
+            if prs:
+                ledger.set_prs(self.launcher.dir, (self.get_pr_closes or gh_pr_closes)(self.repo, prs))
             todo = ledger.unscoped(self.launcher.dir)
             if todo:
                 known = {n: w.scopes[n] for n in todo if w.scopes.get(n) is not None}
@@ -2074,7 +2094,6 @@ class Watch:
                 ledger.set_scopes(self.launcher.dir, {**known, **read}, self.repo)
         except (RuntimeError, OSError, ValueError, sqlite3.Error) as e:
             self.once(f"swarm watch: the runs ledger couldn't be updated: {e}; trying again next check")
-            return
 
     def never_started(self, r: dict) -> bool:
         """Whether an ended run never got as far as Claude Code (#550): no result file, or no

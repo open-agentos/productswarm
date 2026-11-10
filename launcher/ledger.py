@@ -6,13 +6,18 @@ one, so totals cover a whole month. One row per session id, written once: record
 run again (a tick whose state save failed, then ran again) changes nothing.
 
     runs  session_id, name, kind, ref, issue, started, ended, ending, cost_usd,
+          pr       the PR number for a review or respond run, else NULL
           mission  the nearest Mission above the issue, or NULL
           scopes   JSON list of every Mission, Goal and Area issue above it, nearest first,
                    as "owner/name#n"; NULL while they haven't been read
 
-A run's issue is its trigger's issue, or for a PR the issue the PR closes. Scopes are read
-from GitHub's sub-issue links on a later tick (the watcher's scope query, swarm.gh_scopes),
-never from a webhook payload, so a run is recorded even while GitHub can't be read.
+A run's issue is its trigger's issue, or for a PR the issue the PR closes (the first GitHub
+lists, if it closes more than one). The watcher's open-PR model gives that issue when the PR
+is still open; otherwise the row keeps its PR number and a later tick reads the issue from
+GitHub for the PR in any state (watch.gh_pr_closes), so a PR merged before the run was
+recorded still counts toward its Mission. Scopes are read from GitHub's sub-issue links on a
+later tick (the watcher's scope query, swarm.gh_scopes), never from a webhook payload, so a
+run is recorded even while GitHub can't be read.
 
 Totals are reported only. Per GOV-0033 the engine has no daily, per-mission or monthly
 spend total: nothing here holds or stops a run. `swarm spent` prints today's and this
@@ -37,7 +42,7 @@ CREATE TABLE IF NOT EXISTS runs (
     session_id TEXT PRIMARY KEY,
     name TEXT, kind TEXT, ref TEXT, issue INTEGER,
     started TEXT, ended TEXT NOT NULL, ending TEXT, cost_usd REAL,
-    mission TEXT, scopes TEXT
+    mission TEXT, scopes TEXT, pr INTEGER
 );
 CREATE INDEX IF NOT EXISTS runs_ended ON runs (ended);
 """
@@ -51,20 +56,28 @@ def connect(state_dir: Path) -> sqlite3.Connection:
     return db
 
 
-def issue_of(run: dict, closes: dict[int, int]) -> int | None:
-    """The issue a run served: #n for an issue trigger, or the issue PR #n closes."""
+def pr_of(run: dict) -> int | None:
+    """The PR a review or respond run was on ("PR #n"), else None."""
     m = _REF.search(run.get("ref") or "")
-    if not m:
-        return None
-    n = int(m.group(1))
-    return closes.get(n) if (run.get("ref") or "").startswith("PR ") else n
+    return int(m.group(1)) if m and (run.get("ref") or "").startswith("PR ") else None
+
+
+def issue_of(run: dict, closes: dict[int, int]) -> int | None:
+    """The issue a run served: #n for an issue trigger, or the issue PR #n closes (None if
+    closes doesn't say; the PR is resolved on a later tick, see unresolved())."""
+    pr = pr_of(run)
+    if pr is not None:
+        return closes.get(pr)
+    m = _REF.search(run.get("ref") or "")
+    return int(m.group(1)) if m else None
 
 
 def record(state_dir: Path, ended: list[dict], closes: dict[int, int]) -> int:
     """Add each ended run (a watch run record with "ended") to the ledger. Returns how many
-    rows were new. closes maps a PR number to the issue it closes."""
+    rows were new. closes maps a PR number to the issue it closes; a PR it doesn't know
+    keeps its number for unresolved()."""
     rows = [(r["session_id"], r.get("name"), r.get("kind"), r.get("ref"), issue_of(r, closes),
-             r.get("started"), r["ended"], r.get("ending"), r.get("cost_usd"))
+             r.get("started"), r["ended"], r.get("ending"), r.get("cost_usd"), pr_of(r))
             for r in ended if r.get("session_id") and r.get("ended")]
     if not rows:
         return 0
@@ -73,7 +86,7 @@ def record(state_dir: Path, ended: list[dict], closes: dict[int, int]) -> int:
         before = db.total_changes
         db.execute("BEGIN IMMEDIATE")
         db.executemany("INSERT OR IGNORE INTO runs (session_id, name, kind, ref, issue, started, "
-                       "ended, ending, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                       "ended, ending, cost_usd, pr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
         db.execute("COMMIT")
         return db.total_changes - before
     finally:
@@ -93,6 +106,41 @@ def unscoped(state_dir: Path, limit: int = SCOPES_PER_TICK) -> list[int]:
         db.close()
 
 
+def unresolved(state_dir: Path, limit: int = SCOPES_PER_TICK) -> list[int]:
+    """PRs of ledger rows whose issue isn't known yet (the PR wasn't in the open-PR model
+    when the run was recorded), oldest first."""
+    if not (state_dir / statedb.DB_FILE).exists():
+        return []
+    db = connect(state_dir)
+    try:
+        return [n for (n,) in db.execute(
+            "SELECT pr FROM runs WHERE pr IS NOT NULL AND issue IS NULL AND scopes IS NULL "
+            "GROUP BY pr ORDER BY MIN(ended) LIMIT ?", (limit,))]
+    finally:
+        db.close()
+
+
+def set_prs(state_dir: Path, closes: dict[int, list[int]]) -> int:
+    """Give each unresolved PR's rows the issue it closes, read from GitHub: the first one
+    listed. A PR that closes no issue has nothing above it, so its rows get an empty scope
+    list. A PR missing from closes stays unresolved for a later tick."""
+    db = connect(state_dir)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        done = 0
+        for pr, issues in closes.items():
+            if issues:
+                done += db.execute("UPDATE runs SET issue = ? WHERE pr = ? AND issue IS NULL AND "
+                                   "scopes IS NULL", (issues[0], pr)).rowcount
+            else:
+                done += db.execute("UPDATE runs SET scopes = '[]' WHERE pr = ? AND issue IS NULL "
+                                   "AND scopes IS NULL", (pr,)).rowcount
+        db.execute("COMMIT")
+        return done
+    finally:
+        db.close()
+
+
 def scopes_of(scope: dict, repo: str) -> list[dict]:
     """The Mission, Goal and Area issues in a parse_scope() result, nearest first."""
     return [{"ref": f"{p.get('repo') or repo}#{p['number']}", "type": p["type"]}
@@ -102,7 +150,8 @@ def scopes_of(scope: dict, repo: str) -> list[dict]:
 def set_scopes(state_dir: Path, scopes: dict[int, dict | None], repo: str) -> int:
     """Fill in scopes for rows on each issue whose parse_scope() result was read; an issue
     whose scope couldn't be read (None) stays unscoped for a later tick. A run with no issue
-    (or none above it) gets an empty list."""
+    and no PR (or nothing above its issue) gets an empty list; a PR run whose issue isn't
+    known yet waits for set_prs()."""
     db = connect(state_dir)
     try:
         db.execute("BEGIN IMMEDIATE")
@@ -115,7 +164,8 @@ def set_scopes(state_dir: Path, scopes: dict[int, dict | None], repo: str) -> in
             done += db.execute("UPDATE runs SET scopes = ?, mission = ? WHERE issue = ? AND "
                                "scopes IS NULL", (json.dumps([x["ref"] for x in found]), mission, n)
                                ).rowcount
-        db.execute("UPDATE runs SET scopes = '[]' WHERE scopes IS NULL AND issue IS NULL")
+        db.execute("UPDATE runs SET scopes = '[]' WHERE scopes IS NULL AND issue IS NULL "
+                   "AND pr IS NULL")
         db.execute("COMMIT")
         return done
     finally:
