@@ -13,6 +13,9 @@ instructions. `plan` (#589) writes nothing to GitHub. `run` (#592) runs plan, th
   PR the reviewer or the owner approved at head, post `Left for the owner at <sha>: <reason>.`
   once per head (not while `tests` is still running). Other misses post nothing.
 - live: merge with the head SHA pinned, then post `Merged under <kind> (GOV-0027) at <sha>.`
+  When main requires a merge queue (#663), add the PR to the queue instead, with the head SHA
+  pinned, and post `Enqueued under <kind> (GOV-0027) at <sha>.`: GitHub merges it once the
+  queued group's `tests` pass. A PR already enqueued at its head isn't enqueued again.
   Until GOV-0027's shadow bar is met ("would merge" by the merger App on SHADOW_PRS
   distinct PRs, or a day since the first), live acts as shadow and says so in the log.
   GOV-0034 adds a second bar for the standing grant only: until "Would merge (standing
@@ -25,7 +28,8 @@ it. The token is $GH_TOKEN (the merger App's, minted by the workflow, GOV-0028);
 holds no credentials and never runs Claude.
 
 It prints one line per open PR: `#N <head sha> merge (standing grant)`, `... merge
-(approved ask)` or `... miss: <first failed condition>`. Draft PRs, fork heads and closed
+(approved ask)` or `... miss: <first failed condition>`; run says `enqueue` for `merge` when
+main requires a merge queue. Draft PRs, fork heads and closed
 PRs are skipped, each with a `skip:` line. A PR is judged as a standing grant unless it
 touches a protected path; then it is judged as an approved ask.
 
@@ -334,8 +338,10 @@ class Decision:
     def merges(self) -> bool:
         return self.verdict in (GRANT, ASK)
 
-    def line(self) -> str:
-        return f"#{self.number} {self.head} {self.verdict}"
+    def line(self, queued: bool = False) -> str:
+        verdict = self.verdict.replace("merge (", "enqueue (", 1) if queued and self.merges \
+            else self.verdict
+        return f"#{self.number} {self.head} {verdict}"
 
 
 def make_decisions(prs: list[dict], ctx: Context, r: Reader) -> list[Decision]:
@@ -442,6 +448,7 @@ def plan(repo: str, pr: int | None = None, manifest_path: Path | str | None = No
 MERGER = "productswarm-merger[bot]"   # the App whose comments count (GOV-0022, GOV-0028)
 SIGN = "\n\n-- merger"
 WOULD, MERGED, LEFT = "Would merge", "Merged under", "Left for the owner"
+ENQUEUED = "Enqueued under"           # live, when main requires a merge queue (#663)
 SHADOW_PRS = 10                       # GOV-0027: "would merge" on 10 PRs ...
 SHADOW_SECONDS = 24 * 3600            # ... or a day since the first, whichever comes first
 GRANT_WOULD = f"{WOULD} (standing grant)"   # GOV-0034's own shadow counts only these
@@ -457,6 +464,10 @@ def would_body(d: Decision) -> str:
 
 def merged_body(d: Decision) -> str:
     return f"{MERGED} {kind(d.verdict)} (GOV-0027) at {d.head}.{SIGN}"
+
+
+def enqueued_body(d: Decision) -> str:
+    return f"{ENQUEUED} {kind(d.verdict)} (GOV-0027) at {d.head}.{SIGN}"
 
 
 def left_body(d: Decision) -> str:
@@ -501,6 +512,14 @@ class Writer:
     history: Callable[[], list[dict]]          # every issue and PR comment in the repo
     post: Callable[[int, str], None]           # comment on PR n
     merge: Callable[[int, str], None]          # merge PR n only if its head is still sha
+    queue: Callable[[], bool]                  # whether main requires a merge queue
+    enqueue: Callable[[str, str], None]        # queue the PR (node id) only if its head is still sha
+
+
+QUEUE_QUERY = ("query($owner: String!, $name: String!, $branch: String!) "
+               "{ repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }")
+ENQUEUE_MUTATION = ("mutation($id: ID!, $sha: GitObjectID!) { enqueuePullRequest(input: "
+                    "{pullRequestId: $id, expectedHeadOid: $sha}) { mergeQueueEntry { id } } }")
 
 
 def gh_writer(repo: str) -> Writer:
@@ -511,12 +530,31 @@ def gh_writer(repo: str) -> Writer:
         if r.returncode != 0:
             raise RuntimeError(f"gh api {args[0]} failed: {r.stderr.strip()[:300]}")
 
+    owner, name = repo.split("/", 1)
+
+    def queue() -> bool:
+        # GraphQL's mergeQueue is non-null when the branch requires one, set by a ruleset or
+        # by branch protection.
+        d = g.gh_json("api", "graphql", "-f", f"query={QUEUE_QUERY}", "-f", f"owner={owner}",
+                      "-f", f"name={name}", "-f", f"branch={BASE}")
+        if not isinstance(d, dict) or d.get("errors") or "repository" not in (d.get("data") or {}):
+            raise RuntimeError("can't read main's merge queue")
+        return bool(((d["data"] or {}).get("repository") or {}).get("mergeQueue"))
+
+    def enqueue(node_id: str, sha: str) -> None:
+        # expectedHeadOid pins the head as the merge API's sha does: GitHub refuses a moved head.
+        d = g.gh_json("api", "graphql", "-f", f"query={ENQUEUE_MUTATION}", "-f", f"id={node_id}",
+                      "-f", f"sha={sha}")
+        if not isinstance(d, dict) or d.get("errors"):
+            raise RuntimeError(f"enqueue failed: {str((d or {}).get('errors'))[:300]}")
+
     return Writer(
         history=lambda: g.gh_items(f"repos/{repo}/issues/comments?per_page=100"),
         post=lambda n, body: gh(f"repos/{repo}/issues/{n}/comments", "-f", f"body={body}"),
         # sha pins the merge to the head the decision saw: GitHub refuses it if the head moved.
         merge=lambda n, sha: gh("-X", "PUT", f"repos/{repo}/pulls/{n}/merge",
-                                "-f", f"sha={sha}", "-f", "merge_method=merge"))
+                                "-f", f"sha={sha}", "-f", "merge_method=merge"),
+        queue=queue, enqueue=enqueue)
 
 
 def run(repo: str, dry_run: bool = False, pr: int | None = None,
@@ -535,9 +573,15 @@ def run(repo: str, dry_run: bool = False, pr: int | None = None,
     except UNREADABLE as e:
         out(f"merger: can't decide ({e.__class__.__name__}): nothing posted or merged")
         return 1
-    for d in decisions:
-        out(d.line())
     mode = ctx.switch.mode
+    queued, why_unqueued = False, None
+    if mode != "off" and any(d.merges for d in decisions):
+        try:
+            queued = bool(w.queue())
+        except UNREADABLE as e:
+            why_unqueued = f"can't tell whether {BASE} requires a merge queue ({e.__class__.__name__})"
+    for d in decisions:
+        out(d.line(queued))
     if mode == "off":
         out(f"merger: off ({ctx.switch.why_off}): nothing posted or merged")
         return 0
@@ -549,6 +593,7 @@ def run(repo: str, dry_run: bool = False, pr: int | None = None,
             held_grant = shadow_bar(history, now, GRANT_WOULD)
         except UNREADABLE as e:
             held = f"can't count the shadow's comments ({e.__class__.__name__})"
+        held = held or why_unqueued
         if held:
             out(f"merger: live acts as shadow: {held}")
         elif held_grant:
@@ -579,7 +624,22 @@ def run(repo: str, dry_run: bool = False, pr: int | None = None,
         if d.verdict.startswith("skip: "):
             continue
         try:
-            if d.merges and merging(d):
+            if d.merges and merging(d) and queued:
+                if posted(r.comments(d.number), ENQUEUED, d.head):
+                    out(f"merger: #{d.number} was already enqueued at {d.head[:7]}; left to the queue")
+                    continue
+                now = r.pr(d.number)
+                if actions_review.head_sha(now) != d.head:
+                    out(f"merger: #{d.number}'s head moved since the decision "
+                        f"({d.head[:7]} to {(actions_review.head_sha(now) or '-')[:7]}); not enqueuing")
+                    continue
+                node_id = now.get("node_id")
+                if not isinstance(node_id, str) or not node_id:
+                    raise ValueError("the PR has no node_id")
+                if write(f"enqueue #{d.number} at {d.head}", lambda: w.enqueue(node_id, d.head)):
+                    merged += 1
+                    comment(d.number, enqueued_body(d))
+            elif d.merges and merging(d):
                 now_head = actions_review.head_sha(r.pr(d.number))
                 if now_head != d.head:
                     out(f"merger: #{d.number}'s head moved since the decision "
@@ -598,8 +658,9 @@ def run(repo: str, dry_run: bool = False, pr: int | None = None,
             failed += 1
             out(f"merger: #{d.number}: can't read GitHub ({e.__class__.__name__}); left alone")
     shadowed = sum(d.merges and not merging(d) for d in decisions)
-    did = f"{merged} PR(s) merged" + (f", {shadowed} would merge" if shadowed else "") \
-        if mode == "live" and not dry_run else f"{sum(d.merges for d in decisions)} PR(s) would merge"
+    verb = "enqueue" if queued else "merge"
+    did = f"{merged} PR(s) {verb}d" + (f", {shadowed} would {verb}" if shadowed else "") \
+        if mode == "live" and not dry_run else f"{sum(d.merges for d in decisions)} PR(s) would {verb}"
     out(f"merger: mode {mode}{' (dry run)' if dry_run else ''}: {did}"
         + (f", {failed} failure(s)" if failed else ""))
     return 1 if failed else 0
