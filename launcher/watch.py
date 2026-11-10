@@ -1314,12 +1314,16 @@ def lock_holder(launcher: "swarm.Launcher") -> int | None:
 def spool_cost(home: Path, sid: str) -> float | None:
     """A running session's cost so far (#457): the dashboard's estimate (dashboard/spend.py)
     from the token counts on the last event in its local heartbeat spool,
-    ~/.productswarm/events/<sid>.jsonl. Only the file's tail is read. None if there is no
+    ~/.productswarm/events/<sid>.jsonl, or ~/.productswarm/runs/<sid>/events/ for a run in a
+container (#661). Only the file's tail is read. None if there is no
     spool, or its last event has no figure."""
     swarm.dashboard()             # puts dashboard/ on sys.path
     import spend
+    spool = home / "runs" / sid / "events" / f"{sid}.jsonl"   # a container run's own home (#661)
+    if not spool.exists():
+        spool = home / "events" / f"{sid}.jsonl"
     try:
-        with open(home / "events" / f"{sid}.jsonl", "rb") as f:
+        with open(spool, "rb") as f:
             f.seek(0, os.SEEK_END)
             f.seek(max(0, f.tell() - 8192))
             lines = f.read().splitlines()

@@ -16,7 +16,7 @@
                                     --last for the week before
     launcher/swarm daily            the last 10 working days' daily reports and who started
                                     each, and M1's streak (#707)
-    launcher/swarm watch [--dry-run] [--serve]
+    launcher/swarm watch [--dry-run] [--serve] [--container IMAGE]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
     launcher/swarm webhooks         the GitHub webhook receiver on the engine host (#658)
@@ -75,6 +75,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -113,6 +114,8 @@ DENY = (
 ISSUE_WORD_RE = re.compile(r"\bissue\s+#?(\d+)\b", re.IGNORECASE)   # heartbeat/hook.py's rule
 START_GRACE = 60      # seconds a session may take to write its pid file before it counts as failed
 MAX_CANON = 1024      # macOS's tty line limit: a longer line typed into a starting shell is cut (#550)
+IMAGE_RE = re.compile(r"^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$")
+CONTAINER_HOME = "/home/run"   # HOME inside a run's container: a tmpfs, gone when it ends (#661)
 STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
 
@@ -208,6 +211,21 @@ def open_terminal(command: str) -> None:
         raise RuntimeError(f"osascript failed: {r.stderr.strip()[:300]}")
 
 
+def run_detached(command: str) -> None:
+    """Run a shell command in the background, in its own session: the engine host's
+    counterpart of open_terminal() (#661), for runs in containers. The outer shell exits
+    at once, so its child is reparented and a long-lived watcher leaves no zombies; the
+    child's stderr goes to the watcher's log."""
+    subprocess.run(["/bin/sh", "-c", f"( {command} ) </dev/null >/dev/null &"],
+                   start_new_session=True, check=True, timeout=30)
+
+
+def pinned_image(ref: str) -> bool:
+    """A container image named by its content digest (#661): `name@sha256:<hex>`, or a
+    local image id `sha256:<hex>`. A tag can move under a running watcher; a digest can't."""
+    return bool(IMAGE_RE.match(ref))
+
+
 def process_command(pid: int) -> str | None:
     """The command line of a running process, or None if there is none."""
     try:
@@ -221,6 +239,16 @@ def process_command(pid: int) -> str | None:
 
 
 run_git = install.run_git
+
+
+def run_docker(args: list[str]) -> tuple[int, str]:
+    """`docker <args>`: (exit code, stdout and stderr). Used only to check a container
+    run's clone from inside a container (#661), never to start a run."""
+    try:
+        r = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+    return r.returncode, (r.stdout + r.stderr).strip()
 
 
 # ---------------------------------------------------------------- local state
@@ -280,11 +308,32 @@ class Launcher:
     sleep: Callable[[float], None] = time.sleep
     out: Callable[[str], None] = print
     git: Callable[[list[str]], tuple[int, str]] = run_git
+    docker: Callable[[list[str]], tuple[int, str]] = run_docker
     kept: list[Path] = field(default_factory=list)   # exited sessions' worktrees with work in them
     fetched: bool = False
     hook: str | None = None         # the pinned hook path, once refreshed in this run
     claude_dir: Path = field(default_factory=lambda: Path(
         os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser())   # transcripts (#550)
+    container: str | None = None    # a pinned image: runs swarm watch starts go in containers (#661)
+
+    def use_container(self, image: str) -> None:
+        """Start each run swarm watch starts in its own container from image (#661), in the
+        background rather than in a Terminal window. Their transcripts land in
+        the run's own home, run_home(), so transcript() looks there too (#550)."""
+        if not pinned_image(image):
+            raise ValueError(f"--container takes an image pinned by digest (name@sha256:<64 hex> "
+                             f"or sha256:<64 hex>), not '{image}'")
+        self.container, self.run = image, run_detached
+
+    def in_container(self, s: Started) -> bool:
+        """Whether s runs in a container: only runs swarm watch starts, under --container."""
+        return bool(self.container) and s.by == "watch"
+
+    def run_home(self, sid: str) -> Path:
+        """A container run's own PRODUCTSWARM_HOME (#661): its heartbeat state and spool,
+        its Stop hook's count and log, and its transcripts. The only part of the host's
+        home it can write, and it can't see any other run's."""
+        return self.home / "runs" / sid
 
     @property
     def dir(self) -> Path:
@@ -317,7 +366,8 @@ class Launcher:
 
     def transcript(self, sid: str) -> Path | None:
         """Claude Code's transcript of session sid, if it wrote one (#550)."""
-        found = sorted((self.claude_dir / "projects").glob(f"*/{sid}.jsonl"))
+        found = (sorted((self.run_home(sid) / "claude" / "projects").glob(f"*/{sid}.jsonl"))
+                 or sorted((self.claude_dir / "projects").glob(f"*/{sid}.jsonl")))
         return found[0] if found else None
 
     def load(self) -> list[Started]:
@@ -465,10 +515,15 @@ class Launcher:
         self.fetch_main()
 
     def prepare(self, s: Started) -> None:
-        """Create the session's worktree at origin/main and write its hook settings."""
+        """Create the session's worktree at origin/main and write its hook settings. A run
+        in a container gets a clone instead, and its own home (#661)."""
         hook = self.hook_path()          # fetches, and refreshes the pinned copy first
         wt = self.worktree(s.session_id)
-        self.git_ok("-C", str(self.root), "worktree", "add", "-q", "--detach", str(wt), "origin/main")
+        if self.in_container(s):
+            self.clone(wt)
+            self.prepare_run_home(s)
+        else:
+            self.git_ok("-C", str(self.root), "worktree", "add", "-q", "--detach", str(wt), "origin/main")
         base = install.read_settings(self.root / ".claude" / "settings.local.json")
         settings = install.with_hooks(base, hook=hook)
         if s.by == "watch":      # loop-started runs keep going until they're done (#148)
@@ -476,8 +531,67 @@ class Launcher:
             settings = stophook.with_stop_hook(settings, stophook.script_for(hook))
         install.write_settings(wt / ".claude" / "settings.local.json", settings)
 
+    def prepare_line(self, s: Started) -> str:
+        """What prepare() will do for s, for --dry-run."""
+        wt = self.worktree(s.session_id)
+        if self.in_container(s):
+            return f"git clone --no-hardlinks {self.root} {wt} (at origin/main; origin set to GitHub)"
+        return f"git worktree add --detach {wt} origin/main"
+
+    def clone(self, wt: Path) -> None:
+        """A container run's own clone of the checkout at origin/main (#661), in place of a
+        worktree. A worktree keeps its index, HEAD and commits in the shared `.git`, so a
+        container would need that mounted read-write, and could then plant a hook that the
+        host runs on its next `git worktree add` as the user who can read every App's key.
+        A clone has its own `.git`; the host's is never mounted. `--no-hardlinks` so the
+        clone shares no object file with the checkout. origin then points at GitHub, so the
+        run pushes there and the heartbeat hook finds the repo from it."""
+        root = str(self.root)
+        url = self.git_ok("-C", root, "remote", "get-url", "origin").strip()
+        self.git_ok("clone", "-q", "--no-hardlinks", "--no-checkout", root, str(wt))
+        self.git_ok("-C", str(wt), "fetch", "-q", root, "+refs/remotes/origin/main:refs/remotes/origin/main")
+        self.git_ok("-C", str(wt), "checkout", "-q", "--detach", "origin/main")
+        self.git_ok("-C", str(wt), "remote", "set-url", "origin", url)
+
+    def prepare_run_home(self, s: Started) -> None:
+        """run_home() for s, made before docker run so docker doesn't create the mount
+        sources as root: the transcript folder, and a sessions.json holding only s's entry,
+        which the Stop hook reads (mounted read-only, so the run can't change its own)."""
+        rh = self.run_home(s.session_id)
+        for d in (rh / "launcher", rh / "claude" / "projects"):
+            d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (rh / "launcher" / "sessions.json").write_text(json.dumps([s.__dict__], indent=1) + "\n")
+
+    def is_clone(self, wt: Path) -> bool:
+        """A container run's clone: its `.git` is a directory, where a worktree's is a file."""
+        return (wt / ".git").is_dir()
+
+    def clone_removable(self, wt: Path) -> bool:
+        """removable() for a container run's clone (#661), checked inside a container from
+        the same image, with no network and the clone mounted read-only. The run could
+        write the clone's `.git/config` (core.fsmonitor, a filter), and the host must never
+        run git there, or it would run that as itself. Without --container there is no
+        image to check with, so the clone is kept."""
+        if not self.container:
+            return False
+        check = ('test -z "$(git --no-optional-locks status --porcelain)" '
+                 '&& test -n "$(git branch -r --contains HEAD)"')
+        rc, _ = self.docker(["run", "--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
+                             "-e", "HOME=/tmp", "-v", f"{wt}:{wt}:ro", "-w", str(wt),
+                             "--entrypoint", "sh", self.container, "-c", check])
+        return rc == 0
+
+    def discard(self, wt: Path) -> None:
+        """Remove a new, unused worktree or clone: nothing in it to lose."""
+        if self.is_clone(wt):
+            shutil.rmtree(wt, ignore_errors=True)
+        else:
+            self.git(["-C", str(self.root), "worktree", "remove", "--force", str(wt)])
+
     def removable(self, wt: Path) -> bool:
         """Clean (nothing uncommitted or untracked) and HEAD is on a remote branch."""
+        if self.is_clone(wt):
+            return self.clone_removable(wt)
         rc, status = self.git(["-C", str(wt), "status", "--porcelain"])
         if rc or status:
             return False
@@ -495,7 +609,12 @@ class Launcher:
         for wt in sorted(d.iterdir()) if d.is_dir() else []:
             if not wt.is_dir() or not UUID_RE.match(wt.name) or wt.name in alive:
                 continue
-            if self.removable(wt) and self.git(["-C", str(self.root), "worktree", "remove", str(wt)])[0] == 0:
+            if self.is_clone(wt):
+                if self.removable(wt):
+                    shutil.rmtree(wt, ignore_errors=True)   # its run_home() stays: logs, cost, transcript
+                else:
+                    kept.append(wt)
+            elif self.removable(wt) and self.git(["-C", str(self.root), "worktree", "remove", str(wt)])[0] == 0:
                 removed = True
             else:
                 kept.append(wt)
@@ -521,8 +640,14 @@ class Launcher:
                                     s.ask, s.ask_comment, s.research, s.research_comment))
         if s.by == "watch":
             result = shlex.quote(str(self.result_file(s.session_id)))
-            note = shlex.quote(f"swarm: headless run (claude -p); it ends when done or at its budget, "
-                               f"and its result is written to {self.result_file(s.session_id)}")
+            where = f" in container swarm-{s.session_id}" if self.container else ""
+            note = shlex.quote(f"swarm: headless run (claude -p){where}; it ends when done or at its "
+                               f"budget, and its result is written to {self.result_file(s.session_id)}")
+            if self.in_container(s):
+                # Mint the role App's token here, on the host; only it goes into the container.
+                token = ["tok=$(" + shlex.quote(str(wt / "ops" / "swarm-token")), shlex.quote(s.role) + ")",
+                         "&&", 'GH_TOKEN="$tok"']
+                session = [*token, *self.docker_run(s)]
             tail = ["echo", note, "&&", *session, "-p", prompt, *self.headless_args(s), ">|", result]
         else:
             tail = [*session, prompt]
@@ -531,6 +656,39 @@ class Launcher:
             "echo $$ >|", shlex.quote(str(self.pid_file(s.session_id))), "&&", *tail,
         ])
         return "exec /bin/bash -c " + shlex.quote(inner)
+
+    def docker_run(self, s: Started) -> list[str]:
+        """`exec docker run ...` for a run in a container (#661), shell-quoted, up to the
+        claude args. The image's entrypoint sets up git and gh as the role's App from
+        GH_TOKEN and exec's claude with the rest.
+
+        Only GH_TOKEN (the role App's token, minted by command()) and ANTHROPIC_API_KEY
+        go in from the host's environment; nothing else from it, and no secret file, is
+        mounted. Read-write, at the same paths as on the host so the hook paths in its
+        settings resolve: the run's own clone (prepare(); never the checkout's .git) and
+        its own home, run_home(), as PRODUCTSWARM_HOME. Read-only: its sessions.json entry
+        and the pinned hook copy (runtime/). Nothing else from the host's PRODUCTSWARM_HOME
+        is mounted: not sessions.json, other runs' state or transcripts, swarm.db or the
+        result files. HOME is a tmpfs. It runs as the host user, so its files stay the
+        watcher's.
+
+        The docker client stays in the foreground with --rm: its pid is the run's pid
+        (state() finds --session-id in its command line), `swarm stop`'s SIGTERM reaches
+        claude through it and --init, and the container goes when the run ends."""
+        wt, rh, runtime = self.worktree(s.session_id), self.run_home(s.session_id), self.home / "runtime"
+        entry = rh / "launcher" / "sessions.json"
+        uid, gid = os.getuid(), os.getgid()
+        argv = ["docker", "run", "--rm", "--init", "--name", f"swarm-{s.session_id}",
+                "--user", f"{uid}:{gid}",
+                "--tmpfs", f"{CONTAINER_HOME}:uid={uid},gid={gid},mode=0700",
+                "-e", "GH_TOKEN", "-e", "ANTHROPIC_API_KEY", "-e", f"SWARM_ROLE={s.role}",
+                "-e", f"HOME={CONTAINER_HOME}", "-e", f"PRODUCTSWARM_HOME={rh}",
+                "-v", f"{wt}:{wt}", "-v", f"{rh}:{rh}", "-v", f"{entry}:{entry}:ro",
+                "-v", f"{runtime}:{runtime}:ro",
+                "-v", f"{rh}/claude/projects:{CONTAINER_HOME}/.claude/projects",
+                "-w", str(wt), self.container or "",
+                "--model", s.model, "--session-id", s.session_id]
+        return ["exec", *(shlex.quote(a) for a in argv)]
 
     @staticmethod
     def headless_args(s: Started) -> list[str]:
@@ -567,7 +725,7 @@ class Launcher:
         on += f", PR #{entry.pr}" if entry.pr else ""
         if dry_run:
             self.out(f"would start: {entry.name}  {entry.model}{on}\n"
-                     f"  git worktree add --detach {self.worktree(entry.session_id)} origin/main\n"
+                     f"  {self.prepare_line(entry)}\n"
                      f"  {self.command(entry)}")
             return True
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -585,8 +743,7 @@ class Launcher:
             self.out(f"failed to start {entry.name}: {e}")
             self.remove(entry.session_id)
             self.window_file(entry.session_id).unlink(missing_ok=True)
-            self.git(["-C", str(self.root), "worktree", "remove", "--force",
-                      str(self.worktree(entry.session_id))])   # new and unused: nothing to lose
+            self.discard(self.worktree(entry.session_id))   # new and unused: nothing to lose
             return False
         live.append(entry)
         self.out(f"started: {entry.name}  {entry.model}{on}  {entry.session_id}")
@@ -605,10 +762,12 @@ class Launcher:
         raise LookupError(f"'{ref}' matches more than one session: {', '.join(e.name for e in matches)}")
 
     def heartbeat_stopped(self, sid: str) -> bool:
-        try:
-            return bool(json.loads((self.home / "state" / f"{sid}.json").read_text()).get("stopped"))
-        except (FileNotFoundError, ValueError):
-            return False
+        for home in (self.run_home(sid), self.home):   # a container run's state is in its own (#661)
+            try:
+                return bool(json.loads((home / "state" / f"{sid}.json").read_text()).get("stopped"))
+            except (FileNotFoundError, ValueError):
+                continue
+        return False
 
     def stop(self, ref: str) -> int:
         live = self.live()
@@ -1540,6 +1699,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_watch.add_argument("--idle-minutes", type=int, default=15)
     p_watch.add_argument("--serve", action="store_true",
                          help="also check on each webhook nudge from `swarm webhooks` (engine host, #660)")
+    p_watch.add_argument("--container", metavar="IMAGE",
+                         help="start each run in its own container from IMAGE, pinned by digest "
+                              "(engine host, #661)")
     p_hooks = sub.add_parser("webhooks", help="receive GitHub webhooks and nudge the watcher (engine host)")
     p_hooks.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (Caddy in front)")
     p_hooks.add_argument("--port", type=int, default=8081)
@@ -1583,6 +1745,12 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
         launcher.out("swarm watch: --interval works only with --dry-run; the interval for real "
                      "starts is interval_minutes in swarm.toml's [watch] table (GOV-0010)")
         return 2
+    if args.cmd == "watch" and args.container:
+        try:
+            launcher.use_container(args.container)
+        except ValueError as e:
+            launcher.out(f"swarm watch: {e}")
+            return 2
     repo = None
     if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges", "daily"):
         repo = args.repo or dashboard().default_repo()
