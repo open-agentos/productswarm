@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -52,8 +53,10 @@ class LedgerTest(unittest.TestCase):
                 run("c", "PR #21", "2026-11-10T10:30:00+00:00", 0.25, kind="review")]
         self.assertEqual(ledger.record(self.dir, runs, {20: 11}), 3)
         self.assertEqual(ledger.record(self.dir, runs, {20: 11}), 0)   # again: no change
-        got = {r["session_id"]: (r["issue"], r["cost_usd"], r["scopes"]) for r in ledger.rows(self.dir)}
-        self.assertEqual(got, {"a": (10, 1.5, None), "b": (11, 0.5, None), "c": (None, 0.25, None)})
+        got = {r["session_id"]: (r["issue"], r["pr"], r["cost_usd"], r["scopes"]) for r in ledger.rows(self.dir)}
+        self.assertEqual(got, {"a": (10, None, 1.5, None), "b": (11, 20, 0.5, None),
+                               "c": (None, 21, 0.25, None)})
+        self.assertEqual(ledger.unresolved(self.dir), [21])   # #21 wasn't in closes
 
     def test_a_running_run_is_not_recorded(self):
         live = {"session_id": "a", "name": "x", "kind": "build", "ref": "#10", "started": "t"}
@@ -76,10 +79,29 @@ class LedgerTest(unittest.TestCase):
         got = {r["session_id"]: (r["mission"], r["scopes"]) for r in ledger.rows(self.dir)}
         self.assertEqual(got["a"], (f"{REPO}#40", [f"{REPO}#40", "open-agentos/other#683"]))
         self.assertEqual(got["b"], (None, None))
-        self.assertEqual(got["c"], (None, []))     # no issue: nothing above it
+        self.assertEqual(got["c"], (None, None))   # PR #9's issue isn't known yet: not dropped
         self.assertEqual(ledger.unscoped(self.dir), [12])
         ledger.set_scopes(self.dir, {12: scope()}, REPO)
         self.assertEqual(ledger.unscoped(self.dir), [])
+
+    def test_a_run_with_no_issue_and_no_pr_has_nothing_above_it(self):
+        ledger.record(self.dir, [run("a", "", "2026-11-10T09:00:00+00:00", 1.0)], {})
+        ledger.set_scopes(self.dir, {}, REPO)
+        self.assertEqual(ledger.rows(self.dir)[0]["scopes"], [])
+
+    def test_a_pr_not_in_closes_is_resolved_later_from_github(self):
+        ledger.record(self.dir, [run("b", "PR #20", "2026-11-10T09:00:00+00:00", 4.0, kind="review"),
+                                 run("c", "PR #21", "2026-11-10T09:10:00+00:00", 1.0, kind="review"),
+                                 run("d", "PR #22", "2026-11-10T09:20:00+00:00", 1.0, kind="review")], {})
+        self.assertEqual(ledger.unresolved(self.dir), [20, 21, 22])
+        # #20 closes #11 then #12: the first wins. #21 closes nothing. #22 wasn't read.
+        self.assertEqual(ledger.set_prs(self.dir, {20: [11, 12], 21: []}), 2)
+        got = {r["session_id"]: (r["issue"], r["scopes"]) for r in ledger.rows(self.dir)}
+        self.assertEqual(got, {"b": (11, None), "c": (None, []), "d": (None, None)})
+        self.assertEqual(ledger.unresolved(self.dir), [22])
+        self.assertEqual(ledger.unscoped(self.dir), [11])
+        ledger.set_scopes(self.dir, {11: scope(parent(40, "Mission"))}, REPO)
+        self.assertEqual(ledger.rows(self.dir)[0]["mission"], f"{REPO}#40")
 
     def test_unscoped_reads_at_most_one_query_of_issues_per_tick(self):
         ledger.record(self.dir, [run(f"s{i}", f"#{i}", "2026-11-10T09:00:00+00:00", 0.1)
@@ -135,8 +157,12 @@ class WatchLedgerTest(unittest.TestCase):
         self.lines, self.asked = [], []
         self.l = swarm.Launcher(self.home, out=self.lines.append)
 
-    def watcher(self, get_scopes):
-        return watch.Watch(self.l, REPO, "mattmcalister", set(), dry_run=False, get_scopes=get_scopes)
+    def watcher(self, get_scopes, get_pr_closes=None):
+        return watch.Watch(self.l, REPO, "mattmcalister", set(), dry_run=False, get_scopes=get_scopes,
+                           get_pr_closes=get_pr_closes or self.no_prs)
+
+    def no_prs(self, repo, numbers):
+        raise AssertionError(f"read PRs {numbers}: every PR here is in the open-PR model")
 
     def world(self, scopes=None):
         return watch.World(model={"prs": [{"number": 20, "closes": [{"number": 11}]}]}, issues=[],
@@ -177,6 +203,47 @@ class WatchLedgerTest(unittest.TestCase):
         w.get_scopes = self.read({10: scope()})
         w.record_ledger(runs, self.world())
         self.assertEqual(ledger.rows(self.home / "launcher")[0]["scopes"], [])
+
+    def test_a_pr_merged_before_its_run_was_recorded_still_reaches_its_mission(self):
+        # The reviewer's approval run ended, then the merger merged #20 before the next check:
+        # the open-PR model no longer has it, so the ledger reads #20's issue from GitHub.
+        runs = {"review:20:abc": run("b", "PR #20", "2026-11-10T09:30:00+00:00", 4.0, kind="review")}
+        prs_read = []
+
+        def closes(repo, numbers):
+            prs_read.append(list(numbers))
+            return {20: [11]}
+        w = self.watcher(self.read({11: scope(parent(40, "Mission"))}), closes)
+        merged = watch.World(model={"prs": []}, issues=[], scopes={}, repo=REPO)
+        w.record_ledger(runs, merged)
+        w.record_ledger(runs, merged)
+        self.assertEqual(prs_read, [[20]])
+        self.assertEqual(self.asked, [[11]])
+        r = ledger.rows(self.home / "launcher")[0]
+        self.assertEqual((r["issue"], r["mission"], r["scopes"]), (11, f"{REPO}#40", [f"{REPO}#40"]))
+        t = ledger.totals(ledger.rows(self.home / "launcher"), NOW, UTC)
+        self.assertEqual((t["spent"], t["unscoped"]), ({f"{REPO}#40": 4.0}, 0.0))
+
+    def test_a_pr_read_failure_is_retried(self):
+        runs = {"review:20:abc": run("b", "PR #20", "2026-11-10T09:30:00+00:00", 4.0, kind="review")}
+        w = self.watcher(self.read({}), self.read(RuntimeError("GitHub is down")))
+        merged = watch.World(model={"prs": []}, issues=[], scopes={}, repo=REPO)
+        w.record_ledger(runs, merged)
+        self.assertEqual(ledger.rows(self.home / "launcher")[0]["scopes"], None)  # not dropped
+        w.get_pr_closes = lambda repo, numbers: {20: [11]}
+        w.get_scopes = lambda repo, numbers: {11: scope(parent(686, "Goal"))}
+        w.record_ledger(runs, merged)
+        self.assertEqual(ledger.rows(self.home / "launcher")[0]["scopes"], [f"{REPO}#686"])
+
+
+class GhPrClosesTest(unittest.TestCase):
+    def test_issues_in_githubs_order_and_none_for_a_number_that_isnt_a_pr(self):
+        swarm.dashboard()
+        import ghql
+        data = {20: {"closingIssuesReferences": {"nodes": [{"number": 11}, {"number": 12}]}},
+                21: {"closingIssuesReferences": {"nodes": []}}, 22: None}
+        with mock.patch.object(ghql, "batched", lambda repo, numbers, field, size: data) as _:
+            self.assertEqual(watch.gh_pr_closes(REPO, [20, 21, 22]), {20: [11, 12], 21: [], 22: []})
 
 
 class SpentCommandTest(unittest.TestCase):
