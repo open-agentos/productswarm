@@ -1379,6 +1379,21 @@ def owner_acts(launcher: Launcher, repo: str, manifest_path: Path | str = manife
     return 0
 
 
+# ---------------------------------------------------------------- trouble (#803)
+
+def trouble(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DEFAULT_PATH,
+            hours: int = 24, as_json: bool = False, owner: str | None = None,
+            read: Callable | None = None) -> int:
+    """`swarm trouble`: per open Goal and Area, progress, stuck work, what waits on the owner
+    and authority used (trouble.py). Only reads."""
+    import trouble as t
+    owner = owner or owner_login()
+    data = (read or t.gather)(launcher, repo, owner, manifest_path, hours)
+    r = t.report(data)
+    launcher.out(json.dumps(r, indent=2) if as_json else t.text(r))
+    return 0
+
+
 # ---------------------------------------------------------------- launch (L3)
 
 JURISDICTIONS = ROOT / "governance" / "jurisdictions.yml"
@@ -1772,6 +1787,13 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_acts.add_argument("--json", action="store_true", dest="as_json", help="the same per-day list as JSON")
     p_acts.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_acts.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
+    p_trouble = sub.add_parser("trouble", help="per Goal and Area: progress, stuck work, what waits on "
+                                                "the owner, authority used (#803)")
+    p_trouble.add_argument("--json", action="store_true", dest="as_json", help="the report as JSON")
+    p_trouble.add_argument("--hours", type=int, default=24,
+                           help="window for what agents did on the owner's authority (default: 24)")
+    p_trouble.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_trouble.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
     p_launch.add_argument("role")
     p_launch.add_argument("--issue", type=int, required=True, help="the issue to work on")
@@ -1846,7 +1868,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             launcher.out(f"swarm watch: {e}")
             return 2
     repo = None
-    if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges", "daily", "acts"):
+    if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges", "daily", "acts", "trouble"):
         repo = args.repo or dashboard().default_repo()
         if not repo:
             launcher.out(f"swarm {args.cmd}: can't tell the repo; pass --repo owner/name")
@@ -1884,6 +1906,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return daily(launcher, repo, args.manifest)
         if args.cmd == "acts":
             return owner_acts(launcher, repo, args.manifest, args.day, args.as_json)
+        if args.cmd == "trouble":
+            return trouble(launcher, repo, args.manifest, args.hours, args.as_json)
         if args.cmd == "watch":
             import watch
             try:
