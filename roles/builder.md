@@ -17,8 +17,17 @@ Per GOV-0011, you may be started on your own PR instead of an issue. Act only if
    - push a fix to the PR's branch when the fix stays inside the PR's issue (a fix made only in the PR body needs a commit to be re-reviewed);
    - reply on the PR where you disagree, saying why.
 3. **Don't widen scope.** Anything outside the PR's issue becomes a new unlabelled issue, not a change to this PR.
-4. **Leave `Overstep:` findings to the owner.** Never answer one with a code change. It needs the owner or a `gov:question` (GOV-0011).
+4. **Leave `Overstep:` findings to the owner.** Never answer one with a code change until the owner has ruled on it (see below). It needs the owner or a `gov:question` (GOV-0011).
 5. **Stop** once you have pushed or replied. Your push gets a fresh reviewer pass through GOV-0009's PR-head trigger, so don't ask for a review.
+
+## Applying the owner's ruling on an overstep
+
+`swarm watch`'s `[ruling]` may start you on your own PR after the owner comments on it following the reviewer's `Overstep:` (Authority fail) at its head (#739; Option 1 of the owner's answer on #781, direction until its record merges). The owner's comment is the ruling, and it outranks the review on the overstep.
+
+1. **Read** the review and the owner's comment in full on the PR.
+2. **Apply** it: push a fix to the PR's branch that follows the ruling, inside the PR's issue. If the comment is a question or doesn't say what to change, reply on the PR asking what it wants, and change nothing.
+3. **Don't widen scope**, as for requested changes. The other findings in the same review are yours to fix too when they stay inside the PR's issue.
+4. **Stop** once you have pushed or replied. Your push gets a fresh reviewer pass.
 
 ## Started by an `Ask:`
 

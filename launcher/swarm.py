@@ -128,7 +128,8 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
            called_by: str | None = None, call_why: str | None = None,
            daily: str | None = None, ask: str | None = None,
            ask_comment: int | None = None, research: str | None = None,
-           research_comment: int | None = None) -> str:
+           research_comment: int | None = None, ruling: str | None = None,
+           ruling_comment: int | None = None) -> str:
     """The prompt ops/swarm-session uses when given no args (it passes args on unchanged).
 
     With an issue, it names it: the heartbeat's `working_on` detection matches
@@ -141,7 +142,9 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     on the report issue. With ask, an [ask] run (GOV-0029, #590): the role answers the
     owner's question, from comment ask_comment on the report issue, in one comment there.
     With research, a [research] run (GOV-0029, #591): the analyst writes a brief on the
-    question from comment research_comment in research/, as a PR that closes the issue."""
+    question from comment research_comment in research/, as a PR that closes the issue. With
+    ruling and a PR, a [ruling] run (#739, the owner's answer on #781): the builder applies
+    the owner's comment ruling_comment on an overstep on the PR."""
     if issue and research:
         # As for an ask: "issue #M" in the question would give the heartbeat two issues.
         safe = ISSUE_WORD_RE.sub(r"#\1", research)
@@ -170,6 +173,13 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
         then = (f"answer a call-in on issue #{issue}: {called_by} called you in (GOV-0023){why}. "
                 f"That call counts as asking you in (GOVERNANCE.md section 8). Read the issue, post "
                 f"one comment on it with your contribution, and stop")
+    elif issue and pr and ruling is not None:
+        where = f" (comment {ruling_comment})" if ruling_comment else ""
+        then = (f"apply the owner's ruling on the overstep on PR #{pr}, which closes issue #{issue}. "
+                f"swarm watch started this run from its [ruling] trigger (#739): the owner commented "
+                f"on the PR after the reviewer's Authority: fail review{where}: \"{ruling}\". Read the "
+                f"review and that comment in full, then push a fix that follows the ruling to the PR's "
+                f"branch, or reply on the PR saying why you can't, as roles/builder.md says, and stop")
     elif issue and pr:
         then = f"respond to the requested changes on PR #{pr}, which closes issue #{issue}"
     elif pr:     # a reviewer on one PR: a run in GitHub Actions (#215)
@@ -278,6 +288,8 @@ class Started:
     ask_comment: int | None = None    # and the id of the comment that asked it
     research: str | None = None       # a [research] run (GOV-0029, #591): the question
     research_comment: int | None = None   # and the id of the comment that asked it
+    ruling: str | None = None         # a [ruling] run (#739): the owner's comment on the overstep
+    ruling_comment: int | None = None     # and that comment's id
 
     @classmethod
     def from_dict(cls, d: dict) -> "Started":
@@ -286,7 +298,8 @@ class Started:
                    budget_usd=d.get("budget_usd"), max_turns=d.get("max_turns"),
                    called_by=d.get("called_by"), call_why=d.get("call_why"),
                    daily=d.get("daily"), ask=d.get("ask"), ask_comment=d.get("ask_comment"),
-                   research=d.get("research"), research_comment=d.get("research_comment"))
+                   research=d.get("research"), research_comment=d.get("research_comment"),
+                   ruling=d.get("ruling"), ruling_comment=d.get("ruling_comment"))
 
 
 def recovered(sid: str, cmd: str, started: float) -> Started:
@@ -650,7 +663,8 @@ class Launcher:
         session = ["exec", shlex.quote(str(wt / "ops" / "swarm-session")), shlex.quote(s.role),
                    "--model", shlex.quote(s.model), "--session-id", s.session_id]
         prompt = shlex.quote(opener(s.role, s.issue, s.pr, s.called_by, s.call_why, s.daily,
-                                    s.ask, s.ask_comment, s.research, s.research_comment))
+                                    s.ask, s.ask_comment, s.research, s.research_comment,
+                                    s.ruling, s.ruling_comment))
         if s.by == "watch":
             result = shlex.quote(str(self.result_file(s.session_id)))
             where = f" in container swarm-{s.session_id}" if self.container else ""

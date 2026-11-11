@@ -33,6 +33,8 @@ it has none (for example, the role has no spend_cap_usd).
 |        | with asks = true (GOV-0029, #590)                                       | report issue, once   |
 | research| a `Research: <question>` comment by the owner or the planner App on an | analyst on that      |
 |        | open issue, with research = true (GOV-0029, #591)                       | issue, once          |
+| ruling | the owner's comment on an open builder PR, posted after the reviewer's  | builder on the PR,   |
+|        | Authority: fail review at its head (#739, the owner's answer on #781)   | once per comment     |
 
 [daily] (#588, GOV-0029): with `daily = true` in [watch], once each working day (Monday to
 Friday, in this machine's local time) at or after daily_at, it starts the planner on
@@ -106,6 +108,21 @@ history, so the count holds across restarts. A third request starts nothing, and
 Authority: fail review at the head starts nothing either, and nor do requested changes
 on a PR another App opened, such as a docs ruling PR (#178): the builder responds only on
 its own PR (GOV-0011). `needs_you()` lists all three as needing the owner. A PR that doesn't close exactly one issue is skipped with a reason.
+
+[ruling] (#739, Option 1 of the owner's answer on #781; direction until its record merges):
+an overstep (an Authority: fail review at the head) starts nothing by itself (GOV-0011), but
+once the owner then comments on the PR, that comment is taken as the ruling and starts the
+PR's author role once, with the comment as its direction. gather() reads a PR's comments only
+while its latest reviewer review at head is Authority: fail. Only comments by the owner
+(the same login `ready` is checked against, GOV-0006) posted after that review count; each
+is keyed on its id (`ruling:<PR>:<comment id>`), so each starts at most one run, and any
+owner comment there counts, even a question. A push moves the head and ends it: the new
+head is reviewed again. Until #777 rules which role [respond] starts, only the builder is
+started, on its own PR: an owner comment on another App's PR is skipped with a reason, as is
+a PR that doesn't close exactly one issue. It waits while a session is live on the PR's
+issue, like [respond]. Its prompt quotes the comment (RULING_MAX characters, whitespace
+folded) and names its id; stophook.py holds the run until it pushed (the head is no longer
+Authority: fail) or commented on the PR, or the PR closed.
 
 [answer] on a ruling (#495): a question that is already `ready` when the owner rules it
 fires [answer] again, keyed on the owner's `gov:ruled` event (`answer:N:<event id>`), so
@@ -230,7 +247,7 @@ with by="watch", and `swarm ls` shows them as "by watch".
 
 Other repos of the org (#772): swarm.toml's [org] repos lists them (manifest.others()
 drops this repo and any outside its org). Each check reads each one with gather() and works
-out [review], [build], [respond], [record], [answer] and [call-in] there as here, so a Task in
+out [review], [build], [respond], [ruling], [record], [answer] and [call-in] there as here, so a Task in
 another repo under an owner's Goal in this one is go (GOV-0031). Their keys start
 `<owner/name>|` and their refs name the repo (`open-agentos/x#5`). [daily], [ask],
 [research] and swarm:halt stay with this repo's report issue. Sessions the launcher started
@@ -289,6 +306,8 @@ ASK_RE = re.compile(r"^[ \t]*Ask:[ \t]*([^:\n]*?)[ \t]*(?::[ \t]*([^\n]*?))?[ \t
                     re.IGNORECASE | re.MULTILINE)
 RESEARCH = "research"         # GOV-0029's Research: trigger (#591)
 RESEARCH_RE = re.compile(r"^[ \t]*Research:[ \t]*([^\n]*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+RULING = "ruling"             # the owner's ruling on an overstep (#739, #781)
+RULING_MAX = 1500             # characters of the owner's ruling that go into the prompt
 RESEARCH_DAYS = 7             # how far back [research] reads the repo's comments
 PLANNER_APP = "productswarm-planner[bot]"   # whose Research: lines count, with the owner's
 WORKDAYS = range(5)           # Monday to Friday, by date.weekday()
@@ -339,7 +358,7 @@ ENDINGS = {AT_CAP: "at_cap", ERROR: "error", NO_RESULT: "no_result", LIMITED: "l
 class Trigger:
     key: str                  # identity: a new key is a new trigger
     kind: str                 # review | build | record | answer | respond | call-in | daily | ask
-                              # | research
+                              # | research | ruling
     ref: str                  # "PR #12" or "#49"
     why: str
     role: str | None = None
@@ -359,6 +378,8 @@ class Trigger:
     research: str | None = None   # [research]: the question, for the analyst's prompt (#591)
     research_comment: int | None = None   # [research]: the comment that asked it
     repo: str | None = None       # another repo of the org it is in (#772); None: this one
+    ruling: str | None = None     # [ruling]: the owner's comment, for the builder's prompt (#739)
+    ruling_comment: int | None = None   # [ruling]: that comment's id
 
     def line(self) -> str:
         if self.held:
@@ -464,7 +485,7 @@ class World:
     issues: list[dict]                               # raw issues (generate.fetch)
     events: dict[int, list[dict]] = field(default_factory=dict)     # issue -> events, oldest first
     reviewed: dict[int, set[str]] = field(default_factory=dict)     # PR -> SHAs the reviewer reviewed
-    comments: dict[int, list[dict]] = field(default_factory=dict)   # gov:ruled question -> comments (#501)
+    comments: dict[int, list[dict]] = field(default_factory=dict)   # issue or overstep PR (#739) -> comments
     recent: list[dict] | None = None                 # the repo's recent comments, for [research] (#591)
     plan: str | None = None                          # PLAN.md on main, None if absent (#583)
     scopes: dict[int, dict | None] = field(default_factory=dict)   # issue -> swarm.parse_scope() (#681)
@@ -591,6 +612,7 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         t = respond(prs[n], busy)
         if t:
             out.append(t)
+        out.extend(rulings(prs[n], w.comments.get(n, []), owner, busy))
 
     # Questions: every open gov:question, from the model, plus any a session is blocked on.
     # Not from needs-you alone: it leaves out gov:ruled questions (#469), which [record]
@@ -1048,6 +1070,51 @@ def respond(p: dict, busy: Callable[[int], tuple[str, str] | None]) -> Trigger |
                    held=h[0] if h else None, once=h[1] if h else None)
 
 
+def overstepped(p: dict) -> bool:
+    """Whether the reviewer's latest review at an open PR's head is Authority: fail (#739)."""
+    r = p.get("reviewer") or {}
+    return r.get("at_head") is not None and r.get("authority") == "fail"
+
+
+def ruling_text(body: str | None) -> str:
+    """The owner's comment as a prompt can quote it: whitespace folded to single spaces, and
+    "issue #M" said as "#M" (the heartbeat would read two issues), at most RULING_MAX."""
+    text = swarm.ISSUE_WORD_RE.sub(r"#\1", " ".join((body or "").split()))
+    return text if len(text) <= RULING_MAX else text[:RULING_MAX - 1].rstrip() + "…"
+
+
+def rulings(p: dict, comments: list[dict], owner: str,
+            busy: Callable[[int], tuple[str, str] | None]) -> list[Trigger]:
+    """#739's [ruling] triggers for one open, non-draft PR (Option 1 of the owner's answer
+    on #781): one per comment the owner posted on it after the reviewer's Authority: fail
+    review at its head. Comments by anyone else start nothing."""
+    if not overstepped(p):
+        return []
+    g = swarm.dashboard()
+    n, head, since = p["number"], p["head"], p["reviewer"].get("at_head_at") or ""
+    out = []
+    for c in comments:
+        if (c.get("user") or {}).get("login") != owner or (c.get("created_at") or "") <= since:
+            continue
+        key = f"ruling:{n}:{c.get('id')}"
+        why = f"the owner commented after the overstep at {head[:7]} (comment {c.get('id')})"
+        t = Trigger(key=key, kind=RULING, ref=f"PR #{n}", why=why, role="builder", pr=n,
+                    ruling=ruling_text(c.get("body")), ruling_comment=c.get("id"))
+        closes = [x["number"] for x in p["closes"]]
+        role = g.pr_role(p.get("author", ""))
+        if role != "builder":   # until #777 rules which role [respond] starts
+            out.append(replace(t, skipped=f"it is a {role or 'non-swarm'} PR, and only the builder "
+                                          f"is started on a ruling, on its own PR (#777)"))
+        elif len(closes) != 1:
+            out.append(replace(t, skipped=f"it closes {len(closes)} issues, and the builder "
+                                          f"responds only on a PR that closes exactly one"))
+        else:
+            h = busy(closes[0])
+            out.append(replace(t, command=launch_cmd("builder", closes[0], n), issue=closes[0],
+                               held=h[0] if h else None, once=h[1] if h else None))
+    return out
+
+
 def gov_ids(title: str | None) -> set[str]:
     """The GOV records an issue belongs to: the GOV-NNNN ids in its title (#136)."""
     return set(GOV_RE.findall(title or ""))
@@ -1126,6 +1193,10 @@ def gather(repo: str, idle_minutes: int, now: dt.datetime) -> World:
             # the owner's `Record: yes` (#501), and `Call in:` lines on ready issues (#520)
             # and milestone issues (#594)
             w.comments[it["number"]] = g.gh_items(f"repos/{repo}/issues/{it['number']}/comments?per_page=100")
+    for p in model["prs"]:
+        if not p.get("draft") and overstepped(p):
+            # #739: the owner's comments after an overstep, for [ruling]
+            w.comments[p["number"]] = g.gh_items(f"repos/{repo}/issues/{p['number']}/comments?per_page=100")
     for n, reviews in (data.get("reviews") or {}).items():    # fetch() read them for build()
         w.reviewed[n] = reviewed_heads(reviews)
     return w
@@ -1556,7 +1627,7 @@ def gh_pr_closes(repo: str, numbers: list[int]) -> dict[int, list[int]]:
 
 
 def served_pr(r: dict, prs: list[dict]) -> int | None:
-    """The PR a run ended up serving: the trigger's PR for [review] and [respond]; for a
+    """The PR a run ended up serving: the trigger's PR for [review], [respond] and [ruling]; for a
     run on an issue ([build], [record], [answer]), the PR that closes it, merged first,
     then open, then closed, newest first. None if no PR closes it."""
     m = REF_RE.search(r.get("ref") or "")
@@ -1876,7 +1947,8 @@ class Watch:
                              budget_usd=s.spend_cap_usd, max_turns=limits.max_turns,
                              called_by=t.called_by, call_why=t.call_why, daily=t.daily,
                              ask=t.ask, ask_comment=t.ask_comment, research=t.research,
-                             research_comment=t.research_comment)
+                             research_comment=t.research_comment, ruling=t.ruling,
+                             ruling_comment=t.ruling_comment)
 
     def start_tick(self, now: dt.datetime) -> list[Trigger]:
         """Start a session for each new trigger, within the [watch] limits (GOV-0010)."""
@@ -2189,7 +2261,7 @@ class Watch:
             refused = ([f"#{t.issue} doesn't exist"] if issue is None else
                        [f"#{t.issue} is a pull request, not an issue"] if "pull_request" in issue else
                        [f"#{t.issue} is closed"] if issue.get("state") != "open" else [])
-        elif t.kind in ("build", "respond"):
+        elif t.kind in ("build", "respond", RULING):
             # The owner's `ready`, or the issue's milestone (GOV-0026, #583), as `swarm launch`.
             refused = swarm.go_refusals(t.issue, issue, events, self.owner, set(self.apps()),
                                         self.get_reader(self.repo, t.issue), now=now, repo=self.repo)

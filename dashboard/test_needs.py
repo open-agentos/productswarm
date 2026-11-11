@@ -137,7 +137,8 @@ class ReviewerStateTest(unittest.TestCase):
         r, detail = self.detail([review("CHANGES_REQUESTED", "c1"), review("COMMENTED", "c1"),
                                  review("CHANGES_REQUESTED", self.HEAD),
                                  review("CHANGES_REQUESTED", self.HEAD, login="someone")])
-        self.assertEqual(r, {"changes_requested": 2, "at_head": "CHANGES_REQUESTED", "authority": "pass"})
+        self.assertEqual(r, {"changes_requested": 2, "at_head": "CHANGES_REQUESTED", "authority": "pass",
+                             "at_head_at": None})
         self.assertEqual(detail, "awaiting review, closes #4")
 
     def test_third_request_needs_the_owner(self):

@@ -1404,6 +1404,113 @@ class RespondTest(unittest.TestCase):
         self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["respond"])
 
 
+class RulingTest(unittest.TestCase):
+    """#739 (Option 1 of the owner's answer on #781): the owner's comment on a PR after an
+    Authority: fail review at its head starts the builder once. PR #72 closes #73."""
+
+    setUp_start = StartTest.setUp
+    manifest, watcher, started, exit = StartTest.manifest, StartTest.watcher, StartTest.started, StartTest.exit
+
+    def setUp(self):
+        self.setUp_start()
+        sc = self.scene
+        sc.issues, sc.events = [issue(73, ["ready"])], {73: [ev("ready", eid=15)]}
+        sc.prs, sc.reviewed = [pr(72, SHA1, closes=[73])], {}
+        self.overstep()
+
+    def overstep(self, commit=SHA1, authority="fail", minutes_ago=30):
+        self.scene.reviews[72] = [{**review("COMMENTED", commit, authority), "submitted_at": ts(minutes_ago)}]
+
+    def say(self, cid, body="Don't mount the shared .git read-write; use a copy.", who=OWNER, minutes_ago=10):
+        self.scene.comments.setdefault(72, []).append(
+            {"id": cid, "user": {"login": who}, "body": body, "created_at": ts(minutes_ago)})
+
+    def test_the_owners_comment_after_an_overstep_starts_one_builder(self):
+        self.say(901)
+        done = self.watcher().tick(NOW)
+        self.assertEqual([(t.kind, t.ref) for t in done], [("ruling", "PR #72")])
+        self.assertEqual(self.started(), [("builder-pr-72", "builder", "m-builder", 73, "watch")])
+        e = self.l.load()[0]
+        self.assertEqual((e.pr, e.ruling_comment), (72, 901))
+        argv = headless_argv(self.fake.commands[0])
+        self.assertEqual(argv[argv.index("-p") + 1],
+                         swarm.opener("builder", 73, 72, ruling="Don't mount the shared .git read-write; "
+                                      "use a copy.", ruling_comment=901))
+        self.assertIn("then apply the owner's ruling on the overstep on PR #72, which closes issue #73.",
+                      argv[argv.index("-p") + 1])
+        self.assertIn("[ruling] PR #72 the owner commented after the overstep at aaaaaaa (comment 901) "
+                      "-> starting builder-pr-72", self.lines)
+        self.exit("builder-pr-72")
+        self.assertEqual(self.watcher().tick(NOW), [])          # keyed on the comment: once
+        self.say(902, "And keep the token read-only.", minutes_ago=5)
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["ruling"])   # a new comment
+        self.assertEqual(len(self.fake.commands), 2)
+
+    def test_a_non_owner_comment_starts_nothing(self):
+        self.say(901, who="productswarm-planner[bot]")
+        self.say(902, who="someone")
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.assertEqual(self.fake.commands, [])
+
+    def test_a_comment_before_the_overstep_starts_nothing(self):
+        self.say(901, minutes_ago=40)
+        self.assertEqual(self.watcher().tick(NOW), [])
+
+    def test_no_overstep_at_head_starts_nothing(self):
+        self.say(901)
+        self.overstep(authority="pass")                          # a plain comment review
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.overstep(commit=SHA2)                               # an overstep on an older head
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["review"])
+        self.assertEqual([c for c in self.fake.commands if "ruling" in c], [])
+
+    def test_another_apps_pr_or_one_closing_no_issue_is_skipped(self):
+        self.say(901)
+        self.scene.prs[0]["author"] = {"login": "app/productswarm-docs"}
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["ruling"])
+        self.assertIn("skipped: it is a docs PR, and only the builder is started on a ruling", self.lines[-1])
+        self.scene.prs, self.scene.issues = [pr(72, SHA1)], []
+        self.say(902, minutes_ago=5)
+        self.watcher().tick(NOW)
+        self.assertIn("skipped: it closes 0 issues", self.lines[-1])
+        self.assertEqual(self.fake.commands, [])
+
+    def test_a_live_session_on_the_issue_holds_it(self):
+        self.say(901)
+        self.scene.tracking[0], self.scene.comments[200] = tracking(200, "busy-sid", "builder", 73)
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.scene.tracking, self.scene.comments[200] = [], []
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["ruling"])
+
+    def test_dry_run_prints_it(self):
+        self.say(901, "See issue #5 first.\n\nThen   fix it.")
+        w = watch.Watch(self.l, REPO, OWNER, ROLES, manifest_path=self.path, read=self.scene.read)
+        w.tick(NOW)
+        self.assertEqual(trigger_lines(self.lines),
+                         ["[ruling] PR #72 the owner commented after the overstep at aaaaaaa (comment 901) "
+                          "-> would start `launcher/swarm launch builder --issue 73 --pr 72`"])
+        argv = headless_argv(self.lines[1].strip())
+        self.assertIn('(comment 901): "See #5 first. Then fix it."', argv[argv.index("-p") + 1])
+        self.assertEqual(self.fake.commands, [])
+
+    def test_ruling_text_is_folded_and_capped(self):
+        self.assertEqual(watch.ruling_text(" a\n\n b  issue #4 "), "a b #4")
+        self.assertEqual(len(watch.ruling_text("x" * 5000)), watch.RULING_MAX)
+
+    def test_gather_reads_the_comments_of_an_overstepped_pr_only(self):
+        self.say(901)
+        self.scene.prs.append(pr(74, SHA2, closes=[73]))
+        self.scene.comments[74] = [{"id": 1}]
+
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, self.scene.gh(argv), "")
+        fake_sub = types.SimpleNamespace(run=run, SubprocessError=subprocess.SubprocessError)
+        with mock.patch.object(G, "subprocess", fake_sub), mock.patch.object(G.ghql, "subprocess", fake_sub):
+            w = watch.gather(REPO, 15, NOW)
+        self.assertEqual([c["id"] for c in w.comments[72]], [901])
+        self.assertNotIn(74, w.comments)
+
+
 class OverlapTest(unittest.TestCase):
     """#136 (the owner's answer on #127): a [build] waits while a live builder or an open PR
     shares a GOV id in its issue's title."""

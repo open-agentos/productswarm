@@ -21,6 +21,10 @@ through the session's `gh`) and checks the run's done-condition:
 |                                             | isn't "changes requested" (a push moved the     |
 |                                             | head, or there was nothing to respond to), or   |
 |                                             | the run commented on the PR, or the PR closed   |
+| builder on an owner's ruling ([ruling])     | the reviewer's latest review at the PR's head   |
+|                                             | isn't Authority: fail (a push moved the head),  |
+|                                             | or the run commented on the PR, or the PR       |
+|                                             | closed (#739)                                   |
 | reviewer                                    | every open, non-draft PR that existed when the  |
 |                                             | run started has a reviewer review at its head   |
 |                                             | or one posted since the run started             |
@@ -265,6 +269,26 @@ def missing_respond(g: GitHub, repo: str, e: swarm.Started, login: str) -> str |
             f"says, then stop.")
 
 
+def missing_ruling(g: GitHub, repo: str, e: swarm.Started, login: str) -> str | None:
+    """A [ruling] run (#739): done once the PR is closed, its head is no longer Authority:
+    fail (it pushed, so the new head awaits review), or it commented on the PR since it
+    started (saying why it can't)."""
+    p = g.get(f"repos/{repo}/pulls/{e.pr}") or {}
+    if p.get("state") != "open":
+        return None
+    head = (p.get("head") or {}).get("sha")
+    r = swarm.dashboard().reviewer_state(g.items(f"repos/{repo}/pulls/{e.pr}/reviews?per_page=100"), head)
+    if r["at_head"] is None or r["authority"] != "fail":
+        return None
+    since = iso(e.started)
+    for path in (f"repos/{repo}/issues/{e.pr}/comments?since={since}&per_page=100",
+                 f"repos/{repo}/pulls/{e.pr}/comments?since={since}&per_page=100"):
+        if any(mine(c, login) and since_start(c, e.started) for c in g.items(path)):
+            return None
+    return (f"The owner's ruling on the overstep on PR #{e.pr} isn't applied yet. Push a fix that "
+            f"follows it to the PR's branch, or reply on the PR saying why you can't, then stop.")
+
+
 def missing_research(g: GitHub, repo: str, e: swarm.Started, login: str) -> str | None:
     """A [research] run (#591, GOV-0029): done once a PR the run's App opened since the run
     started touches research/ and names the issue, or once the App commented on the issue
@@ -316,6 +340,8 @@ def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
         what = missing_research(g, repo, e, login)
     elif e.role == "reviewer":
         what = missing_review(g, repo, e)
+    elif e.role == "builder" and e.pr and e.ruling is not None:
+        what = missing_ruling(g, repo, e, login)
     elif e.role == "builder" and e.pr:
         what = missing_respond(g, repo, e, login)
     elif e.role in ("builder", "docs") and e.issue:
