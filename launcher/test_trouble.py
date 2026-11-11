@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import swarm  # noqa: E402
 import trouble  # noqa: E402
+import watch  # noqa: E402
 
 swarm.dashboard()   # puts generate on the path, as gather() does
 
@@ -64,10 +65,20 @@ def pr(n: int, closes: int, *, author: str = "app/productswarm-builder", reviews
 
 
 def merged(n: int, closes: int, hours: float, by: str = "productswarm-merger",
-           author: str = "app/productswarm-builder", body: str = "") -> dict:
+           author: str = "app/productswarm-builder", body: str = "", comments=(), reviews=()) -> dict:
     return {"number": n, "title": f"pr {n}", "url": f"https://github.com/{REPO}/pull/{n}",
             "author": {"login": author}, "body": body, "mergedAt": ago(hours),
-            "mergedBy": {"login": by}, "closingIssuesReferences": [{"number": closes}]}
+            "mergedBy": {"login": by}, "headRefOid": HEAD, "comments": list(comments),
+            "reviews": list(reviews), "closingIssuesReferences": [{"number": closes}]}
+
+
+def said(who: str, body: str, hours: float) -> dict:
+    """A PR conversation comment as `gh pr list` shows it."""
+    return {"author": {"login": who}, "createdAt": ago(hours), "body": body}
+
+
+def left(reason: str, hours: float = 1, head: str = HEAD) -> dict:
+    return said("productswarm-merger", f"Left for the owner at {head}: {reason}.\n\n-- merger", hours)
 
 
 def comment(n: int, body: str, hours: float = 2, author: str = OWNER, on_pr: bool = False) -> dict:
@@ -127,6 +138,36 @@ class Progress(unittest.TestCase):
         a = goal(3, "**Target:** every check runs on the host\n\nmore", kind="Area")
         self.assertEqual(trouble.criteria(a["body"], "Area"), [("every check runs on the host", False)])
 
+    def test_m2_merge_share_and_reverts_from_swarm_merges(self):
+        g = goal(2, "**Criteria**\n- [ ] over half of a week's merges happen without the owner's click\n"
+                    "- [ ] no unreviewed revert in that week\n")
+        enq = said("productswarm-merger", f"Enqueued under standing grant (GOV-0027) at {HEAD}.", 3)
+        week = [merged(10, 6, 2), merged(11, 6, 3, by="github-merge-queue", comments=[enq]),
+                merged(12, 6, 4, by=OWNER), merged(9, 6, 24 * 5, by=OWNER)]   # Nov 6: last week
+        p = scope(trouble.report(data(issues=[g])), 2)["progress"]
+        self.assertEqual([c["status"] for c in p], ["unmeasured", "unmeasured"])
+        p = scope(trouble.report(data(issues=[g], week_merges=week)), 2)["progress"]
+        self.assertEqual([c["status"] for c in p], ["met", "met"])
+        self.assertIn("2 of 3 merges this week", p[0]["detail"])
+        week.append(merged(13, 6, 1, by=OWNER, body="Reverts o/r#10"))
+        p = scope(trouble.report(data(issues=[g], week_merges=week)), 2)["progress"]
+        self.assertEqual([c["status"] for c in p], ["progress", "failing"])
+        self.assertIn("PR #13", p[1]["detail"])
+        week[-1]["reviews"] = [review("APPROVED", 1.5)]
+        p = scope(trouble.report(data(issues=[g], week_merges=week)), 2)["progress"]
+        self.assertEqual(p[1]["status"], "met")
+
+    def test_m4_acts_from_swarm_acts(self):
+        g = goal(4, "**Criteria**\n- [ ] my acts are counted for each of the 10 working days "
+                    "(checklist gates 1 and 2)\n")
+        day = {"under_limit": True, "c_team": True}
+        days = [day] * 3 + [{"under_limit": False, "c_team": True}] + [day] * 6
+        p = scope(trouble.report(data(issues=[g], owner_days=days)), 4)["progress"]
+        self.assertEqual((p[0]["status"], p[0]["detail"][:8]), ("progress", "3 of 10 "))
+        p = scope(trouble.report(data(issues=[g], owner_days=[day] * 10)), 4)["progress"]
+        self.assertEqual(p[0]["status"], "met")
+        self.assertEqual(scope(trouble.report(data(issues=[g])), 4)["progress"][0]["status"], "unmeasured")
+
     def test_only_owner_opened_scopes(self):
         r = trouble.report(data(issues=[M1, goal(9, "- [ ] x", author="productswarm-planner[bot]")]))
         self.assertEqual([s["ref"] for s in r["scopes"]], [f"{REPO}#1"])
@@ -146,18 +187,65 @@ class Stuck(unittest.TestCase):
         self.assertEqual(scope(r)["stuck"] + scope(r)["waiting"], [])
 
     def test_rule1_overstep_waits_then_stuck_once_owner_answers(self):
-        rv = review("CHANGES_REQUESTED", 20, body="Authority: fail")
-        r = trouble.report(data(issues=[M1, issue(661)], scopes={661: under(1)}, prs=[pr(679, 661, reviews=[rv])]))
+        # An overstep is a COMMENTED review with Authority: fail; [ruling] doesn't start docs.
+        rv = review("COMMENTED", 20, body="**Authority:** fail")
+        p = pr(679, 661, author="app/productswarm-docs", reviews=[rv])
+        r = trouble.report(data(issues=[M1, issue(661)], scopes={661: under(1)}, prs=[p]))
         self.assertEqual(scope(r)["stuck"], [])
         [w] = scope(r)["waiting"]
         self.assertIn("overstep", w["reason"])
-        answer = {"author": {"login": OWNER}, "createdAt": ago(13.5), "body": "fine"}
-        r = trouble.report(data(issues=[M1, issue(661)], scopes={661: under(1)},
-                                prs=[pr(679, 661, reviews=[rv], comments=[answer])]))
+        p["comments"].append(said(OWNER, "fine", 13.5))
+        r = trouble.report(data(issues=[M1, issue(661)], scopes={661: under(1)}, prs=[p]))
         [x] = scope(r)["stuck"]
         self.assertEqual((x["ref"], x["age_hours"]), ("PR #679", 13.5))
         self.assertIn("answered", x["reason"])
+        self.assertIn("[ruling] restarts only builder", x["reason"])
         self.assertEqual(scope(r)["waiting"], [])
+
+    def test_rule1_overstep_679_shape(self):
+        # #679: a builder PR, the reviewer's COMMENTED review at head says Authority: fail.
+        rv = review("COMMENTED", 27, body="Overstep: mounts .git read-write\n\n**Authority:** fail")
+        p = pr(679, 661, reviews=[rv], comments=[said("productswarm-reviewer", "Overstep: x", 27)])
+        d = dict(issues=[M1, issue(661)], scopes={661: under(1)}, prs=[p])
+        [w] = scope(trouble.report(data(**d)))["waiting"]
+        self.assertEqual((w["ref"], w["reason"], w["age_hours"]), ("PR #679", "overstep: needs the owner", 27))
+        p["comments"].append(said(OWNER, "don't mount the shared .git read-write", 23))
+        r = trouble.report(data(**d))
+        self.assertEqual(scope(r)["stuck"] + scope(r)["waiting"], [])     # [ruling] starts the builder
+        p["comments"].append(said("productswarm-builder", "Which mount do you want?", 22))
+        r = trouble.report(data(**d))
+        [w] = scope(r)["waiting"]
+        self.assertIn("the builder replied", w["reason"])
+        self.assertEqual(scope(r)["stuck"], [])
+
+    def test_rule1_overstep_on_pr_closing_two_issues_is_stuck_once_answered(self):
+        p = pr(5, 661, reviews=[review("COMMENTED", 5, body="Authority: fail")],
+               comments=[said(OWNER, "ok", 4)])
+        p["closingIssuesReferences"].append({"number": 662})
+        [x] = scope(trouble.report(data(issues=[M1, issue(661)], scopes={661: under(1)}, prs=[p])))["stuck"]
+        self.assertIn("closes 2 issues", x["reason"])
+
+    def test_rule1_restart_roles_come_from_watch(self):
+        p = pr(704, 692, author="app/productswarm-analyst", reviews=[review("CHANGES_REQUESTED", 13.5)])
+        d = dict(issues=[M1, issue(692)], scopes={692: under(1)}, prs=[p])
+        self.assertEqual(len(scope(trouble.report(data(**d)))["stuck"]), 1)
+        old = watch.RESPOND_ROLES
+        try:
+            watch.RESPOND_ROLES = ("builder", "analyst")
+            r = trouble.report(data(**d))
+        finally:
+            watch.RESPOND_ROLES = old
+        self.assertEqual(scope(r)["stuck"] + scope(r)["waiting"], [])
+
+    def test_rule1_past_round_bound_waits_then_stuck(self):
+        rvs = [review("CHANGES_REQUESTED", h, commit=c) for h, c in ((9, "b" * 40), (6, "c" * 40))]
+        p = pr(5, 692, reviews=[*rvs, review("CHANGES_REQUESTED", 2)])
+        d = dict(issues=[M1, issue(692)], scopes={692: under(1)}, prs=[p])
+        [w] = scope(trouble.report(data(**d)))["waiting"]
+        self.assertIn("3 times", w["reason"])
+        p["comments"].append(said(OWNER, "try again", 1))
+        [x] = scope(trouble.report(data(**d)))["stuck"]
+        self.assertIn("answered", x["reason"])
 
     def test_rule1_push_since_review_is_not_stuck(self):
         p = pr(704, 692, author="app/productswarm-analyst",
@@ -222,25 +310,42 @@ class Waiting(unittest.TestCase):
                                 scopes={7: under(1)}))
         self.assertEqual([x["ref"] for x in r["outside"]["waiting"]], ["#731"])
 
-    def test_protected_path_needs_owner_approval(self):
-        p = pr(796, 5, files=("ops/x",), reviews=[review("APPROVED", 1)])
-        r = trouble.report(data(issues=[M1, issue(5)], scopes={5: under(1)}, prs=[p]))
-        [x] = scope(r)["waiting"]
-        self.assertIn("GOV-0027", x["reason"])
-        p["reviews"].append(review("APPROVED", 0.5, author=OWNER))
-        r = trouble.report(data(issues=[M1, issue(5)], scopes={5: under(1)}, prs=[p]))
-        self.assertEqual(scope(r)["waiting"], [])
+    def test_approved_prs_the_merger_left_for_any_reason(self):
+        why = "it touches a protected path (ops/x) and the owner hasn't approved at head"
+        prs = [pr(796, 5, files=("ops/x",), reviews=[review("APPROVED", 2)], comments=[left(why, 1.5)]),
+               pr(797, 5, reviews=[review("APPROVED", 2)],
+                  comments=[left("the `tests` check failed at head", 1)]),
+               pr(798, 5, reviews=[review("APPROVED", 2)])]                 # merger hasn't judged it
+        r = trouble.report(data(issues=[M1, issue(5)], scopes={5: under(1)}, prs=prs))
+        got = [(x["ref"], x["reason"], x["age_hours"]) for x in scope(r)["waiting"]]
+        self.assertEqual(got, [
+            ("PR #796", f"approved at head; the merger left it for the owner: {why}", 1.5),
+            ("PR #797", "approved at head; the merger left it for the owner: the `tests` check failed at head", 1)])
+
+    def test_left_is_read_at_head_and_superseded(self):
+        old = left("an `Overstep:` finding is on the PR", 3, head="b" * 40)
+        would = said("productswarm-merger", f"Would merge (approved ask) at {HEAD}.\n\n-- merger", 0.5)
+        p = pr(796, 5, reviews=[review("APPROVED", 2)], comments=[old])
+        d = dict(issues=[M1, issue(5)], scopes={5: under(1)}, prs=[p])
+        self.assertEqual(scope(trouble.report(data(**d)))["waiting"], [])      # an older head's
+        p["comments"] += [left("the owner hasn't approved at head", 1), would]
+        self.assertEqual(scope(trouble.report(data(**d)))["waiting"], [])      # superseded
+        p["comments"].append(said(OWNER, f"Left for the owner at {HEAD}: fake.", 0.2))
+        self.assertEqual(scope(trouble.report(data(**d)))["waiting"], [])      # not the merger
 
 
 class Authority(unittest.TestCase):
-    def test_grant_ruling_call_in_in_window(self):
+    def test_merges_by_the_merger_and_call_ins_only(self):
+        enq = said("productswarm-merger", f"Enqueued under standing grant (GOV-0027) at {HEAD}.", 3)
         r = trouble.report(data(
             issues=[M1, issue(5)], scopes={5: under(1), 6: under(1)},
-            merged=[merged(10, 6, 2, body="Default per GOV-0031."), merged(11, 6, 2, by=OWNER),
-                    merged(12, 6, 30)],
+            merged=[merged(10, 6, 2, body="Default per GOV-0031."),
+                    merged(11, 6, 2, by=OWNER, author="app/productswarm-docs", body="per GOV-0027"),
+                    merged(12, 6, 30),
+                    merged(13, 6, 2, by="github-merge-queue", comments=[enq])],
             comments=[comment(5, "Call in: analyst: check", author="productswarm-planner[bot]")]))
         got = sorted((x["kind"], x["ref"]) for x in scope(r)["authority"])
-        self.assertEqual(got, [("call-in", "#5"), ("grant", "PR #10"), ("ruling", "PR #10")])
+        self.assertEqual(got, [("call-in", "#5"), ("grant", "PR #10"), ("grant", "PR #13")])
 
 
 class Spend(unittest.TestCase):

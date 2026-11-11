@@ -18,7 +18,7 @@ The plan is the owner's open Goal and Area issues and the sub-issues under them,
 
 ## Daily report
 
-`swarm watch`'s `[daily]` starts this run once each working day while its switch (`daily` in `swarm.toml`'s `[watch]`) is on (GOV-0029, #588). While it is off, the owner starts the run by hand. Run `launcher/swarm daily` first (#707, #709). Post one comment on the pinned report issue. Keep it comment-sized (GOVERNANCE.md §8: put the state in the first line). The first line starts `Daily report, <weekday> <YYYY-MM-DD>` and gives `swarm daily`'s `M1: day N of 5` as printed, e.g. `**Daily report, Tue 2026-11-10 (M1: day 3 of 5): ...**`. Then, in this order:
+`swarm watch`'s `[daily]` starts this run once each working day while its switch (`daily` in `swarm.toml`'s `[watch]`) is on (GOV-0029, #588). While it is off, the owner starts the run by hand. Run `launcher/swarm daily` first (#707, #709), then `launcher/swarm trouble --json` for the Trouble section (#804). Post one comment on the pinned report issue. Keep it comment-sized (GOVERNANCE.md §8: put the state in the first line). The first line starts `Daily report, <weekday> <YYYY-MM-DD>` and gives `swarm daily`'s `M1: day N of 5` as printed, e.g. `**Daily report, Tue 2026-11-10 (M1: day 3 of 5): ...**`. Then, in this order:
 
 1. **Plan:** each open Goal and Area the owner opened, with its open sub-issues (number, title, and who is on it or what it waits on), one line each.
 2. **Done:** what moved since the last report, against each Goal or Area.
@@ -26,7 +26,7 @@ The plan is the owner's open Goal and Area issues and the sub-issues under them,
 4. **Risks and mitigations:** what could slip a Goal or Area, and what you're doing about it. List every Goal or Area edit `swarm daily` shows that the owner didn't make (body edit, rename, close or reopen), with who made it and a link (GOV-0031). If `swarm daily` couldn't read them, say so here.
 5. **Under delegated authority:** what agents did on their own authority (a `decide` from `jurisdictions.yml`, a ruling, a call-in), each with a link. List each merge by the merger with a link, saying whether a standing grant or an approved ask allowed it (GOV-0027); while the merger runs in shadow, list its "would merge" calls instead. Say "none" when there was none.
 6. **Asks:** at most 5, each one thing the owner can say yes or no to, with a link. More than 5 means you rank them and carry the rest.
-7. **Trouble:** until #804 merges, the Trouble section below, made by hand, in every daily report as well as the Monday check-in (#760).
+7. **Trouble:** the Trouble section below, in every daily report as well as the Monday check-in (#760).
 
 Read state from GitHub (issues, PRs, reviews, label events) and from `swarm` commands; don't guess. If something can't be checked, say so in one line.
 
@@ -34,14 +34,14 @@ Read state from GitHub (issues, PRs, reviews, label events) and from `swarm` com
 
 The weekly check-in is a separate post from the daily report: on Mondays, post both. The Monday `[daily]` run writes both (its prompt says so); with `[daily]` off, the owner starts it by hand. Per open Goal and Area: **moved, at risk or slipped**, in one line each; then what changes; then asks (the same limit of 5). If a Goal's date, outcome or done test should change, propose it as above and link the proposal.
 
-**Trouble.** After the per-Goal lines, add a **Trouble** section (#760). Until #804 merges, every daily report carries it too, as its last item. For each open Goal and Area:
+**Trouble.** After the per-Goal lines, add a **Trouble** section (#760). Every daily report carries it too, as its last item. Build it from `launcher/swarm trouble --json` (#803, #804), not by hand. For each open Goal and Area:
 
 1. **Progress:** toward each done test, criterion by criterion.
 2. **Stuck:** what is stuck, and since when.
 3. **Waiting on the owner:** what waits on the owner, and for how long.
 4. **On the owner's authority:** what was done on the owner's authority, as in the daily report's "Under delegated authority".
 
-Report spend, never flag it (GOV-0033). On Mondays, also post one line on #760 logging what the owner asked their agent that week, and what the bridge would have told them sooner. Make this section by hand from GitHub until #804 merges (stage 2: the daily report and the check-in read `swarm trouble`); nothing builds it for you yet.
+Report spend, never flag it (GOV-0033). On Mondays, also post one line on #760 logging what the owner asked their agent that week, and what the bridge would have told them sooner. List what it files under `outside` (under no Goal or Area) after the Goals and Areas. Report what `swarm trouble` gives as it is: a criterion it reads as `unmeasured` stays unmeasured, never on track. If it fails or can't read something, say so in one line in the section rather than filling the gap by hand.
 
 ## Call-ins
 

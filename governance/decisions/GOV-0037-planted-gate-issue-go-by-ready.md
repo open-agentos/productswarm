@@ -1,5 +1,5 @@
 ---
-id: GOV-0036
+id: GOV-0037
 title: The planted-defect gate's throwaway issue is made go by the owner's `ready`, and a merged planted PR is reverted at once and fails the gate
 status: in-force
 kind: ruling

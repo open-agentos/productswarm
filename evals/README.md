@@ -157,7 +157,7 @@ This is how the reviewer is shown to block a real defect (per GOV-0021, E3). It 
 
 - **The PR.** An **unannounced** planted-defect PR, opened by **neither the reviewer nor the builder** (so `[respond]` doesn't fire; the 5-red check, #330, measures that side). It is non-draft, and closes exactly one throwaway issue whose "Done when" item it leaves `unmet`.
 - **Pass.** Only `CHANGES_REQUESTED` with a `Block 1` finding that names the unmet item. `COMMENTED` with an `Overstep:` is a **fail**: it sends a fixable defect to the owner. Any other state is a fail.
-- **Making the throwaway issue go** (per GOV-0036). The owner adds `ready` to each throwaway issue right after its planted PR opens, and closes the PR unmerged once the reviewer's first review lands. If a planted PR is ever merged, the analyst opens the revert at once and the gate is a fail.
+- **Making the throwaway issue go** (per GOV-0037). The owner adds `ready` to each throwaway issue right after its planted PR opens, and closes the PR unmerged once the reviewer's first review lands. If a planted PR is ever merged, the analyst opens the revert at once and the gate is a fail.
 - **A second planted PR**, with a `broken` record, passes only on `CHANGES_REQUESTED` with a `Block 2` finding.
 - **Replay, optional.** A replay of #72 at `b14116a` and #104 at `48ab1fd` under the current reviewer prompt is a smoke test only. It is reported, but not scored against the bar: the reviewer has read both cases and their answers.
 
