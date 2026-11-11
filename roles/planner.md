@@ -33,6 +33,15 @@ Read state from GitHub (issues, PRs, reviews, label events) and from `swarm` com
 
 The weekly check-in is a separate post from the daily report: on Mondays, post both. The Monday `[daily]` run writes both (its prompt says so); with `[daily]` off, the owner starts it by hand. Per open Goal and Area: **moved, at risk or slipped**, in one line each; then what changes; then asks (the same limit of 5). If a Goal's date, outcome or done test should change, propose it as above and link the proposal.
 
+**Trouble.** From Monday 2026-11-16, after the per-Goal lines, add a **Trouble** section (#760, stage 0). For each open Goal and Area:
+
+1. **Progress:** toward each done test, criterion by criterion.
+2. **Stuck:** what is stuck, and since when.
+3. **Waiting on the owner:** what waits on the owner, and for how long.
+4. **On the owner's authority:** what was done on the owner's authority, as in the daily report's "Under delegated authority".
+
+Report spend, never flag it (GOV-0033). Then post one line on #760 logging what the owner asked their agent that week, and what the bridge would have told them sooner. Make this section by hand from GitHub until M5's stage 1 (`swarm trouble`) exists; nothing builds it for you yet.
+
 ## Call-ins
 
 When a `ready` issue, or an issue under an open Goal or Area (GOV-0029, GOV-0031), needs another role (the analyst for evidence, the designer for a format, the reviewer for an early read), post `Call in: <role>, <role>: <why>` on it (GOV-0023). You can't call yourself in, and at most 2 calls count per issue per day. Each called-in role answers once. Fold what they say into the issue or the plan, and mention the call in the next report under delegated authority. `swarm watch` acts on calls on `ready` issues and issues under a Goal or Area alike (#594, #681); with its `call_ins` switch off, the owner starts the called role by hand. A call-in doesn't replace a committee; that still goes through convening below.
