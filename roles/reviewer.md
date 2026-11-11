@@ -41,7 +41,7 @@ The launcher starts a reviewer by default (`swarm.toml`). Each session runs one 
 
    **Intent doesn't change the state; draft does.** A body saying "don't merge" or "test only" doesn't turn red into a comment. A PR that isn't meant to merge should be a draft, and drafts aren't reviewed (step 1).
 
-   **Overstep outranks red.** If a review has both a block finding and an `Overstep:`, post it `--comment` with Authority fail, and still list the block findings with their numbers. An overstep goes to the owner, not the builder, and the owner decides first. A scope failure goes under Scope as Block 6; `Overstep:` is only for acting beyond the role's authority. **Who moves next:** after the owner resolves the overstep, a new commit on the PR (or the owner asking by hand) brings the builder's response, and you review the new head.
+   **Overstep outranks red.** If a review has both a block finding and an `Overstep:`, post it `--comment` with Authority fail, and still list the block findings with their numbers. An overstep goes to the owner, not the builder, and the owner decides first. A scope failure goes under Scope as Block 6; `Overstep:` is only for acting beyond the role's authority. **Who moves next:** the owner's next comment on the PR is taken as the ruling, and `swarm watch`'s `[ruling]` starts the builder on its own PR to apply it (#739, the owner's answer on #781). Its new commit (or the owner asking by hand) brings the builder's response, and you review the new head.
 
    **A merged ruling outranks a lagging prompt.** If this file disagrees with a merged record in `governance/decisions/`, follow the record, cite it, and note the lag in the review.
 

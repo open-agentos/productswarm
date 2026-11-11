@@ -65,11 +65,12 @@ class HookCase(unittest.TestCase):
         self.gh = FakeGitHub()
 
     def run_as(self, role, issue_n=None, pr=None, by="watch", called_by=None, daily=None,
-               ask=None, ask_comment=None, research=None, research_comment=None):
+               ask=None, ask_comment=None, research=None, research_comment=None, ruling=None):
         e = swarm.Started(name=f"{role}-x", role=role, model="m", session_id=SID, started=T0,
                           issue=issue_n, pr=pr, by=by, called_by=called_by, daily=daily,
                           ask=ask, ask_comment=ask_comment, research=research,
-                          research_comment=research_comment)
+                          research_comment=research_comment, ruling=ruling,
+                          ruling_comment=5 if ruling is not None else None)
         (self.home / "launcher" / "sessions.json").write_text(json.dumps([e.__dict__]))
 
     def decide(self, active=False):
@@ -283,6 +284,37 @@ class RespondTest(HookCase):
 
     def test_merged_or_closed_pr_is_done(self):
         self.review("CHANGES_REQUESTED")
+        self.gh.put("pulls/50", {"state": "closed", "head": {"sha": "h1"}})
+        self.assertAllows()
+
+
+class RulingTest(HookCase):
+    """#739: a builder applying the owner's ruling on an overstep on PR #50."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_as("builder", 7, pr=50, ruling="drop the ops/ change")
+        self.gh.put("pulls/50", {"state": "open", "head": {"sha": "h1"}})
+
+    def review(self, authority="fail", sha="h1"):
+        self.gh.put("pulls/50/reviews", [{"user": {"login": ME["reviewer"]}, "state": "COMMENTED",
+                                          "commit_id": sha, "body": f"- **Authority:** {authority}"}])
+
+    def test_overstep_still_at_head_blocks(self):
+        self.review()
+        self.assertBlocks("PR #50", "ruling", "Push a fix")
+
+    def test_pushed_is_done(self):
+        self.review(sha="h0")           # the head moved on since the overstep
+        self.assertAllows()
+
+    def test_replied_on_the_pr_is_done(self):
+        self.review()
+        self.gh.put("issues/50/comments", [{"user": {"login": ME["builder"]}, "created_at": AFTER}])
+        self.assertAllows()
+
+    def test_closed_pr_is_done(self):
+        self.review()
         self.gh.put("pulls/50", {"state": "closed", "head": {"sha": "h1"}})
         self.assertAllows()
 

@@ -225,14 +225,16 @@ def load_owner() -> str | None:
 def reviewer_state(reviews: list[dict], head: str | None) -> dict:
     """The reviewer App's reviews on one PR (REST order, oldest first), as GOV-0011 reads
     them: how many times it requested changes, on any head, and its latest review at
-    `head` with that review's Authority line. Keeps no review text (GOV-0002)."""
+    `head` with that review's Authority line and when it was posted (for #739's [ruling]).
+    Keeps no review text (GOV-0002)."""
     mine = [r for r in reviews if (r.get("user") or {}).get("login") == REVIEWER]
     at_head = [r for r in mine if head and r.get("commit_id") == head]
     last = at_head[-1] if at_head else None
     m = AUTHORITY_RE.search((last or {}).get("body") or "")
     return {"changes_requested": sum(r.get("state") == CHANGES for r in mine),
             "at_head": last.get("state") if last else None,
-            "authority": m.group(1).lower() if m else None}
+            "authority": m.group(1).lower() if m else None,
+            "at_head_at": (last or {}).get("submitted_at")}
 
 
 def pr_role(author: str) -> str | None:
