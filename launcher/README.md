@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, `swarm status` (#457) prints what the loop is doing now, with cost, `swarm daily` (#707) counts the daily-report streak, and `swarm spent` (#662) prints run spend from the runs ledger. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, `swarm status` (#457) prints what the loop is doing now, with cost, `swarm daily` (#707) counts the daily-report streak, `swarm spent` (#662) prints run spend from the runs ledger, and `swarm trouble` (#803) reports what is stuck per Goal and Area. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
 
 ## swarm up / ls / stop
 
@@ -256,6 +256,22 @@ The owner's acts on each of the last 10 working days (Monday to Friday, local ti
 - **Counts:** labels, issue and PR comments, reviews (an inline comment is part of one), merges, and issues opened other than Goals and Areas. **Doesn't count:** opening or editing a Goal or Area (a label on one is an edit), closing an issue, reading the report or the Desk.
 - **Kinds:** `plan` (on a Mission, Goal or Area, or a `hold` veto), `report` (on `[watch] report_issue`), `ask` (on a `gov:question`, or approving a protected-path PR), `protected-merge`, and `other`, which fails check 2.
 - **Gaps:** an act the receiver never got (it was down, or the App isn't subscribed to Issues, Issue comments, Pull requests and Pull request reviews) isn't counted; nor are Discussion comments or back-room repairs.
+
+## swarm trouble: what is stuck, per Goal and Area (#803)
+
+```
+launcher/swarm trouble [--json] [--hours 24] [--manifest swarm.toml] [--repo owner/name]
+```
+
+Stage 1 of #760. For each open Goal and Area the owner opened (GOV-0031), and for the work under none:
+
+- **Progress** per done-test criterion (a Goal's checkboxes, an Area's `**Target:**` bullets): `met` when ticked, else what its measure says, else `unmeasured`. Unmeasured is never reported as on track. The only measure so far is M1's daily-report streak (`swarm daily`). A passed `**Date:**` is `date_missed`.
+- **Stuck**, with the reason nothing will start it and since when: requested changes at a PR's head with no push since and no trigger that restarts the role; a merged PR whose issue is still open; an issue under no Goal or Area that another issue waits on; and an owner `Ask:`, `Call in:` or `Research:` that nothing listens to.
+- **Waiting on the owner**, with its age: untriaged issues, unanswered `gov:question`s, PRs GOV-0011 hands to the owner, and protected-path PRs needing the owner's approval at head.
+- **On the owner's authority** in the last `--hours`: merges by the merger (GOV-0027), merged agent PRs citing `per GOV-NNNN`, and call-ins by a swarm App.
+- **Spend** from the runs ledger, reported, never flagged (GOV-0033).
+
+It only reads. Stage 2 has the daily report and the check-in read it.
 
 ## swarm watch: the wake-up loop
 
