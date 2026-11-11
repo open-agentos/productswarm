@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -160,13 +161,34 @@ class Progress(unittest.TestCase):
     def test_m4_acts_from_swarm_acts(self):
         g = goal(4, "**Criteria**\n- [ ] my acts are counted for each of the 10 working days "
                     "(checklist gates 1 and 2)\n")
-        day = {"under_limit": True, "c_team": True}
-        days = [day] * 3 + [{"under_limit": False, "c_team": True}] + [day] * 6
+        day = {"status": "counted", "under_limit": True, "c_team": True}
+        today = {"status": "in progress", "under_limit": None, "c_team": None}
+        days = [day] * 3 + [{"status": "counted", "under_limit": False, "c_team": True}] + [day] * 6
         p = scope(trouble.report(data(issues=[g], owner_days=days)), 4)["progress"]
         self.assertEqual((p[0]["status"], p[0]["detail"][:8]), ("progress", "3 of 10 "))
-        p = scope(trouble.report(data(issues=[g], owner_days=[day] * 10)), 4)["progress"]
-        self.assertEqual(p[0]["status"], "met")
+        p = scope(trouble.report(data(issues=[g], owner_days=[today] + [day] * 10)), 4)["progress"]
+        self.assertEqual(p[0]["status"], "met")                  # today, unfinished, is skipped
         self.assertEqual(scope(trouble.report(data(issues=[g])), 4)["progress"][0]["status"], "unmeasured")
+
+    def test_m4_a_day_not_counted_breaks_the_run(self):
+        g = goal(4, "- [ ] my acts are counted for each of the 10 working days\n")
+        day = {"status": "counted", "under_limit": True, "c_team": True}
+        gap = {"status": "not counted", "under_limit": None, "c_team": None}
+        p = scope(trouble.report(data(issues=[g], owner_days=[day] * 2 + [gap] + [day] * 7)), 4)["progress"]
+        self.assertEqual(p[0]["status"], "progress")
+        self.assertIn("2 of 10 working days in a row", p[0]["detail"])
+        self.assertIn("1 of the last 10 not counted", p[0]["detail"])
+
+    def test_m4_unmeasured_on_an_empty_swarm_db(self):
+        import acts
+        g = goal(4, "- [ ] my acts are counted for each of the 10 working days\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            days = acts.per_day(acts.stored(Path(tmp)),
+                                swarm.working_days(NOW.date(), swarm.DAILY_DAYS + 1),
+                                dt.timezone.utc, NOW, acts.backfilled(Path(tmp)))
+        self.assertEqual({d["status"] for d in days[1:]}, {"not counted"})
+        p = scope(trouble.report(data(issues=[g], owner_days=days)), 4)["progress"]
+        self.assertEqual((p[0]["status"], p[0]["detail"]), ("unmeasured", "no working day counted yet (swarm acts)"))
 
     def test_only_owner_opened_scopes(self):
         r = trouble.report(data(issues=[M1, goal(9, "- [ ] x", author="productswarm-planner[bot]")]))

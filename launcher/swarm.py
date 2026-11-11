@@ -18,7 +18,8 @@
                                     each, and M1's streak (#707)
     launcher/swarm acts [--day D] [--json]
                                     the owner's acts on each of the last 10 working days, or
-                                    on day D, with count and kind (#771; acts.py)
+                                    on day D, with count and kind, or "not counted" for a day
+                                    not yet read back from GitHub (#771, #844; acts.py)
     launcher/swarm watch [--dry-run] [--serve] [--container IMAGE]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
@@ -1322,16 +1323,66 @@ def scope_edits_text(edits: list[dict], partial: list[dict], owner: str, since: 
     return "\n".join([head, *(lines or ["  none"])])
 
 
+# Merged PRs whose closing issues are still open (#806). GitHub closes a PR's closing issues as
+# whoever merged it, and the merger's token holds only `issues: read` (GOV-0028), so its merges
+# leave them open. Per the owner's answer on #812 (option 2), the planner closes them in its
+# daily run; this lists them. An issue reopened since is left out: someone meant it to be open.
+UNCLOSED_QUERY = (
+    "query($q: String!, $after: String) { search(query: $q, type: ISSUE, first: 100, after: $after) { "
+    "pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { number mergedBy { login __typename } "
+    "closingIssuesReferences(first: 10) { nodes { number state repository { nameWithOwner } "
+    "timelineItems(itemTypes: [REOPENED_EVENT]) { totalCount } } } } } } }")
+
+
+def unclosed(nodes: list[dict], repo: str | None = None) -> list[dict]:
+    """The still-open, never-reopened closing issues of the merged PRs in `nodes`, oldest PR
+    first: each {repo, number, pr, merged_by}."""
+    out = []
+    for n in sorted((n for n in nodes if n and n.get("number")), key=lambda n: n["number"]):
+        by = n.get("mergedBy") or {}
+        merged_by = "ghost" if not by else by["login"] + ("[bot]" if by.get("__typename") == "Bot" else "")
+        for i in (n.get("closingIssuesReferences") or {}).get("nodes") or []:
+            if (i or {}).get("state") != "OPEN" or ((i.get("timelineItems") or {}).get("totalCount") or 0):
+                continue
+            out.append({"repo": (i.get("repository") or {}).get("nameWithOwner") or repo,
+                        "number": i["number"], "pr": n["number"], "merged_by": merged_by})
+    return out
+
+
+def gh_merged_nodes(repo: str, since: dt.date) -> list[dict]:
+    """The repo's PRs merged since `since`, with their closing issues, a page of 100 at a time."""
+    g, nodes, after = dashboard(), [], []
+    for _ in range(10):
+        d = g.gh_json("api", "graphql", "-f", f"query={UNCLOSED_QUERY}",
+                      "-f", f"q=repo:{repo} is:pr is:merged merged:>={since}", *after)
+        search = ((d or {}).get("data") or {}).get("search") or {}
+        nodes += search.get("nodes") or []
+        page = search.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            break
+        after = ["-f", f"after={page['endCursor']}"]
+    return nodes
+
+
+def unclosed_text(issues: list[dict], since: dt.date, repo: str | None = None) -> str:
+    """The issues the planner closes before posting the daily report, or a line saying none."""
+    head = f"Issues still open after a merged PR that closes them, PRs merged since {since:%a %Y-%m-%d} (#806):"
+    lines = [f"  {scope_ref(i, repo)}  PR #{i['pr']} closes it, merged by {i['merged_by']}" for i in issues]
+    return "\n".join([head, *(lines or ["  none"])])
+
+
 def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DEFAULT_PATH,
           get_comments: Callable | None = None, now: dt.datetime | None = None,
           tz: dt.tzinfo | None = None, owner: str | None = None,
-          agents: set[str] | None = None, get_scopes: Callable | None = None) -> int:
+          agents: set[str] | None = None, get_scopes: Callable | None = None,
+          get_merged: Callable | None = None) -> int:
     """`swarm daily` (#707): for each of the last 10 working days, whether a daily report was
     posted on the report issue, when, and who started it, so M1's streak isn't a hand count.
     Who started it comes from swarm.db; the reports and their times come from the report
     issue's comments (swarm.db holds no comments). Then the report's "M1: day N of 5", and
     the edits to a Goal or Area by anyone but the owner since the last working day began
-    (#709). Only reads."""
+    (#709), and the issues still open after a PR that closes them merged in those 10 working
+    days (#806). Only reads."""
     import watch
     try:
         limits = manifest.load_watch(manifest_path)
@@ -1358,7 +1409,11 @@ def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DE
                                  owner, since, repo, tz)
     except RuntimeError as e:
         edits = f"Goal and Area edits couldn't be read: {e}"
-    launcher.out(f"{daily_text(rows, n, today)}\n{m1_day(rows, today)}\n\n{edits}")
+    try:
+        stale = unclosed_text(unclosed((get_merged or gh_merged_nodes)(repo, days[-1]), repo), days[-1], repo)
+    except RuntimeError as e:
+        stale = f"Issues still open after their PR merged couldn't be read: {e}"
+    launcher.out(f"{daily_text(rows, n, today)}\n{m1_day(rows, today)}\n\n{edits}\n\n{stale}")
     return 0
 
 
@@ -1368,8 +1423,9 @@ def owner_acts(launcher: Launcher, repo: str, manifest_path: Path | str = manife
                day: dt.date | None = None, as_json: bool = False, now: dt.datetime | None = None,
                tz: dt.tzinfo | None = None, owner: str | None = None, gh_json: Callable | None = None,
                gh_items: Callable | None = None) -> int:
-    """`swarm acts`: read the webhook leads back from GitHub (acts.sync), then print the owner's
-    acts for each of the last 10 working days, or for `day`, from swarm.db."""
+    """`swarm acts`: read the owner's acts back from GitHub (the webhook leads, and a backfill of
+    each finished day not yet counted, acts.refresh), then print them for each of the last 10
+    working days, or for `day`, from swarm.db. A day not backfilled reads `not counted` (#844)."""
     import acts
     import merger
     try:
@@ -1380,11 +1436,10 @@ def owner_acts(launcher: Launcher, repo: str, manifest_path: Path | str = manife
     report = (repo, limits.report_issue) if limits and limits.report_issue else None
     owner = owner or owner_login()
     g = None if gh_json and gh_items else dashboard()
-    errors = acts.sync(launcher.dir, owner, report, gh_json or g.gh_json, gh_items or g.gh_items,
-                       merger.is_protected)
     now = now or dt.datetime.now(dt.timezone.utc)
     days = [day] if day else working_days((now.astimezone(tz) if tz else now.astimezone()).date())
-    rows = acts.per_day(acts.stored(launcher.dir), days, tz)
+    rows, errors = acts.refresh(launcher.dir, owner, report, repo, gh_json or g.gh_json,
+                                gh_items or g.gh_items, merger.is_protected, days, now, tz)
     if as_json:
         launcher.out(json.dumps({"owner": owner, "days": rows, "unread_errors": errors}, indent=2))
     else:
