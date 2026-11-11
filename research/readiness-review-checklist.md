@@ -10,6 +10,7 @@ Written 2026-11-09 against `main` at d7b062d. Rulings cited are in force on that
 
 - **The plan is no longer `PLAN.md`.** GOV-0031 retired it: the plan is the owner-opened Goal and Area issues on the org Project. M4 is Goal #686. "Cites a milestone" (day-30 check 4) now means "closes an issue under an owner-opened Goal or Area". The `**Milestone:**` body line still counts until 2026-11-16, one week after GOV-0031 merged (2026-11-09, #668).
 - **The engine is moving off the owner's Mac** (GOV-0032: hosted watcher, dispatcher, merger and Desk on a VPS by Dec 4). That makes Q5 (where the daily run happens) moot if the VPS is live, and makes engine uptime a check.
+- **The review now names its project** (GOV-0035, #758). M4 readies productswarm for the finance and scenario planner as its first outside project, so checks 9–20 run against the planner repo. Day-30 check 5 is unchanged: the review is scheduled, with this checklist in the plan.
 - **The 10-day window must start by Friday 2026-11-20** to end on Thursday 2026-12-03, the day before the review (Mon–Fri working days: Nov 20, 23–27, Nov 30–Dec 3). If any day in it fails, the done test can't pass by Dec 4 unless the window restarts and the review moves.
 
 ## The checklist
