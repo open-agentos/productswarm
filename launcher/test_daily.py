@@ -56,6 +56,15 @@ def goal(n, kind="Goal", author=OWNER, bot=False, repo="o/r", edits=(), events=(
             "timelineItems": {"totalCount": len(events), "nodes": list(events)}}
 
 
+def merged(n, closes=(), by="productswarm-merger", bot=True):
+    """A search node as UNCLOSED_QUERY returns it; closes is (number, state[, reopens[, repo]])."""
+    def ref(number, state, reopens=0, repo="o/r"):
+        return {"number": number, "state": state, "repository": {"nameWithOwner": repo},
+                "timelineItems": {"totalCount": reopens}}
+    return {"number": n, "mergedBy": who(by, bot) if by else None,
+            "closingIssuesReferences": {"nodes": [ref(*c) for c in closes]}}
+
+
 class DailyTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -68,16 +77,20 @@ class DailyTest(unittest.TestCase):
         self.lines: list[str] = []
         self.l = swarm.Launcher(self.home, root=self.home / "repo", out=self.lines.append)
 
-    def run_daily(self, comments, acted, now=NOW, scopes=()):
+    def run_daily(self, comments, acted, now=NOW, scopes=(), prs=()):
         statedb.save(self.home / "launcher", {"acted": acted})
-        self.since = None
+        self.since = self.merged_since = None
+
+        def get_merged(repo, since):
+            self.merged_since = since
+            return list(prs)
 
         def get_scopes(repo, since):
             self.since = since
             return list(scopes)
         rc = swarm.daily(self.l, "o/r", self.toml, get_comments=lambda repo, n: comments, now=now,
                          tz=UTC, owner=OWNER, agents={PLANNER, "productswarm-builder[bot]"},
-                         get_scopes=get_scopes)
+                         get_scopes=get_scopes, get_merged=get_merged)
         self.assertEqual(rc, 0)
         return self.lines[-1]
 
@@ -175,7 +188,7 @@ class DailyTest(unittest.TestCase):
 
     def test_no_goal_edits_says_none_and_a_long_history_says_check(self):
         out = self.run_daily(COMMENTS_249, ACTED_249)
-        self.assertTrue(out.endswith("(GOV-0031):\n  none"))
+        self.assertIn("(GOV-0031):\n  none\n\n", out)
         g = goal(683, edits=[edit("2026-11-09T10:00:00Z", OWNER)])
         g["userContentEdits"]["totalCount"] = 80
         out = self.run_daily(COMMENTS_249, ACTED_249, scopes=[g])
@@ -188,9 +201,66 @@ class DailyTest(unittest.TestCase):
             raise RuntimeError("gh api graphql failed: rate limited")
         self.assertEqual(swarm.daily(self.l, "o/r", self.toml, get_comments=lambda r, n: COMMENTS_249,
                                      now=NOW, tz=UTC, owner=OWNER, agents={PLANNER},
-                                     get_scopes=boom), 0)
+                                     get_scopes=boom, get_merged=lambda r, s: []), 0)
         self.assertIn("Goal and Area edits couldn't be read: gh api graphql failed: rate limited",
                       self.lines[-1])
+
+    # ---- #806: issues left open after a merged PR that closes them (#812, option 2)
+
+    def test_lists_issues_a_merged_pr_left_open(self):
+        out = self.run_daily(COMMENTS_249, ACTED_249, prs=[
+            merged(793, [(680, "OPEN")]),
+            merged(745, [(663, "OPEN"), (664, "CLOSED")]),
+            merged(790, [(774, "CLOSED")], by=OWNER, bot=False),
+            merged(791, [(772, "OPEN", 1)]),                       # reopened since: left alone
+            merged(792, [(9, "OPEN", 0, "o/other")], by=OWNER, bot=False),
+            merged(794)])
+        self.assertEqual(self.merged_since, dt.date(2026, 10, 27))   # the 10th working day back
+        self.assertTrue(out.endswith(
+            "Issues still open after a merged PR that closes them, PRs merged since Tue 2026-10-27 (#806):\n"
+            "  #663  PR #745 closes it, merged by productswarm-merger[bot]\n"
+            "  o/other#9  PR #792 closes it, merged by mattmcalister\n"
+            "  #680  PR #793 closes it, merged by productswarm-merger[bot]"), out)
+        self.assertNotIn("#664", out)
+        self.assertNotIn("#772", out)
+
+    def test_no_issues_left_open_says_none(self):
+        out = self.run_daily(COMMENTS_249, ACTED_249, prs=[merged(790, [(774, "CLOSED")])])
+        self.assertTrue(out.endswith("(#806):\n  none"), out)
+
+    def test_merged_prs_read_failure_is_one_line(self):
+        statedb.save(self.home / "launcher", {"acted": ACTED_249})
+
+        def boom(repo, since):
+            raise RuntimeError("gh api graphql failed: rate limited")
+        self.assertEqual(swarm.daily(self.l, "o/r", self.toml, get_comments=lambda r, n: COMMENTS_249,
+                                     now=NOW, tz=UTC, owner=OWNER, agents={PLANNER},
+                                     get_scopes=lambda r, s: [], get_merged=boom), 0)
+        self.assertTrue(self.lines[-1].endswith(
+            "Issues still open after their PR merged couldn't be read: gh api graphql failed: rate limited"))
+
+    def test_merged_prs_read_every_page(self):
+        pages = [{"data": {"search": {"pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+                                      "nodes": [merged(1, [(10, "OPEN")])]}}},
+                 {"data": {"search": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                                      "nodes": [merged(2, [(20, "OPEN")])]}}}]
+        calls = []
+
+        class G:
+            @staticmethod
+            def gh_json(*args):
+                calls.append(args)
+                return pages[len(calls) - 1]
+        orig = swarm.dashboard
+        swarm.dashboard = lambda: G
+        try:
+            nodes = swarm.gh_merged_nodes("o/r", dt.date(2026, 10, 27))
+        finally:
+            swarm.dashboard = orig
+        self.assertEqual([n["number"] for n in nodes], [1, 2])
+        self.assertIn("q=repo:o/r is:pr is:merged merged:>=2026-10-27", calls[0])
+        self.assertNotIn("after=c1", calls[0])
+        self.assertIn("after=c1", calls[1])
 
     def test_working_days(self):
         days = swarm.working_days(dt.date(2026, 11, 9))

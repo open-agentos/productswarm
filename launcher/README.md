@@ -239,7 +239,12 @@ M1: day 2 of 5
 
 Goal and Area edits not made by @mattmcalister since Fri 2026-11-06 00:00 (GOV-0031):
   Mon 2026-11-09 10:00  productswarm-planner[bot] edited the body: Goal #683 M1: Daily report runs without the owner
+
+Issues still open after a merged PR that closes them, PRs merged since Tue 2026-10-27 (#806):
+  #758  PR #764 closes it, merged by productswarm-merger[bot]
 ```
+
+- **Issues still open after their PR merged** (#806): GitHub closes a PR's closing issues as whoever merged it, and the merger's token can't write issues (GOV-0028), so its merges leave them open. `swarm daily` lists each open closing issue of a PR merged in the last 10 working days, leaving out any reopened since, and the planner closes them before posting the report (per the owner's answer on #812).
 
 - **A report** is a comment on the report issue by a swarm App or the owner whose first line starts "Daily report" (bold or not). It counts for the first date on that line, or for the day it was posted if the line has no date. The time shown is when the day's first report was posted.
 - **Who started it** comes from `swarm.db`. If `watch_acted` holds a `[daily]` key `daily:<report issue>:<date>`, `[daily]` started it. The watcher never prunes these keys, unlike run records, which it drops after 7 days. A report posted with no such key was started **by hand**. A day with a `[daily]` start but no report says so.
