@@ -14,6 +14,10 @@ Each accepted delivery is one row in swarm.db's `deliveries` table: delivery id,
 repo, number and when it arrived. No payload body is kept (GOV-0002, GOV-0004). GitHub's
 X-GitHub-Delivery id is the key, so a redelivery is recorded once and nudges once.
 
+A delivery that could be an owner act (a label, comment, review, merge or opened issue) also
+gets a lead in `act_leads`: what to read back and the sender's login, no body. `swarm acts`
+reads those back from GitHub to count the owner's acts per day (acts.py, #771).
+
 Usage: swarm webhooks [--host 127.0.0.1] [--port 8081], with WEBHOOK_SECRET in the environment.
 It listens on localhost only by default; Caddy terminates TLS in front of it (ops/vps).
 """
@@ -26,8 +30,12 @@ import http.server
 import json
 import re
 import sqlite3
+import sys
 import threading
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import acts  # noqa: E402
 
 PATH = "/webhooks/github"
 MAX_BODY = 1_000_000
@@ -73,15 +81,27 @@ class Store:
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS deliveries (id TEXT PRIMARY KEY, event TEXT NOT NULL,"
                 " action TEXT, repo TEXT, number INTEGER, received_at TEXT NOT NULL)")
+        self.db.executescript(acts.SCHEMA)
 
     def record(self, delivery: str, event: str, action: str | None, repo: str | None,
-               number: int | None, now: dt.datetime) -> bool:
-        """Add a delivery; False if its id was already recorded."""
+               number: int | None, now: dt.datetime, lead: tuple | None = None) -> bool:
+        """Add a delivery, and its owner-act lead if it has one (#771); False if its id was
+        already recorded."""
         with self.lock, self.db:
             cur = self.db.execute(
                 "INSERT OR IGNORE INTO deliveries VALUES (?, ?, ?, ?, ?, ?)",
                 (delivery, event, action, repo, number, now.isoformat(timespec="seconds")))
-            return cur.rowcount == 1
+            if cur.rowcount != 1:
+                return False
+            if lead:
+                acts.record_lead(self.db, delivery, event, lead, now)
+            return True
+
+    def leads(self) -> list[tuple]:
+        with self.lock:
+            return self.db.execute(
+                "SELECT delivery, event, action, repo, number, ref, sender FROM act_leads "
+                "ORDER BY received_at, delivery").fetchall()
 
     def rows(self) -> list[tuple]:
         with self.lock:
@@ -116,7 +136,7 @@ def handle(store: Store, secret: bytes, nudge_path: Path, method: str, path: str
         payload = json.loads(body)
     except ValueError:
         return 400, "body is not JSON"
-    if not store.record(delivery, event, *summary(payload), now):
+    if not store.record(delivery, event, *summary(payload), now, lead=acts.lead(event, payload)):
         return 202, "duplicate"
     if event not in QUIET:
         nudge(nudge_path)
