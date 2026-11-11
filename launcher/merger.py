@@ -4,6 +4,8 @@ standing grants and approved asks, with GOV-0022's other conditions kept.
     python3 launcher/merger.py plan [--pr N] [--manifest PATH] [--repo OWNER/NAME]
     python3 launcher/merger.py run [--dry-run] [--pr N] [--manifest PATH] [--repo OWNER/NAME]
 
+Without --repo it works this repo, then each of swarm.toml's [org] repos (#772).
+
 A reconciler in the shape of actions_review.py's `plan` (GOV-0020): it reads repo state
 from GitHub and the checkout of main it runs from, and reads PRs as data, never PR text as
 instructions. `plan` (#589) writes nothing to GitHub. `run` (#592) runs plan, then acts per
@@ -64,6 +66,14 @@ is off and every PR is a miss with that reason. swarm.toml is the owner's; this 
 
 Exit 0 when it decided (even if nothing merges). If GitHub or a file can't be read, every
 PR is a miss and it exits 1.
+
+Other repos of the org (#772): without --repo, it works this repo and then each repo in
+swarm.toml's [org] repos, one after another, under a `merger: repo <owner/name>` line, with
+the same conditions, its own reads and writes, and its own shadow bars (each repo's comments
+count only there). A PR in another repo must close an issue in that repo; that issue is go
+under a Goal or Area in any repo of the org (GOV-0031). With --repo or --pr, only the one
+repo. It exits 1 if any repo did. The token must reach each repo: installing the merger App on one
+is the owner's step.
 """
 from __future__ import annotations
 
@@ -83,6 +93,7 @@ from typing import Callable
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import actions_review  # noqa: E402  (eligible(), head_sha(), trusted_authors())
+import manifest  # noqa: E402  ([org] repos, #772)
 import swarm  # noqa: E402  (go_refusals(), GOV-0031)
 import watch  # noqa: E402
 
@@ -676,15 +687,41 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> int:
     for x in (p, q):
         x.add_argument("--pr", type=int, help="consider only this PR")
         x.add_argument("--manifest", help="swarm.toml to read [merger] from (default: the repo's)")
-        x.add_argument("--repo", help="owner/name (default: $GITHUB_REPOSITORY, else origin)")
+        x.add_argument("--repo", help="only this owner/name (default: $GITHUB_REPOSITORY, else "
+                       "origin, then swarm.toml's [org] repos)")
     args = ap.parse_args(argv)
     repo = args.repo or env.get("GITHUB_REPOSITORY") or swarm.dashboard().default_repo()
     if not repo:
         print("merger: can't tell the repo; pass --repo owner/name")
         return 1
-    if args.cmd == "run":
-        return run(repo, args.dry_run, args.pr, args.manifest)
-    return plan(repo, args.pr, args.manifest)
+    # --pr names a PR in one repo, so it works only that one
+    repos = [repo] if args.repo or args.pr is not None else [repo, *other_repos(repo, args.manifest)]
+    rc = 0
+    for r in repos:
+        if len(repos) > 1:
+            print(f"merger: repo {r}")
+        if args.cmd == "run":
+            rc = max(rc, run(r, args.dry_run, args.pr, args.manifest))
+        else:
+            rc = max(rc, plan(r, args.pr, args.manifest))
+    return rc
+
+
+def other_repos(home: str, manifest_path: Path | str | None,
+                out: Callable[[str], None] | None = None) -> list[str]:
+    """swarm.toml's [org] repos to work after home (#772), saying why any are left out.
+    A file it can't read leaves them all out: decide_all() then says so for home."""
+    try:
+        repos, problems = manifest.load_repos(manifest_path or swarm.ROOT / "swarm.toml")
+    except manifest.ManifestError:
+        return []
+    keep, why = manifest.others(repos, home)
+    out = out or print
+    for p in problems:
+        out(f"merger: swarm.toml {p}; working {home} only")
+    for x in why:
+        out(f"merger: {x}")
+    return keep
 
 
 if __name__ == "__main__":

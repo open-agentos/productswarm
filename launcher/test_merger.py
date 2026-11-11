@@ -7,6 +7,7 @@ import datetime as dt
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -793,6 +794,67 @@ class Queue(unittest.TestCase):
         fw.queued = RuntimeError("must not be read")
         code, _ = self.run_run(w, fw, mode="live")
         self.assertEqual(code, 0)
+
+
+SCRATCH = "open-agentos/scratch"
+
+
+class OtherRepos(unittest.TestCase):
+    """#772: the merger works swarm.toml's [org] repos after this one."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.calls = []
+
+    def main(self, org="", argv=("plan",)):
+        path = self.dir / "swarm.toml"
+        path.write_text('[merger]\nmode = "shadow"\nmax_changed_lines = 100\n' + org)
+        out = []
+        fake = lambda repo, *a: self.calls.append(repo) or 0   # noqa: E731
+        with unittest.mock.patch.object(merger, "plan", fake), \
+                unittest.mock.patch.object(merger, "run", fake), \
+                unittest.mock.patch("builtins.print", out.append):
+            code = merger.main([*argv, "--manifest", str(path)], env={"GITHUB_REPOSITORY": REPO})
+        return code, out
+
+    def test_one_repo_listed_is_unchanged(self):
+        self.assertEqual(self.main(), (0, []))
+        self.assertEqual(self.calls, [REPO])
+
+    def test_two_repos_are_each_worked(self):
+        code, out = self.main(f'[org]\nrepos = ["{SCRATCH}"]\n', ("run", "--dry-run"))
+        self.assertEqual((code, self.calls), (0, [REPO, SCRATCH]))
+        self.assertEqual(out, [f"merger: repo {REPO}", f"merger: repo {SCRATCH}"])
+
+    def test_repo_or_pr_works_one_repo(self):
+        org = f'[org]\nrepos = ["{SCRATCH}"]\n'
+        self.main(org, ("plan", "--repo", SCRATCH))
+        self.main(org, ("plan", "--pr", "70"))
+        self.assertEqual(self.calls, [SCRATCH, REPO])
+
+    def test_home_listed_again_is_dropped_and_another_org_is_left_out(self):
+        code, out = self.main(f'[org]\nrepos = ["{REPO}", "elsewhere/x", "{SCRATCH}"]\n')
+        self.assertEqual(self.calls, [REPO, SCRATCH])
+        self.assertIn("merger: elsewhere/x isn't in the open-agentos org, so it is left out "
+                      "(GOV-0031 covers one org)", out)
+
+    def test_a_bad_org_table_works_home_only(self):
+        code, out = self.main('[org]\nrepos = ["not a repo"]\n')
+        self.assertEqual(self.calls, [REPO])
+        self.assertTrue(out[0].startswith("merger: swarm.toml org: each repo must be"), out)
+
+    def test_a_goal_in_this_repo_makes_a_task_in_another_go(self):
+        w = World()
+        w.pr["head"]["repo"]["full_name"] = SCRATCH
+        w.closes = [(SCRATCH, 9)]
+        w.scope["blocked_by"] = []
+        self.assertEqual(w.scope["parents"][0]["repo"], REPO)     # the Goal is here
+        ctx = merger.Context(SCRATCH, OWNER, frozenset(AGENTS | {"productswarm-planner[bot]"}), ON, NOW)
+        self.assertEqual(merger.make_plan([{"number": 70}], ctx, w.reader()),
+                         [f"#70 {HEAD} {merger.GRANT}"])
+        w.closes = [(REPO, 9)]                  # a PR there closing an issue here is a miss
+        self.assertIn("the issue it closes is in another repo",
+                      merger.make_plan([{"number": 70}], ctx, w.reader())[0])
 
 
 if __name__ == "__main__":
