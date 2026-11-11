@@ -81,6 +81,7 @@ class FakeGit:
         self.dirty: set[str] = set()
         self.unpushed: set[str] = set()
         self.fail: str | None = None          # a subcommand that fails, e.g. "fetch"
+        self.origin = "https://github.com/o/r.git"   # what `remote get-url origin` answers
 
     def __call__(self, args):
         self.calls.append(args)
@@ -95,6 +96,8 @@ class FakeGit:
         elif args[2:4] == ["worktree", "remove"]:
             import shutil
             shutil.rmtree(args[-1])
+        elif args[2:4] == ["remote", "get-url"]:
+            return 0, self.origin + "\n"
         elif sub == "status":
             return 0, " M x.py" if Path(args[1]).name in self.dirty else ""
         elif sub == "branch":
@@ -891,17 +894,29 @@ class LaunchTest(Base):
             self.assertEqual(self.cli(ref), (1, []), ref)
             self.assertIn("isn't an issue ref: use N, #N or owner/name#N", self.lines[-1])
 
-    def test_another_repo_is_refused_before_reading_it(self):
+    def other(self, dry_run=False):
         read = []
-        rc = swarm.launch(self.l, "builder", 5, "m", repo="o/r", issue_repo="o/scratch",
-                          get_issue=lambda repo, n: read.append(repo) or (issue(n), []),
+        rc = swarm.launch(self.l, "builder", 5, "m", repo="o/r", issue_repo="o/scratch", dry_run=dry_run,
+                          get_issue=lambda repo, n: read.append(repo) or (issue(n), [labeled("ready", OWNER)]),
                           get_heartbeat=lambda *a: {"sessions": []}, owner=lambda: OWNER,
                           agents=lambda: AGENTS, get_reader=lambda repo, n: None)
-        self.assertEqual(rc, 1)
-        self.assertEqual(read, [])
+        return rc, read
+
+    def test_another_repo_is_refused_before_reading_it(self):
+        self.assertEqual(self.other(), (1, []))
         self.assertEqual(self.fake.commands, [])
-        self.assertIn("refused: o/scratch#5 is in another repo, and its worktree would be cut from "
-                      "this checkout (o/r)", self.lines[-1])
+        self.assertEqual(self.git.calls, [])
+        self.assertIn("refused: o/scratch#5 is in another repo; starting a session there waits for "
+                      "#820 stage 3", self.lines[-1])
+
+    def test_another_repos_dry_run_shows_its_worktree_from_its_clone(self):   # #853
+        self.assertEqual(self.other(dry_run=True), (0, ["o/scratch"]))
+        self.assertEqual((self.fake.commands, self.git.calls), ([], []))
+        clone = self.home / "repos" / "o" / "scratch"
+        self.assertFalse(clone.exists())
+        self.assertIn(f"would start: builder-scratch-issue-5", self.lines[-1])
+        self.assertIn(f"git -C {clone} worktree add --detach {self.root / '.worktrees'}/", self.lines[-1])
+        self.assertIn("(from o/scratch's clone", self.lines[-1])
 
     def test_started_repo_round_trips_and_old_state_is_this_repo(self):
         self.assertEqual(self.go(), 0)
@@ -1131,6 +1146,98 @@ class LaunchHelpersTest(unittest.TestCase):
         self.assertEqual(swarm.holders(7, model, started, repo="o/scratch"), [])
 
 
+class RepoCloneTest(Base):
+    """#853 (#820 stage 2): another org repo's session gets its worktree from that repo's
+    own clone under the launcher home, made on first use and fetched as this checkout is."""
+
+    def setUp(self):
+        super().setUp()
+        self.l.hook = str(self.home / "runtime" / "heartbeat" / "hook.py")   # skip the refresh
+        self.clone = self.home / "repos" / "o" / "scratch"
+
+    def entry(self, repo="o/scratch", sid="0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41", **kw):
+        return swarm.Started("builder-scratch-issue-5", "builder", "m", sid, 0, issue=5, repo=repo, **kw)
+
+    def test_clone_path_is_per_repo_in_lower_case(self):
+        self.assertEqual(self.l.repo_clone("O/Scratch"), self.clone)
+        for bad in ("o/..", "../x", "./x", "o", "o/s/x", "o/s x"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.l.repo_clone(bad)
+
+    def test_clone_url_follows_this_checkouts_origin(self):
+        for origin, want in (("https://github.com/o/r.git", "https://github.com/o/scratch.git"),
+                             ("https://github.com/o/r", "https://github.com/o/scratch"),
+                             ("git@github.com:o/r.git", "git@github.com:o/scratch.git"),
+                             ("ssh://git@github.com/o/r.git/", "ssh://git@github.com/o/scratch.git")):
+            self.git.origin = origin
+            self.assertEqual(self.l.repo_url("o/scratch"), want, origin)
+
+    def test_first_use_clones_then_cuts_the_worktree_from_the_clone(self):
+        e = self.entry()
+        self.l.prepare(e)
+        wt = str(self.root / ".worktrees" / e.session_id)
+        self.assertEqual(self.git.calls, [
+            ["-C", str(self.root), "remote", "get-url", "origin"],
+            ["clone", "-q", "--no-checkout", "https://github.com/o/scratch.git", str(self.clone)],
+            ["-C", str(self.clone), "worktree", "add", "-q", "--detach", wt, "origin/main"]])
+        self.assertTrue((Path(wt) / ".claude" / "settings.local.json").exists())
+
+    def test_clone_is_fetched_once_per_run_and_again_after_refetch(self):
+        self.l.prepare(self.entry())
+        self.git.calls.clear()
+        self.l.prepare(self.entry(repo="O/Scratch", sid="1b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41"))
+        self.assertEqual(self.git.subs(), ["worktree add"])            # same clone, already fetched
+        self.l.refetch()
+        self.l.hook = str(self.home / "runtime" / "heartbeat" / "hook.py")
+        self.git.calls.clear()
+        self.l.prepare(self.entry(sid="2b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41"))
+        self.assertEqual(self.git.calls[0], ["-C", str(self.clone), "fetch", "-q", "origin", "main"])
+        self.assertEqual(self.git.subs(), ["fetch", "worktree add"])
+
+    def test_this_repos_session_still_cuts_from_this_checkout(self):
+        e = self.entry(repo=None)
+        self.l.prepare(e)
+        self.assertEqual(self.git.calls, [["-C", str(self.root), "worktree", "add", "-q", "--detach",
+                                           str(self.root / ".worktrees" / e.session_id), "origin/main"]])
+        self.assertFalse((self.home / "repos").exists())
+
+    def test_clone_failure_starts_nothing(self):
+        self.git.fail = "clone"
+        self.assertFalse(self.l.start(self.entry(), []))
+        self.assertEqual(self.fake.commands, [])
+        self.assertIn("failed to start builder-scratch-issue-5: git clone", self.lines[-1])
+
+    def test_a_container_run_clones_from_the_repos_clone(self):
+        self.l.docker = lambda args: (0, "")
+        self.l.use_container("productswarm-run@sha256:" + "a" * 64)
+        e = self.entry(by="watch", budget_usd=15.0, max_turns=200)
+        self.l.prepare(e)
+        wt = str(self.root / ".worktrees" / e.session_id)
+        self.assertIn(["clone", "-q", "--no-hardlinks", "--no-checkout", str(self.clone), wt], self.git.calls)
+        self.assertIn(["-C", wt, "fetch", "-q", str(self.clone),
+                       "+refs/remotes/origin/main:refs/remotes/origin/main"], self.git.calls)
+        self.assertNotIn("worktree add", self.git.subs())
+
+    def test_worktree_is_removed_through_the_checkout_it_belongs_to(self):
+        self.l.prepare(e := self.entry())
+        wt = self.root / ".worktrees" / e.session_id
+        (wt / ".git").write_text(f"gitdir: {self.clone}/.git/worktrees/{e.session_id}\n")
+        self.git.calls.clear()
+        self.assertEqual(self.l.tidy([]), [])
+        self.assertEqual(self.git.calls[-2:], [["-C", str(self.clone), "worktree", "remove", str(wt)],
+                                               ["-C", str(self.clone), "worktree", "prune"]])
+
+    def test_a_worktree_naming_a_checkout_outside_the_clones_goes_through_this_one(self):
+        elsewhere = self.home / "elsewhere" / "x"
+        (elsewhere / ".git").mkdir(parents=True)
+        wt = self.root / ".worktrees" / "0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text(f"gitdir: {elsewhere}/.git/worktrees/w\n")
+        self.assertEqual(self.l.owner_of(wt), self.root)
+        (wt / ".git").write_text(f"gitdir: {self.home}/repos/o/../../elsewhere/x/.git/worktrees/w\n")
+        self.assertEqual(self.l.owner_of(wt), self.root)
+
+
 class ContainerCloneTest(Base):
     """#661, the owner on #679: a container run gets its own clone and home, and the host
     never runs git in the clone, which the run could have rigged."""
@@ -1158,7 +1265,7 @@ class ContainerCloneTest(Base):
             ["clone", "-q", "--no-hardlinks", "--no-checkout", str(self.root), wt],
             ["-C", wt, "fetch", "-q", str(self.root), "+refs/remotes/origin/main:refs/remotes/origin/main"],
             ["-C", wt, "checkout", "-q", "--detach", "origin/main"],
-            ["-C", wt, "remote", "set-url", "origin", ""]])
+            ["-C", wt, "remote", "set-url", "origin", "https://github.com/o/r.git"]])
         self.assertNotIn("worktree add", self.git.subs())
 
     def test_prepare_gives_the_run_a_home_holding_only_its_own_entry(self):
@@ -1295,9 +1402,12 @@ class RealShellTest(unittest.TestCase):
 
     SLEEPS = '#!/bin/bash\nexec python3 -c "import time; time.sleep(30)" "$@"\n'
 
-    def repo(self, tmp: Path, script: str = SLEEPS) -> Path:
+    def repo(self, tmp: Path, script: str = SLEEPS, origin: Path | None = None,
+             root: Path | None = None) -> Path:
         """A real checkout whose origin's main has a stand-in ops/swarm-session that sleeps."""
-        origin, seed, root = tmp / "origin.git", tmp / "seed", tmp / "repo"
+        origin, root = origin or tmp / "origin.git", root or tmp / "repo"
+        seed = root.with_name(root.name + "-seed")
+        origin.parent.mkdir(parents=True, exist_ok=True)
         self.git("init", "-q", "--bare", "-b", "main", str(origin))
         self.git("clone", "-q", str(origin), str(seed))
         (seed / "ops").mkdir()
@@ -1369,6 +1479,39 @@ class RealShellTest(unittest.TestCase):
                     if p.poll() is None:
                         p.kill()
 
+
+    def test_another_repos_worktree_comes_from_its_clone(self):   # #853
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            root = self.repo(tmp, origin=tmp / "gh" / "o" / "r.git", root=tmp / "repo")
+            self.repo(tmp, self.SLEEPS + "# scratch\n", origin=tmp / "gh" / "o" / "scratch.git",
+                      root=tmp / "scratch")
+            home, procs = tmp / "home", []
+            l = swarm.Launcher(home, root=root, out=lambda s: None,
+                               run=lambda cmd: procs.append(subprocess.Popen(["/bin/sh", "-c", cmd])))
+            rev = lambda d, r: subprocess.run(["git", "-C", str(d), "rev-parse", r],
+                                              capture_output=True, text=True).stdout
+            wts = lambda d: subprocess.run(["git", "-C", str(d), "worktree", "list", "--porcelain"],
+                                           capture_output=True, text=True).stdout
+            try:
+                e = swarm.Started("builder-scratch-issue-5", "builder", "m", str(uuid.uuid4()), time.time(),
+                                  issue=5, repo="O/Scratch")
+                self.assertTrue(l.start(e, []))
+                self.wait_running(l, e)
+                wt, clone = root / ".worktrees" / e.session_id, home / "repos" / "o" / "scratch"
+                self.assertEqual(rev(wt, "HEAD"), rev(tmp / "gh" / "o" / "scratch.git", "main"))
+                self.assertNotEqual(rev(wt, "HEAD"), rev(root, "origin/main"))
+                self.assertEqual(rev(wt, "--git-common-dir").strip(), str(clone / ".git"))
+                self.assertNotIn(str(wt), wts(root))
+                self.assertIn(str(wt), wts(clone))
+                self.assertEqual(l.stop("builder-scratch-issue-5"), 0)
+                procs[0].wait(timeout=5)
+                self.assertFalse(wt.exists())                  # clean and on origin: removed
+                self.assertNotIn(str(wt), wts(clone))
+            finally:
+                for p in procs:
+                    if p.poll() is None:
+                        p.kill()
 
     def test_headless_run_writes_its_result_and_keeps_the_pid(self):
         # #147: a stand-in swarm-session that prints its banner as the real one does, then

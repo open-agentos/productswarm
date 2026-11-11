@@ -51,6 +51,9 @@ also writes a Stop hook from the same pinned copy (stophook.py, #148) that keeps
 going until its role's done-condition is met.
 Once a session has exited, its worktree is removed if it is clean and its HEAD is on
 origin; otherwise it is kept and `swarm ls` lists it. Work is never deleted.
+A session on another org repo's issue gets its worktree from that repo's own clone,
+~/.productswarm/repos/<owner>/<name>, made on first use and fetched as this checkout is
+(#853, #820 stage 2).
 
 What the launcher started is recorded locally, never on GitHub:
     ~/.productswarm/launcher/sessions.json   name, role, model, session id, start time;
@@ -102,6 +105,8 @@ import install  # noqa: E402
 
 SWARM_SESSION = ROOT / "ops" / "swarm-session"
 WORKTREES = ".worktrees"   # under the checkout root; gitignored
+REPOS = "repos"            # under the launcher home: a clone per other org repo (#853)
+REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", re.ASCII)
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # GOV-0013's backstop for headless runs: agents never merge (GOV-0011) and never add or
 # remove labels (GOV-0006). Auto mode's classifier covers the rest; this is not a fence.
@@ -334,6 +339,7 @@ class Launcher:
     docker: Callable[[list[str]], tuple[int, str]] = run_docker
     kept: list[Path] = field(default_factory=list)   # exited sessions' worktrees with work in them
     fetched: bool = False
+    fetched_repos: set[str] = field(default_factory=set)   # other repos' clones fetched (#853)
     hook: str | None = None         # the pinned hook path, once refreshed in this run
     claude_dir: Path = field(default_factory=lambda: Path(
         os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser())   # transcripts (#550)
@@ -541,20 +547,77 @@ class Launcher:
 
     def refetch(self) -> None:
         """Fetch origin/main now, and refresh the pinned hook copy on the next start: a
-        long-lived `swarm watch` calls this every check (#550), not once per process."""
+        long-lived `swarm watch` calls this every check (#550), not once per process.
+        Other repos' clones are fetched again on their next start too (#853)."""
         self.fetched, self.hook = False, None
+        self.fetched_repos.clear()
         self.fetch_main()
+
+    # ------------------------------------------------------------ other repos' clones (#853)
+
+    def repo_clone(self, repo: str) -> Path:
+        """Where the launcher keeps its clone of another org repo, owner/name: under its
+        home, in lower case, since GitHub repo names ignore case. Raises ValueError for a
+        name that isn't owner/name or would leave the clones' directory (`..`)."""
+        parts = repo.split("/")
+        if not REPO_RE.fullmatch(repo) or any(p in (".", "..") for p in parts):
+            raise ValueError(f"'{repo}' isn't an owner/name repo")
+        return self.home / REPOS / parts[0].lower() / parts[1].lower()
+
+    def repo_url(self, repo: str) -> str:
+        """repo's URL on the same host and scheme as this checkout's origin: its owner/name
+        swapped for repo's, so the clone fetches with the credentials this one does."""
+        url = self.git_ok("-C", str(self.root), "remote", "get-url", "origin").strip()
+        m = re.fullmatch(r"(.*[:/])[^/:]+/[^/]+?(\.git)?/?", url)
+        if not m:
+            raise RuntimeError(f"can't tell another repo's URL from this checkout's origin ({url})")
+        return f"{m[1]}{repo}{m[2] or ''}"
+
+    def fetch_repo(self, repo: str) -> Path:
+        """repo's clone, made on first use and fetched once per launcher run or watch check,
+        as this checkout is (fetch_main()). The clone has no checkout of its own: sessions'
+        worktrees are cut from it at origin/main."""
+        d = self.repo_clone(repo)
+        if not (d / ".git").is_dir():
+            d.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.rmtree(d, ignore_errors=True)   # a clone that failed part-way
+            self.git_ok("clone", "-q", "--no-checkout", self.repo_url(repo), str(d))
+            self.fetched_repos.add(repo.lower())
+        if repo.lower() not in self.fetched_repos:
+            self.git_ok("-C", str(d), "fetch", "-q", "origin", "main")
+            self.fetched_repos.add(repo.lower())
+        return d
+
+    def source(self, s: Started) -> Path:
+        """The checkout s's worktree is cut from: this one, or its repo's clone (#853)."""
+        return self.fetch_repo(s.repo) if s.repo else self.root
+
+    def owner_of(self, wt: Path) -> Path:
+        """The checkout a worktree belongs to, from its `.git` file (gitdir: <checkout>/.git/
+        worktrees/<id>): this one or one of the launcher's clones of other repos (#853).
+        Anything else is taken to be this checkout's, whose git then refuses to remove it."""
+        try:
+            gitdir = (wt / ".git").read_text().strip()
+        except OSError:
+            return self.root
+        m = re.fullmatch(r"gitdir: (.+)/\.git/worktrees/[^/]+", gitdir)
+        found = Path(m[1]).resolve() if m else None
+        if found and found.parent.parent == (self.home / REPOS).resolve() and (found / ".git").is_dir():
+            return self.home / REPOS / found.parent.name / found.name
+        return self.root
 
     def prepare(self, s: Started) -> None:
         """Create the session's worktree at origin/main and write its hook settings. A run
-        in a container gets a clone instead, and its own home (#661)."""
+        in a container gets a clone instead, and its own home (#661). Both come from the
+        session's repo: this checkout, or that repo's clone (#853)."""
         hook = self.hook_path()          # fetches, and refreshes the pinned copy first
         wt = self.worktree(s.session_id)
+        src = self.source(s)
         if self.in_container(s):
-            self.clone(wt)
+            self.clone(wt, src)
             self.prepare_run_home(s)
         else:
-            self.git_ok("-C", str(self.root), "worktree", "add", "-q", "--detach", str(wt), "origin/main")
+            self.git_ok("-C", str(src), "worktree", "add", "-q", "--detach", str(wt), "origin/main")
         base = install.read_settings(self.root / ".claude" / "settings.local.json")
         settings = install.with_hooks(base, hook=hook)
         if s.by == "watch":      # loop-started runs keep going until they're done (#148)
@@ -565,19 +628,25 @@ class Launcher:
     def prepare_line(self, s: Started) -> str:
         """What prepare() will do for s, for --dry-run."""
         wt = self.worktree(s.session_id)
+        src = self.repo_clone(s.repo) if s.repo else self.root
+        made = (f" (from {s.repo}'s clone, {src}, made on first use)"
+                if s.repo and not (src / ".git").is_dir() else "")
         if self.in_container(s):
-            return f"git clone --no-hardlinks {self.root} {wt} (at origin/main; origin set to GitHub)"
+            return f"git clone --no-hardlinks {src} {wt} (at origin/main; origin set to GitHub){made}"
+        if s.repo:
+            return f"git -C {src} worktree add --detach {wt} origin/main{made}"
         return f"git worktree add --detach {wt} origin/main"
 
-    def clone(self, wt: Path) -> None:
+    def clone(self, wt: Path, src: Path | None = None) -> None:
         """A container run's own clone of the checkout at origin/main (#661), in place of a
         worktree. A worktree keeps its index, HEAD and commits in the shared `.git`, so a
         container would need that mounted read-write, and could then plant a hook that the
         host runs on its next `git worktree add` as the user who can read every App's key.
         A clone has its own `.git`; the host's is never mounted. `--no-hardlinks` so the
         clone shares no object file with the checkout. origin then points at GitHub, so the
-        run pushes there and the heartbeat hook finds the repo from it."""
-        root = str(self.root)
+        run pushes there and the heartbeat hook finds the repo from it. src is the checkout
+        to clone: this one, or another repo's clone (#853)."""
+        root = str(src or self.root)
         url = self.git_ok("-C", root, "remote", "get-url", "origin").strip()
         self.git_ok("clone", "-q", "--no-hardlinks", "--no-checkout", root, str(wt))
         self.git_ok("-C", str(wt), "fetch", "-q", root, "+refs/remotes/origin/main:refs/remotes/origin/main")
@@ -617,7 +686,7 @@ class Launcher:
         if self.is_clone(wt):
             shutil.rmtree(wt, ignore_errors=True)
         else:
-            self.git(["-C", str(self.root), "worktree", "remove", "--force", str(wt)])
+            self.git(["-C", str(self.owner_of(wt)), "worktree", "remove", "--force", str(wt)])
 
     def removable(self, wt: Path) -> bool:
         """Clean (nothing uncommitted or untracked) and HEAD is on a remote branch."""
@@ -636,7 +705,7 @@ class Launcher:
         by hand, or a session still starting, is never removed."""
         d = self.root / WORKTREES
         alive = {e.session_id for e in live}
-        kept, removed = [], False
+        kept, removed = [], set()
         for wt in sorted(d.iterdir()) if d.is_dir() else []:
             if not wt.is_dir() or not UUID_RE.match(wt.name) or wt.name in alive:
                 continue
@@ -645,12 +714,14 @@ class Launcher:
                     shutil.rmtree(wt, ignore_errors=True)   # its run_home() stays: logs, cost, transcript
                 else:
                     kept.append(wt)
-            elif self.removable(wt) and self.git(["-C", str(self.root), "worktree", "remove", str(wt)])[0] == 0:
-                removed = True
+                continue
+            src = self.owner_of(wt)
+            if self.removable(wt) and self.git(["-C", str(src), "worktree", "remove", str(wt)])[0] == 0:
+                removed.add(src)
             else:
                 kept.append(wt)
-        if removed:
-            self.git(["-C", str(self.root), "worktree", "prune"])
+        for src in sorted(removed):
+            self.git(["-C", str(src), "worktree", "prune"])
         self.kept = kept
         return kept
 
@@ -1834,11 +1905,12 @@ def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, forc
            get_reader: Callable[[str, int], GoReader] = gh_go_reader,
            issue_repo: str | None = None) -> int:
     """Start a session on issue n of issue_repo (None: this repo, `repo`)."""
-    if issue_repo:
-        # Stage 1 of #820: worktrees are cut from this checkout, so a session there would work
-        # on this repo's code. Starting one waits for per-repo clones (stage 2).
-        launcher.out(f"swarm launch: refused: {issue_repo}#{n} is in another repo, and its "
-                     f"worktree would be cut from this checkout ({repo}); not until #820 stage 2")
+    if issue_repo and not dry_run:
+        # #820 stage 2 (#853) cuts the worktree from issue_repo's clone, but the session would
+        # still open with this repo's swarm-session, role prompt and stop hook. Starting one
+        # waits for stage 3; --dry-run shows what it would run.
+        launcher.out(f"swarm launch: refused: {issue_repo}#{n} is in another repo; starting a "
+                     f"session there waits for #820 stage 3 (--dry-run shows its worktree)")
         return 1
     where = issue_repo or repo
     issue, events = get_issue(where, n)
