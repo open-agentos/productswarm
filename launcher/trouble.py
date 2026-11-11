@@ -411,12 +411,16 @@ def report(d: Data, measures=None) -> dict:
                                            waited_on_by=a))
 
     # Rule 5: a hand-started session gone quiet (#773). One whose work is over (its issue
-    # closed or closed by a merged PR, its PR no longer open) is only an idle window.
+    # closed or closed by a merged PR, its PR no longer open) is only an idle window. Only
+    # sessions on this repo count: one on another org repo's issue (Started.repo, #829) would
+    # match this repo's issue with the same number, and that repo's comments aren't read here.
     def closes(p: dict) -> list[int]:
         return [x["number"] for x in p.get("closingIssuesReferences") or []]
     open_prs = {p["number"] for p in d.prs}
     done = {n for p in d.merged for n in closes(p)}
     for s in d.sessions:
+        if s.get("repo") not in (None, repo):
+            continue
         app, issue, pr_n, started = (f"productswarm-{s['role']}[bot]", s.get("issue"), s.get("pr"),
                                      when(s["started"]))
         if (issue is not None and (issue not in open_issues or issue in done)) or \
@@ -426,7 +430,7 @@ def report(d: Data, measures=None) -> dict:
                    if p["number"] == pr_n or (issue is not None and issue in closes(p))}
         posts = [when(c.get("created_at")) for c in d.comments
                  if (c.get("user") or {}).get("login") == app
-                 and (issue is None or watch.comment_issue(c) in {issue, *its_prs})]
+                 and watch.comment_issue(c) in {*([issue] if issue is not None else []), *its_prs}]
         posts += [when(p.get("createdAt")) for p in its_prs.values()
                   if rest_login((p.get("author") or {}).get("login")) == app]
         last = max((t for t in posts if t and t >= started), default=None)
@@ -604,7 +608,7 @@ def hand_sessions(launcher) -> list[dict]:
             continue
         started = dt.datetime.fromtimestamp(e.started, dt.timezone.utc)
         out.append({"name": e.name, "role": e.role, "issue": e.issue, "pr": e.pr,
-                    "started": started.isoformat(timespec="seconds")})
+                    "repo": e.repo, "started": started.isoformat(timespec="seconds")})
     return out
 
 

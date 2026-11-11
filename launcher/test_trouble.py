@@ -380,6 +380,36 @@ class Stuck(unittest.TestCase):
         s.update(issue=None, pr=839)                                      # a PR session, PR gone
         self.assertEqual(trouble.report(data(**d))["outside"]["stuck"], [])
 
+    def test_rule5_session_on_another_repo_is_not_this_repo_s_issue(self):
+        # A session on open-agentos/other-repo#773 isn't working on this repo's #773 (#829).
+        e = swarm.Started(name="builder-other-773", role="builder", model="m", session_id="s",
+                          issue=773, repo="o/other", started=(NOW - dt.timedelta(hours=3)).timestamp())
+
+        class L:
+            def running(self):
+                return [e]
+
+            def state(self, _):
+                return "running"
+        [s] = trouble.hand_sessions(L())
+        self.assertEqual(s["repo"], "o/other")
+        d = dict(issues=[M1, issue(773)], scopes={773: under(1)}, sessions=[s])
+        self.assertEqual(scope(trouble.report(data(**d)))["stuck"], [])
+        for this in (None, REPO):                                         # this repo's: still flagged
+            s["repo"] = this
+            [x] = scope(trouble.report(data(**d)))["stuck"]
+            self.assertEqual((x["kind"], x["ref"]), ("quiet-session", "#773"))
+
+    def test_rule5_pr_session_counts_only_posts_on_its_pr(self):
+        s = {"name": "builder-pr-900", "role": "builder", "issue": None, "pr": 900, "started": ago(3)}
+        elsewhere = comment(12, "On another issue.", hours=0.2, author="productswarm-builder[bot]")
+        d = dict(issues=[M1, issue(773), issue(12)], scopes={773: under(1), 12: under(1)},
+                 sessions=[s], prs=[pr(900, 773)], comments=[elsewhere])
+        [x] = trouble.report(data(**d))["outside"]["stuck"]
+        self.assertEqual((x["kind"], x["ref"]), ("quiet-session", "builder-pr-900"))
+        d["comments"] = [comment(900, "Pushed.", hours=0.2, author="productswarm-builder[bot]", on_pr=True)]
+        self.assertEqual(trouble.report(data(**d))["outside"]["stuck"], [])
+
     def test_rule6_stopped_because_next_stage_has_no_issue_786(self):
         stop = comment(786, "Started on this, and stopping without code.\n\n- **Stage 2** (a clone per "
                             "repo) has no issue yet. The planner said it would open one.\n\n-- builder",
