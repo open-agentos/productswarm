@@ -865,6 +865,52 @@ class LaunchTest(Base):
         self.assertEqual(self.fake.commands, [])
         self.assertTrue(self.lines[-1].startswith("would start: builder-issue-49"))
 
+    def cli(self, ref):
+        self.l.root = Path(__file__).resolve().parent.parent
+        got = []
+        real = swarm.launch
+        swarm.launch = lambda launcher, role, n, model, **kw: got.append((n, kw["issue_repo"])) or 0
+        try:
+            rc = swarm.main(["launch", "builder", "--issue", ref, "--repo", "open-agentos/productswarm",
+                             "--model", "m"], self.l)
+        finally:
+            swarm.launch = real
+        return rc, got
+
+    def test_issue_refs_bare_hash_and_this_repo_mean_this_repo(self):   # #829
+        for ref in ("49", "#49", "open-agentos/productswarm#49", "Open-AgentOS/ProductSwarm#49"):
+            self.assertEqual(self.cli(ref), (0, [(49, None)]), ref)
+
+    def test_issue_ref_to_another_repo_is_passed_on(self):
+        self.assertEqual(self.cli("open-agentos/scratch#5"), (0, [(5, "open-agentos/scratch")]))
+
+    def test_malformed_issue_ref_is_refused(self):
+        for ref in ("", "x", "#", "0", "#-3", "scratch#5", "o/r/x#5", "o/r#", "o/r5", "49 50"):
+            self.lines.clear()
+            self.assertEqual(self.cli(ref), (1, []), ref)
+            self.assertIn("isn't an issue ref: use N, #N or owner/name#N", self.lines[-1])
+
+    def test_another_repo_is_refused_before_reading_it(self):
+        read = []
+        rc = swarm.launch(self.l, "builder", 5, "m", repo="o/r", issue_repo="o/scratch",
+                          get_issue=lambda repo, n: read.append(repo) or (issue(n), []),
+                          get_heartbeat=lambda *a: {"sessions": []}, owner=lambda: OWNER,
+                          agents=lambda: AGENTS, get_reader=lambda repo, n: None)
+        self.assertEqual(rc, 1)
+        self.assertEqual(read, [])
+        self.assertEqual(self.fake.commands, [])
+        self.assertIn("refused: o/scratch#5 is in another repo, and its worktree would be cut from "
+                      "this checkout (o/r)", self.lines[-1])
+
+    def test_started_repo_round_trips_and_old_state_is_this_repo(self):
+        self.assertEqual(self.go(), 0)
+        (e,) = self.l.live()
+        self.assertIsNone(e.repo)
+        old = {k: v for k, v in e.__dict__.items() if k != "repo"}
+        self.assertIsNone(swarm.Started.from_dict(old).repo)
+        e.repo = "o/scratch"
+        self.assertEqual(swarm.Started.from_dict(e.__dict__).repo, "o/scratch")
+
     def test_launch_entries_are_not_manifest_slots(self):
         self.go()
         self.l.up([S("builder")])
@@ -1067,6 +1113,21 @@ class LaunchHelpersTest(unittest.TestCase):
         self.assertEqual(swarm.launch_name("docs", 7, set()), "docs-issue-7")
         self.assertEqual(swarm.launch_name("docs", 7, {"docs-issue-7", "docs-issue-7-2"}),
                          "docs-issue-7-3")
+        self.assertEqual(swarm.launch_name("builder", 5, {"builder-issue-5"}, repo="o/scratch"),
+                         "builder-scratch-issue-5")
+        self.assertEqual(swarm.launch_name("builder", 5, set(), 9, "o/scratch"), "builder-scratch-pr-9")
+
+    def test_holders_dont_cross_repos(self):   # #829
+        def e(sid, n, repo=None):
+            return swarm.Started(name=f"b-{sid}", role="builder", model=M, session_id=sid,
+                                 started=0, issue=n, repo=repo)
+        started = [e("here", 5), e("there", 5, "o/scratch"), e("there-hb", 5, "o/scratch")]
+        model = {"sessions": [hb("there-hb", 5), hb("hand", 7)]}
+        self.assertEqual(swarm.holders(5, model, started), ["b-here (starting, session here)"])
+        self.assertEqual(swarm.holders(5, model, started, repo="O/Scratch"),
+                         ["b-there-hb (active, session there-hb)", "b-there (starting, session there)"])
+        self.assertEqual(swarm.holders(7, model, started), ["builder (active, session hand)"])
+        self.assertEqual(swarm.holders(7, model, started, repo="o/scratch"), [])
 
 
 class ContainerCloneTest(Base):
