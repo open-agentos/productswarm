@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -27,6 +28,7 @@ REPORT = 249
 NOW = dt.datetime(2026, 11, 11, 18, 0, tzinfo=UTC)          # a Wednesday
 SESSION = '[[session]]\nrole = "builder"\nmodel = "m"\n\n'
 SECRET_BODY = "a private body that must never be stored"
+ALWAYS = (dt.datetime(2026, 1, 1, tzinfo=UTC), dt.datetime(2027, 1, 1, tzinfo=UTC))
 
 
 def user(login):
@@ -73,6 +75,16 @@ REVIEWS = {(900, 71): {"user": user(OWNER), "state": "APPROVED", "submitted_at":
                        "body": SECRET_BODY}}
 
 
+# What a backfill finds (#844): the repo's issue events newest first, its comments, and search.
+REPO_EVENTS = sorted([{**e, "issue": {"number": n}} for n, es in EVENTS.items() for e in es]
+                     + [{"id": 600 + n, "event": "merged", "actor": user(OWNER), "issue": {"number": n},
+                         "created_at": PULLS[n]["merged_at"]} for n in PULLS],
+                     key=lambda e: e["created_at"], reverse=True)
+REPO_COMMENTS = [{**c, "id": i, "issue_url": f"https://api.github.com/repos/{REPO}/issues/"
+                  + c["html_url"].split("/issues/")[1].split("#")[0]} for i, c in COMMENTS.items()]
+SEARCH = {"author:": [686, 800], "reviewed-by:": [900]}
+
+
 class FakeGitHub:
     def __init__(self, fail: set[str] = frozenset()):
         self.calls: list[str] = []
@@ -83,7 +95,22 @@ class FakeGitHub:
         for bad in self.fail:
             if bad in path:
                 raise RuntimeError(f"gh api {path} failed: {bad}")
+        if path.startswith("orgs/"):
+            return [{"full_name": REPO}]
+        if path.startswith("search/issues"):
+            q = urllib.parse.unquote(path.split("q=")[1].split("&")[0])
+            assert "org:o " in q, q
+            ns = next(v for k, v in SEARCH.items() if k in q)
+            return [{"number": n, "repository_url": f"https://api.github.com/repos/{REPO}"} for n in ns]
         p = path.split("?")[0].split("/")[3:]          # after repos/o/r
+        if p == ["issues", "events"]:
+            page = int(path.split("page=")[-1])
+            return REPO_EVENTS[(page - 1) * 100:page * 100]
+        if p == ["issues", "comments"]:
+            since = path.split("since=")[1].split("&")[0]
+            return [c for c in REPO_COMMENTS if c["created_at"] >= since]
+        if p[0] == "pulls" and p[2:] == ["reviews"]:
+            return [{**r, "id": rid} for (n, rid), r in REVIEWS.items() if n == int(p[1])]
         if p[0] == "issues" and p[1] == "comments":
             if int(p[2]) not in COMMENTS:
                 raise RuntimeError("gh api failed: HTTP 404: Not Found")
@@ -170,7 +197,9 @@ class Base(unittest.TestCase):
                          merger.is_protected, now=NOW)
 
     def day(self, d="2026-11-11"):
-        return acts.per_day(acts.stored(self.dir), [dt.date.fromisoformat(d)], UTC)[0]
+        """The day as counted once it is over and backfilled."""
+        return acts.per_day(acts.stored(self.dir), [dt.date.fromisoformat(d)], UTC,
+                            now=dt.datetime(2026, 11, 20, tzinfo=UTC), backfills=[ALWAYS])[0]
 
 
 class Leads(Base):
@@ -273,7 +302,8 @@ class Command(Base):
         self.assertEqual(out["owner"], OWNER)
         self.assertEqual([d["day"] for d in out["days"]][:3], ["2026-11-11", "2026-11-10", "2026-11-09"])
         self.assertEqual(len(out["days"]), 10)
-        self.assertEqual([d["count"] for d in out["days"]][:3], [9, 1, 0])
+        self.assertEqual([(d["status"], d["count"]) for d in out["days"]][:3],
+                         [("in progress", 9), ("counted", 1), ("counted", 0)])
         self.assertEqual(out["days"][0]["acts"][0]["url"], f"https://github.com/{REPO}/issues/800")
 
     def test_one_day_as_text(self):
@@ -295,6 +325,89 @@ class Command(Base):
         finally:
             swarm.owner_acts = orig
         self.assertEqual(seen, {"day": dt.date(2026, 11, 10), "as_json": True})
+
+
+class NotCounted(Base):
+    """#844: a day with no data reads `not counted`, never 0; a backfilled day counts, even at 0."""
+
+    def refresh(self, days, now=NOW, gh=None):
+        self.gh = gh or FakeGitHub()
+        return acts.refresh(self.dir, OWNER, (REPO, REPORT), REPO, self.gh.gh_json, self.gh.gh_items,
+                            merger.is_protected, [dt.date.fromisoformat(d) for d in days], now, UTC)
+
+    def test_no_backfill_reads_not_counted_never_zero(self):
+        rows = acts.per_day(acts.stored(self.dir), [dt.date(2026, 11, 9)], UTC, now=NOW)
+        self.assertEqual((rows[0]["status"], rows[0]["count"], rows[0]["under_limit"], rows[0]["c_team"]),
+                         ("not counted", None, None, None))
+        self.assertIn("Mon 2026-11-09  not counted (not read back from GitHub yet)",
+                      acts.text(rows, OWNER, REPO))
+
+    def test_webhook_leads_alone_dont_count_a_day(self):
+        self.deliver()
+        self.sync()
+        rows = acts.per_day(acts.stored(self.dir), [dt.date(2026, 11, 10)], UTC, now=NOW)
+        self.assertEqual((rows[0]["status"], rows[0]["count"], len(rows[0]["acts"])), ("not counted", None, 1))
+
+    def test_backfill_finds_the_same_acts_with_the_same_keys(self):
+        rows, errors = self.refresh(["2026-11-11", "2026-11-10", "2026-11-09"])
+        self.assertEqual(errors, [])
+        self.assertEqual([(r["status"], r["count"]) for r in rows],
+                         [("in progress", 9), ("counted", 1), ("counted", 0)])   # 0 still counts
+        self.assertIsNone(rows[0]["under_limit"])
+        before = acts.stored(self.dir)
+        self.deliver()                                   # the same acts arrive by webhook too
+        self.sync()
+        self.assertEqual(acts.stored(self.dir), before)
+
+    def test_a_counted_day_isnt_read_again(self):
+        self.refresh(["2026-11-10"])
+        rows, errors = self.refresh(["2026-11-10"])
+        self.assertEqual((errors, rows[0]["status"]), ([], "counted"))
+        self.assertEqual(self.gh.calls, [])
+
+    def test_a_failed_backfill_counts_nothing_and_is_retried(self):
+        rows, errors = self.refresh(["2026-11-10"], gh=FakeGitHub(fail={"search/issues"}))
+        self.assertEqual(rows[0]["status"], "not counted")
+        self.assertTrue(errors and errors[0].startswith("backfill from 2026-11-10T00:00:00Z"), errors)
+        rows, errors = self.refresh(["2026-11-10"])
+        self.assertEqual((errors, rows[0]["status"], rows[0]["count"]), ([], "counted", 1))
+
+    def test_an_unread_backfilled_act_holds_the_day(self):
+        rows, errors = self.refresh(["2026-11-10"], now=NOW + dt.timedelta(days=1),
+                                    gh=FakeGitHub(fail={"pulls/901"}))
+        self.assertEqual((len(errors), rows[0]["status"]), (1, "not counted"))
+        rows, errors = self.refresh(["2026-11-10"], now=NOW + dt.timedelta(days=1))
+        self.assertEqual((errors, rows[0]["status"]), ([], "counted"))
+
+    def test_a_day_is_read_back_only_once_it_has_settled(self):
+        now = dt.datetime(2026, 11, 11, 0, 30, tzinfo=UTC)
+        rows, _ = self.refresh(["2026-11-10"], now=now)
+        self.assertEqual((rows[0]["status"], rows[0]["why"]),
+                         ("not counted", "read back from GitHub 1h after the day ends"))
+        self.assertEqual(self.gh.calls, [])
+        rows, _ = self.refresh(["2026-11-10"], now=now + acts.SETTLE)
+        self.assertEqual(rows[0]["status"], "counted")
+
+    def test_old_days_and_future_days_arent_read_back(self):
+        rows, _ = self.refresh(["2026-09-01", "2026-11-12"])
+        self.assertEqual([r["status"] for r in rows], ["not counted", "not counted"])
+        self.assertIn("older than 31 days", rows[0]["why"])
+        self.assertEqual(self.gh.calls, [])
+
+    def test_issue_events_stop_at_the_window(self):
+        pages = {1: [{"created_at": f"2026-11-11T{h:02d}:00:00Z"} for h in range(23, 23 - 100, -1)
+                     if h >= 0] + [{"created_at": "2026-11-09T00:00:00Z"}] * 77}
+        calls = []
+
+        def gh_json(_api, path):
+            calls.append(path)
+            return pages.get(int(path.rsplit("=", 1)[1]), [])
+        got = acts.recent_events(REPO, "2026-11-10T00:00:00Z", gh_json)
+        self.assertEqual((len(got), len(calls)), (24, 1))
+        with self.assertRaises(RuntimeError):
+            acts.recent_events(REPO, "2026-11-10T00:00:00Z",
+                               lambda *a: [{"created_at": "2026-11-10T01:00:00Z"},
+                                           {"created_at": "2026-11-11T01:00:00Z"}])
 
 
 if __name__ == "__main__":

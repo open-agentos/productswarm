@@ -18,7 +18,8 @@
                                     each, and M1's streak (#707)
     launcher/swarm acts [--day D] [--json]
                                     the owner's acts on each of the last 10 working days, or
-                                    on day D, with count and kind (#771; acts.py)
+                                    on day D, with count and kind, or "not counted" for a day
+                                    not yet read back from GitHub (#771, #844; acts.py)
     launcher/swarm watch [--dry-run] [--serve] [--container IMAGE]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
@@ -1422,8 +1423,9 @@ def owner_acts(launcher: Launcher, repo: str, manifest_path: Path | str = manife
                day: dt.date | None = None, as_json: bool = False, now: dt.datetime | None = None,
                tz: dt.tzinfo | None = None, owner: str | None = None, gh_json: Callable | None = None,
                gh_items: Callable | None = None) -> int:
-    """`swarm acts`: read the webhook leads back from GitHub (acts.sync), then print the owner's
-    acts for each of the last 10 working days, or for `day`, from swarm.db."""
+    """`swarm acts`: read the owner's acts back from GitHub (the webhook leads, and a backfill of
+    each finished day not yet counted, acts.refresh), then print them for each of the last 10
+    working days, or for `day`, from swarm.db. A day not backfilled reads `not counted` (#844)."""
     import acts
     import merger
     try:
@@ -1434,11 +1436,10 @@ def owner_acts(launcher: Launcher, repo: str, manifest_path: Path | str = manife
     report = (repo, limits.report_issue) if limits and limits.report_issue else None
     owner = owner or owner_login()
     g = None if gh_json and gh_items else dashboard()
-    errors = acts.sync(launcher.dir, owner, report, gh_json or g.gh_json, gh_items or g.gh_items,
-                       merger.is_protected)
     now = now or dt.datetime.now(dt.timezone.utc)
     days = [day] if day else working_days((now.astimezone(tz) if tz else now.astimezone()).date())
-    rows = acts.per_day(acts.stored(launcher.dir), days, tz)
+    rows, errors = acts.refresh(launcher.dir, owner, report, repo, gh_json or g.gh_json,
+                                gh_items or g.gh_items, merger.is_protected, days, now, tz)
     if as_json:
         launcher.out(json.dumps({"owner": owner, "days": rows, "unread_errors": errors}, indent=2))
     else:
