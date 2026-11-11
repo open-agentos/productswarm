@@ -450,5 +450,39 @@ class ActionsMaxReviewsTest(Base):
             self.assertIn(shown, out.getvalue().splitlines()[-1].split("\t"))
 
 
+class OrgReposTest(Base):
+    """#772: [org] repos, the org's other repos swarm watch and the merger work."""
+
+    def load(self, text):
+        path = self.dir / "swarm.toml"
+        path.write_text(text)
+        return m.load_repos(path)
+
+    def test_left_out_means_this_repo_only(self):
+        self.assertEqual(self.load(session()), ((), []))
+
+    def test_a_list_of_repos(self):
+        text = session() + '[org]\nrepos = ["open-agentos/scratch", "open-agentos/b.c-d_e"]\n'
+        self.assertEqual(self.load(text), (("open-agentos/scratch", "open-agentos/b.c-d_e"), []))
+        self.assertEqual(len(self.parse(text)), 1)          # still a valid manifest
+
+    def test_a_bad_table_means_no_other_repos(self):
+        for org, problem in (('repos = "open-agentos/x"', "org: repos must be a list"),
+                             ('repos = ["x"]', "org: each repo must be"),
+                             ('repos = ["a/x", "A/X"]', "org: A/X is listed twice"),
+                             ('repos = []\nmore = 1', "org: unknown key 'more'")):
+            repos, problems = self.load(session() + "[org]\n" + org + "\n")
+            self.assertEqual(repos, (), org)
+            self.assertTrue(problems[0].startswith(problem), problems)
+            self.assertTrue(any(p.startswith(problem) for p in self.problems(session() + "[org]\n" + org)))
+
+    def test_others_drops_home_and_other_orgs(self):
+        keep, why = m.others(("open-agentos/productswarm", "open-agentos/scratch", "else/x"),
+                             "open-agentos/productswarm")
+        self.assertEqual(keep, ["open-agentos/scratch"])
+        self.assertEqual(why, ["else/x isn't in the open-agentos org, so it is left out "
+                               "(GOV-0031 covers one org)"])
+
+
 if __name__ == "__main__":
     unittest.main()

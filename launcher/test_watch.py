@@ -1132,6 +1132,78 @@ class CliTest(unittest.TestCase):
         self.assertIn("GOV-0010", r.stdout + r.stderr)
 
 
+
+SCRATCH = "open-agentos/scratch"
+
+
+class OtherReposTest(unittest.TestCase):
+    """#772: swarm.toml's [org] repos are watched beside this one."""
+    kinds = WatchTest.kinds
+
+    def setUp(self):
+        WatchTest.setUp(self)
+        self.read_repos = []
+        task = {**issue(5), "user": {"login": "productswarm-planner[bot]"},
+                "html_url": f"https://github.com/{SCRATCH}/issues/5"}
+        self.other = {"issues": [task], "prs": [{**pr(7, SHA2), "url": f"https://github.com/{SCRATCH}/pull/7"}]}
+        # #5 is a Task under the owner's open Goal #686 in this repo (GOV-0031).
+        self.scopes = {5: {"author": "productswarm-planner[bot]", "type": "Task", "deep": False,
+                           "parents": [{"repo": REPO, "number": 686, "state": "open", "type": "Goal",
+                                        "author": OWNER}],
+                           "blockers_complete": True, "blocked_by": []}}
+
+    def read(self, repo, idle, now):
+        self.read_repos.append(repo)
+        if repo == REPO:
+            return self.scene.read(repo, idle, now)
+        if repo != SCRATCH:
+            raise RuntimeError("gh failed")
+        data = {"repo": SCRATCH, "issues": self.other["issues"], "comments": {},
+                "prs": self.other["prs"], "reviews": {}}
+        return watch.World(model=G.build(data, NOW, dt.timedelta(minutes=idle)),
+                           issues=self.other["issues"], scopes=self.scopes, repo=SCRATCH)
+
+    def watch(self, org, dry_run=True):
+        path = write_manifest(self.home / "fixture", ALL_CAPPED, max_live=2)
+        path.write_text(path.read_text() + org)
+        return watch.Watch(self.l, REPO, OWNER, ROLES, read=self.read, manifest_path=path,
+                           dry_run=dry_run, get_issue=self.scene.get_issue,
+                           get_heartbeat=self.scene.heartbeat, get_reader=self.scene.get_reader)
+
+    def test_no_org_table_reads_this_repo_only(self):
+        self.watch("").tick(NOW)
+        self.assertEqual(self.read_repos, [REPO])
+
+    def test_dry_run_shows_go_work_in_both_repos(self):
+        got = self.watch(f'[org]\nrepos = ["{SCRATCH}"]\n').tick(NOW)
+        self.assertEqual(self.read_repos, [REPO, SCRATCH])
+        self.assertEqual(self.kinds(got)[-2:], [("review", f"PR {SCRATCH}#7"), ("build", f"{SCRATCH}#5")])
+        self.assertEqual(got[-1].key, f"{SCRATCH}|build:5:G{REPO}#686")
+        self.assertIn(f"[build] {SCRATCH}#5 go under Goal {REPO}#686 (GOV-0031) -> would start "
+                      f"builder on {SCRATCH}#5", self.lines)
+        self.assertIn(f"  (no headless command: {watch.OTHER_REPO})", self.lines)
+        self.assertIn(("build", "#49"), self.kinds(got))          # this repo's work as before
+
+    def test_real_check_lists_other_repo_work_once_and_starts_nothing_there(self):
+        w = self.watch(f'[org]\nrepos = ["{SCRATCH}", "elsewhere/x"]\n', dry_run=False)
+        w.tick(NOW)
+        line = f"[build] {SCRATCH}#5 go under Goal {REPO}#686 (GOV-0031) -> {watch.OTHER_REPO}"
+        self.assertIn(line, self.lines)
+        self.assertIn("swarm watch: elsewhere/x isn't in the open-agentos org, so it is left out "
+                      "(GOV-0031 covers one org)", self.lines)
+        self.assertFalse(any(e.issue == 5 for e in self.l.running()))
+        self.assertFalse(any(k.startswith(SCRATCH) for k in watch.load_state(self.l)["acted"]))
+        w.tick(NOW)
+        self.assertEqual(self.lines.count(line), 1)
+
+    def test_an_unreadable_repo_is_said_once(self):
+        w = self.watch('[org]\nrepos = ["open-agentos/gone"]\n')
+        w.tick(NOW)
+        w.tick(NOW)
+        self.assertEqual(self.lines.count("swarm watch: can't read open-agentos/gone (gh failed); "
+                                          "its triggers wait"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 

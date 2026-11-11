@@ -670,6 +670,28 @@ It prints one line per session (`builder-1  claude-opus-5-5  no cap`). If the ma
 
 From Python, `manifest.load()` returns a list of `Session(role, index, model, spend_cap_usd)` or raises `ManifestError`. `manifest.load_all()`, which `swarm watch` uses, returns `(sessions, watch limits, problems)`: the sessions from the valid entries, and one problem per bad one (#487). It raises `ManifestError` only if the file can't be read, isn't TOML, or has a bad `[watch]` table.
 
+### Other repos of the org (#772)
+
+`swarm watch` and the merger work this repo only, until `swarm.toml` lists others in an `[org]` table:
+
+```toml
+[org]
+repos = ["open-agentos/scratch"]   # "owner/name", in this repo's org
+```
+
+To add a repo:
+
+1. Install the role Apps and `productswarm-merger` on it, with GOV-0028's ruleset on its `main`. The merger workflow mints its token for this repo only (`repositories` in `.github/workflows/merger.yml`), so widening it is a workflow change. Until then the merger can't read the other repo, says `can't decide` for it and exits 1. These are the owner's steps.
+2. Add it to `repos` in `swarm.toml`. That file is the owner's, so a PR changing it is an approved ask.
+3. Check it: `python3 launcher/manifest.py` prints `org  also works open-agentos/scratch`, `launcher/swarm watch --dry-run` lists that repo's triggers, and `python3 launcher/merger.py plan` prints a `merger: repo open-agentos/scratch` block.
+
+What changes once a repo is listed:
+
+- **`swarm watch`** reads each listed repo on every check, as it reads this one, and works out `[review]`, `[build]`, `[respond]`, `[record]`, `[answer]` and `[call-in]` there. A Task there under the owner's open Goal or Area here is go (GOV-0031). Its refs name the repo (`[build] open-agentos/scratch#5 go under Goal open-agentos/productswarm#686 (GOV-0031)`). `[daily]`, `[ask]`, `[research]` and `swarm:halt` stay with this repo's report issue. A real check doesn't start sessions in another repo yet, because the launcher's worktrees are this repo's. It lists each trigger there once as `not started` and never records it, so each one fires once starting there is built.
+- **The merger**, run without `--repo` or `--pr`, works this repo and then each listed one, under a `merger: repo <owner/name>` line. Each repo gets the same conditions, its own reads and writes, and its own shadow bars. A PR there must close an issue in that repo. It exits 1 if any repo did.
+
+A repo outside this repo's org is left out, with a line saying so. This repo listed again is ignored. If the `[org]` table is bad (not a list, not `owner/name`, a repo twice, or an unknown key), it is reported like a bad `[[session]]` entry and no other repo is worked until it is fixed.
+
 ## Tests
 
 ```bash

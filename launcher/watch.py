@@ -228,6 +228,18 @@ It never stops a session (GOV-0008), never adds or removes labels, and never com
 approves or merges: its only GitHub calls are reads. Sessions it starts are recorded
 with by="watch", and `swarm ls` shows them as "by watch".
 
+Other repos of the org (#772): swarm.toml's [org] repos lists them (manifest.others()
+drops this repo and any outside its org). Each check reads each one with gather() and works
+out [review], [build], [respond], [record], [answer] and [call-in] there as here, so a Task in
+another repo under an owner's Goal in this one is go (GOV-0031). Their keys start
+`<owner/name>|` and their refs name the repo (`open-agentos/x#5`). [daily], [ask],
+[research] and swarm:halt stay with this repo's report issue. Sessions the launcher started
+work in this repo's checkout, so none holds another repo's trigger; that repo's heartbeat
+still does. --dry-run prints them like any other. A real check doesn't start them yet: it
+lists each once as not started (OTHER_REPO) and never records it, so once starting a session
+in another repo is built, every one still open fires. A repo it can't read is said once.
+With no [org] table nothing else is read and nothing changes.
+
 GitHub reads go through gather(); triggers() is pure, so tests feed it canned data.
 """
 from __future__ import annotations
@@ -288,6 +300,8 @@ PUBLIC_FILE = "watch-public.json"   # the watch state's no-cost form, beside it 
 MAX_RETRIES = 2               # times a run that never started is started again (#550)
 WAIT_RE = re.compile(r"\bwait(?:s|ing)?\s+(?:on|for)\b([^\n]*)", re.IGNORECASE)
 BUILDER_APP = "productswarm-builder[bot]"
+OTHER_REPO = ("not started: swarm watch starts sessions only in this repo's checkout so far; "
+              "work it by hand (#772)")
 
 # How a headless run ended, from the `subtype` of its --output-format json result: the
 # SDKResultMessage type in the Claude Code Agent SDK reference (#149). Any other subtype,
@@ -344,6 +358,7 @@ class Trigger:
     ask_comment: int | None = None    # [ask]: the comment that asked it
     research: str | None = None   # [research]: the question, for the analyst's prompt (#591)
     research_comment: int | None = None   # [research]: the comment that asked it
+    repo: str | None = None       # another repo of the org it is in (#772); None: this one
 
     def line(self) -> str:
         if self.held:
@@ -352,6 +367,15 @@ class Trigger:
             return f"[{self.kind}] {self.ref} {self.why} -> skipped: {self.skipped}"
         first = " once docs has stopped ([record] first)" if self.after else ""
         return f"[{self.kind}] {self.ref} {self.why} -> would start {self.command}{first}"
+
+
+def elsewhere(t: Trigger, repo: str) -> Trigger:
+    """A trigger from another repo of the org (#772): its key, ref and command name the
+    repo (`swarm launch --issue N` would mean this repo's N)."""
+    ref = t.ref.replace("#", f"{repo}#", 1)
+    return replace(t, key=f"{repo}|{t.key}", ref=ref, repo=repo,
+                   command=f"{t.role or 'a session'} on {ref}" if t.command else None,
+                   after=f"{repo}|{t.after}" if t.after else None)
 
 
 def launch_cmd(role: str, n: int, pr: int | None = None) -> str:
@@ -1736,13 +1760,15 @@ class Watch:
             st = {"asks_since": {}, "research_since": None}
         ask_n, since = self.asks(w, limits, st["asks_since"], now)
         r_since = self.research(w, limits, st["research_since"], now)
+        one_way, apps = self.one_way(), self.apps()
         new = []
-        for t in triggers(w, self.owner, self.launcher.running(), self.roles, g.needs_you,
-                          g.is_tracking, bool(limits and limits.review_in_actions), now,
-                          limits.stale_minutes if limits else DEFAULT_STALE, self.one_way(),
-                          self.apps(), bool(limits and limits.call_ins), *self.daily(limits),
-                          ask_issue=ask_n, asks_since=since, research_since=r_since,
-                          research_report=limits.report_issue if limits else None):
+        here = triggers(w, self.owner, self.launcher.running(), self.roles, g.needs_you,
+                        g.is_tracking, bool(limits and limits.review_in_actions), now,
+                        limits.stale_minutes if limits else DEFAULT_STALE, one_way,
+                        apps, bool(limits and limits.call_ins), *self.daily(limits),
+                        ask_issue=ask_n, asks_since=since, research_since=r_since,
+                        research_report=limits.report_issue if limits else None)
+        for t in here + self.other_triggers(limits, now, one_way, apps):
             key = f"{t.key}|held|{t.once}" if t.held else t.key
             if key in self.seen:
                 continue
@@ -1752,8 +1778,36 @@ class Watch:
                 continue
             new.append(t)
             if not t.skipped:
-                self.launcher.out(f"  {self.headless(t)}")
+                self.launcher.out(f"  (no headless command: {OTHER_REPO})" if t.repo
+                                  else f"  {self.headless(t)}")
         return new
+
+    def other_triggers(self, limits: "manifest.WatchLimits | None", now: dt.datetime,
+                       one_way: frozenset[str], apps: dict[str, str]) -> list[Trigger]:
+        """The triggers in each of swarm.toml's [org] repos (#772), named by repo, without
+        [daily], [ask] or [research]. A bad [org] table is reported by tick() and works none;
+        a repo outside this one's org, or one that can't be read, is said once and skipped."""
+        try:
+            repos = manifest.load_repos(self.manifest_path)[0]
+        except manifest.ManifestError:
+            return []
+        keep, left_out = manifest.others(repos, self.repo)
+        for why in left_out:
+            self.once(f"swarm watch: {why}")
+        g, out = swarm.dashboard(), []
+        for repo in keep:
+            try:
+                w = self.read(repo, self.idle_minutes, now)
+            except RuntimeError as e:
+                self.once(f"swarm watch: can't read {repo} ({e}); its triggers wait")
+                continue
+            w.repo = w.repo or repo
+            out += [elsewhere(t, repo) for t in triggers(
+                w, self.owner, [], self.roles, g.needs_you, g.is_tracking,
+                bool(limits and limits.review_in_actions), now,
+                limits.stale_minutes if limits else DEFAULT_STALE, one_way, apps,
+                bool(limits and limits.call_ins))]
+        return out
 
     def limits(self) -> "manifest.WatchLimits | None":
         """For --dry-run: swarm.toml's [watch] limits, or None if swarm.toml has no [watch]
@@ -1857,9 +1911,10 @@ class Watch:
         r_since = self.research(w, limits, st["research_since"], now)
         # #591: likewise, kept while research is on, dropped as soon as it is off.
         research_since = iso(r_since) if r_since else None
+        one_way, apps = self.one_way(), self.apps()
         todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
                                     limits.review_in_actions, now, limits.stale_minutes,
-                                    self.one_way(), self.apps(), limits.call_ins,
+                                    one_way, apps, limits.call_ins,
                                     *self.daily(limits), ask_issue=ask_n, asks_since=since,
                                     research_since=r_since, research_report=limits.report_issue)
                 if t.key not in acted]
@@ -1982,6 +2037,9 @@ class Watch:
                 finish(t, f"started {entry.name}")
             else:
                 hold(t, "failed to start (see above); trying again next check", code="error")
+        for t in self.other_triggers(limits, now, one_way, apps):
+            # #772: listed once, never recorded, so each fires once starting there is built.
+            self.once(t.line() if t.held or t.skipped else f"[{t.kind}] {t.ref} {t.why} -> {OTHER_REPO}")
         st = {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs,
               "asks_since": asks_since, "research_since": research_since}
         save_state(self.launcher, st)

@@ -35,6 +35,12 @@ the manifest has no [watch] table.
 
 An optional [merger] table (#589, GOV-0027) is allowed here but read only by merger.py,
 which treats a missing or bad one as `off`; this module doesn't check it.
+
+An optional [org] table (#772) lists in `repos` the org's other repos ("owner/name") that
+`swarm watch` and the merger work beside this one. Left out, they work this repo only. A
+bad table is a problem like a bad [[session]] entry: it is reported, and the other repos
+are left out until it is fixed. others() drops this repo and any repo outside its org
+(GOV-0031's go covers sub-issues in any repo of the org, and no further).
 """
 from __future__ import annotations
 
@@ -48,6 +54,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PATH = ROOT / "swarm.toml"
 
+REPO_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 DAILY_AT_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 REQUIRED = ("role", "count", "model")
 OPTIONAL = ("spend_cap_usd",)
@@ -214,8 +221,9 @@ def parse_valid(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "
     except tomllib.TOMLDecodeError as e:
         raise ManifestError(path, [f"not valid TOML: {e}"]) from None
 
-    problems = [f"unknown top-level key '{k}' (only [[session]] tables, [watch] and [merger] "
-                "are allowed)" for k in sorted(set(data) - {"session", "watch", "merger"})]
+    problems = [f"unknown top-level key '{k}' (only [[session]] tables, [watch], [merger] and "
+                "[org] are allowed)" for k in sorted(set(data) - {"session", "watch", "merger", "org"})]
+    problems += repos_of(data)[1]
     watch_problems = _check_watch(data["watch"]) if "watch" in data else []
     problems += watch_problems
     entries = data.get("session")
@@ -252,6 +260,55 @@ def parse_valid(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "
                                                 _time(w.get("daily_at")), w.get("report_issue"),
                                                 w.get("asks", False), w.get("research", False))
     return sessions, limits, problems
+
+
+def repos_of(data: dict) -> tuple[tuple[str, ...], list[str]]:
+    """[org] repos from parsed TOML (#772): (the repos, the problems). Any problem means no
+    other repos, so a typo never sends the swarm somewhere it wasn't meant to go."""
+    if "org" not in data:
+        return (), []
+    t = data["org"]
+    if not isinstance(t, dict):
+        return (), ["org: must be an [org] table"]
+    problems = [f"org: unknown key '{k}' (allowed: repos)" for k in sorted(set(t) - {"repos"})]
+    repos = t.get("repos", [])
+    if not isinstance(repos, list):
+        return (), problems + [f"org: repos must be a list of \"owner/name\" strings, got {repos!r}"]
+    seen: set[str] = set()
+    for r in repos:
+        if not isinstance(r, str) or not REPO_RE.match(r):
+            problems.append(f"org: each repo must be \"owner/name\", got {r!r}")
+        elif r.lower() in seen:
+            problems.append(f"org: {r} is listed twice")
+        else:
+            seen.add(r.lower())
+    return ((), problems) if problems else (tuple(repos), [])
+
+
+def load_repos(path: Path | str = DEFAULT_PATH) -> tuple[tuple[str, ...], list[str]]:
+    """The manifest's [org] repos and their problems, as repos_of(). Raises ManifestError
+    only if the file can't be read or isn't TOML."""
+    path = Path(path)
+    try:
+        data = tomllib.loads(_read(path))
+    except tomllib.TOMLDecodeError as e:
+        raise ManifestError(path, [f"not valid TOML: {e}"]) from None
+    return repos_of(data)
+
+
+def others(repos: tuple[str, ...], home: str) -> tuple[list[str], list[str]]:
+    """(the repos to work beside home, why each other one is left out): home itself is
+    dropped quietly, and a repo outside home's org with a reason (GOV-0031)."""
+    org = home.split("/", 1)[0].lower()
+    keep, why = [], []
+    for r in repos:
+        if r.lower() == home.lower():
+            continue
+        if r.split("/", 1)[0].lower() != org:
+            why.append(f"{r} isn't in the {org} org, so it is left out (GOV-0031 covers one org)")
+        else:
+            keep.append(r)
+    return keep, why
 
 
 def _time(v: str | None) -> dt.time | None:
@@ -319,6 +376,9 @@ def main(argv: list[str]) -> int:
         research = "[research] on" if limits.research else "[research] off"
         print(f"watch\tevery {limits.interval_minutes:g} min\tat most {limits.max_live} live\t{turns}"
               f"\t{planned}\t{reviews}\t{calls}\t{daily}\t{asks}\t{research}")
+    repos = repos_of(tomllib.loads(_read(path)))[0]
+    if repos:
+        print(f"org\talso works {', '.join(repos)}")
     return 0
 
 
