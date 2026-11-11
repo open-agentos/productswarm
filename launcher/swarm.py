@@ -116,6 +116,8 @@ START_GRACE = 60      # seconds a session may take to write its pid file before 
 MAX_CANON = 1024      # macOS's tty line limit: a longer line typed into a starting shell is cut (#550)
 IMAGE_RE = re.compile(r"^(?:[^\s@]+@)?sha256:[0-9a-f]{64}$")
 CONTAINER_HOME = "/home/run"   # HOME inside a run's container: a tmpfs, gone when it ends (#661)
+CONTAINER_TOKEN_DIR = "/run/swarm-token"   # where a container run reads its App token (#680)
+TOKEN_REFRESH = 300   # seconds between a container run's token refreshes on the host (#680)
 STOP_WAIT = 20        # seconds to wait for a session to exit after SIGTERM
 
 
@@ -335,6 +337,13 @@ class Launcher:
         home it can write, and it can't see any other run's."""
         return self.home / "runs" / sid
 
+    def token_dir(self, sid: str) -> Path:
+        """A container run's token directory (#680, per the owner on #749): the host
+        rewrites the role App's token there every TOKEN_REFRESH seconds while the run
+        lives, and the container sees it read-only. Outside run_home(), which the run can
+        write: it could plant a symlink there for the host to write the token through."""
+        return self.dir / "tokens" / sid
+
     @property
     def dir(self) -> Path:
         return self.home / "launcher"
@@ -474,6 +483,7 @@ class Launcher:
                     self.pid_file(e.session_id).unlink(missing_ok=True)
                     self.window_file(e.session_id).unlink(missing_ok=True)
                     (self.dir / f"{e.session_id}.stop.json").unlink(missing_ok=True)   # stophook.py
+                    shutil.rmtree(self.token_dir(e.session_id), ignore_errors=True)   # #680
             found = self.orphans(entries)
             for e in found:
                 self.out(f"recovered: {e.name}  {e.session_id} (running, but missing from "
@@ -558,7 +568,7 @@ class Launcher:
         sources as root: the transcript folder, and a sessions.json holding only s's entry,
         which the Stop hook reads (mounted read-only, so the run can't change its own)."""
         rh = self.run_home(s.session_id)
-        for d in (rh / "launcher", rh / "claude" / "projects"):
+        for d in (rh / "launcher", rh / "claude" / "projects", self.token_dir(s.session_id)):
             d.mkdir(parents=True, exist_ok=True, mode=0o700)
         (rh / "launcher" / "sessions.json").write_text(json.dumps([s.__dict__], indent=1) + "\n")
 
@@ -644,10 +654,7 @@ class Launcher:
             note = shlex.quote(f"swarm: headless run (claude -p){where}; it ends when done or at its "
                                f"budget, and its result is written to {self.result_file(s.session_id)}")
             if self.in_container(s):
-                # Mint the role App's token here, on the host; only it goes into the container.
-                token = ["tok=$(" + shlex.quote(str(wt / "ops" / "swarm-token")), shlex.quote(s.role) + ")",
-                         "&&", 'GH_TOKEN="$tok"']
-                session = [*token, *self.docker_run(s)]
+                session = [*self.token_refresher(s), *self.docker_run(s)]
             tail = ["echo", note, "&&", *session, "-p", prompt, *self.headless_args(s), ">|", result]
         else:
             tail = [*session, prompt]
@@ -657,17 +664,38 @@ class Launcher:
         ])
         return "exec /bin/bash -c " + shlex.quote(inner)
 
+    def token_refresher(self, s: Started) -> list[str]:
+        """The start of a container run's command (#680, per the owner on #749), up to its
+        `exec docker run`: write the role App's token to token_dir(), then rewrite it every
+        TOKEN_REFRESH seconds in the background for as long as the run's pid ($$, the
+        docker client's once it exec's) is alive and its pid file is there; then remove
+        the directory. The token is minted here, on the host, by the pinned copy's
+        ops/swarm-token (runtime/, only merged code), never the clone's, which the run can
+        change. swarm-token reuses a token while it has over 10 minutes left, so the file
+        always holds one with at least 5. Each write goes to a temporary file and is moved
+        into place, so the container never reads half a token."""
+        d = self.token_dir(s.session_id)
+        mint = shlex.quote(str(self.home / "runtime" / "ops" / "swarm-token"))
+        tmp, tok, q = shlex.quote(str(d / "token.tmp")), shlex.quote(str(d / "token")), shlex.quote(str(d))
+        pid = shlex.quote(str(self.pid_file(s.session_id)))
+        failed = shlex.quote(f"swarm: {s.name}: token refresh failed; retrying in {TOKEN_REFRESH}s")
+        return ["umask 077", "&&",
+                f"mint() {{ {mint} {shlex.quote(s.role)} >| {tmp} && mv -f {tmp} {tok}; }}", "&&",
+                "mint", "&&",
+                f"{{ {{ while sleep {TOKEN_REFRESH} && kill -0 $$ 2>/dev/null && test -e {pid}; do "
+                f"mint || echo {failed} >&2; done; rm -rf {q}; }} </dev/null >/dev/null & }}", "&&"]
+
     def docker_run(self, s: Started) -> list[str]:
         """`exec docker run ...` for a run in a container (#661), shell-quoted, up to the
         claude args. The image's entrypoint sets up git and gh as the role's App from
-        GH_TOKEN and exec's claude with the rest.
+        the token file and exec's claude with the rest.
 
-        Only GH_TOKEN (the role App's token, minted by command()) and ANTHROPIC_API_KEY
-        go in from the host's environment; nothing else from it, and no secret file, is
-        mounted. Read-write, at the same paths as on the host so the hook paths in its
+        Only ANTHROPIC_API_KEY goes in from the host's environment, and of secrets only
+        the token directory (token_refresher(); the role App's token, kept fresh on the
+        host) is mounted, read-only at CONTAINER_TOKEN_DIR (#680). Read-write, at the same paths as on the host so the hook paths in its
         settings resolve: the run's own clone (prepare(); never the checkout's .git) and
-        its own home, run_home(), as PRODUCTSWARM_HOME. Read-only: its sessions.json entry
-        and the pinned hook copy (runtime/). Nothing else from the host's PRODUCTSWARM_HOME
+        its own home, run_home(), as PRODUCTSWARM_HOME. Read-only: its sessions.json entry,
+        the pinned hook copy (runtime/) and its token directory. Nothing else from the host's PRODUCTSWARM_HOME
         is mounted: not sessions.json, other runs' state or transcripts, swarm.db or the
         result files. HOME is a tmpfs. It runs as the host user, so its files stay the
         watcher's.
@@ -676,15 +704,16 @@ class Launcher:
         (state() finds --session-id in its command line), `swarm stop`'s SIGTERM reaches
         claude through it and --init, and the container goes when the run ends."""
         wt, rh, runtime = self.worktree(s.session_id), self.run_home(s.session_id), self.home / "runtime"
-        entry = rh / "launcher" / "sessions.json"
+        entry, tokens = rh / "launcher" / "sessions.json", self.token_dir(s.session_id)
         uid, gid = os.getuid(), os.getgid()
         argv = ["docker", "run", "--rm", "--init", "--name", f"swarm-{s.session_id}",
                 "--user", f"{uid}:{gid}",
                 "--tmpfs", f"{CONTAINER_HOME}:uid={uid},gid={gid},mode=0700",
-                "-e", "GH_TOKEN", "-e", "ANTHROPIC_API_KEY", "-e", f"SWARM_ROLE={s.role}",
+                "-e", "ANTHROPIC_API_KEY", "-e", f"SWARM_ROLE={s.role}",
+                "-e", f"SWARM_TOKEN_FILE={CONTAINER_TOKEN_DIR}/token",
                 "-e", f"HOME={CONTAINER_HOME}", "-e", f"PRODUCTSWARM_HOME={rh}",
                 "-v", f"{wt}:{wt}", "-v", f"{rh}:{rh}", "-v", f"{entry}:{entry}:ro",
-                "-v", f"{runtime}:{runtime}:ro",
+                "-v", f"{runtime}:{runtime}:ro", "-v", f"{tokens}:{CONTAINER_TOKEN_DIR}:ro",
                 "-v", f"{rh}/claude/projects:{CONTAINER_HOME}/.claude/projects",
                 "-w", str(wt), self.container or "",
                 "--model", s.model, "--session-id", s.session_id]
