@@ -36,6 +36,10 @@ launcher/swarm launch builder --issue 49            # model from swarm.toml's bu
 launcher/swarm launch builder --issue 49 --model claude-sonnet-5-5 --dry-run
 ```
 
+`--issue` takes `N`, `#N` or `owner/name#N` (#829). A bare `N` or `#N` is this repo's issue, as is `owner/name#N` naming this repo (in any case), so every existing command and `swarm watch` line works unchanged. Anything else, such as `scratch#5` or `0`, is refused as not an issue ref.
+
+Another repo's issue (`open-agentos/scratch#5`) is refused for now, before the launcher reads it: its worktree would be cut from this checkout, so the session would work on this repo's code. Starting there waits for per-repo clones and worktrees (#820 stage 2). The launcher already keeps such a session apart: its entry records the repo (`repo` in `sessions.json`; unset means this repo, so older state reads as before), its name carries the repo's name (`builder-scratch-issue-5`), and a session on `open-agentos/scratch#5` doesn't hold this repo's #5, nor the reverse.
+
 It starts one session in a new Terminal window, as `up` does. Its opener ends "…then work on issue #49.", so the heartbeat records `working_on` #49 with no change to the hook. The session is named `<role>-issue-<n>`, so it never takes a manifest slot from `up`.
 
 It refuses, and says why, if:
