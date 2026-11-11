@@ -1495,7 +1495,7 @@ class RealShellTest(unittest.TestCase):
                                            capture_output=True, text=True).stdout
             try:
                 e = swarm.Started("builder-scratch-issue-5", "builder", "m", str(uuid.uuid4()), time.time(),
-                                  issue=5, repo="O/Scratch")
+                                  issue=5, repo="o/scratch")
                 self.assertTrue(l.start(e, []))
                 self.wait_running(l, e)
                 wt, clone = root / ".worktrees" / e.session_id, home / "repos" / "o" / "scratch"
