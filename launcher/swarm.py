@@ -993,7 +993,8 @@ REVIEWER_LOGIN = "productswarm-reviewer[bot]"
 REVERT_TITLE_RE = re.compile(r'^\s*Revert\b', re.IGNORECASE)
 REVERTS_RE = re.compile(r'^\s*(?:Reverts\s+(?:[\w.-]+/[\w.-]+)?#(\d+)|This reverts commit\b)',
                         re.IGNORECASE | re.MULTILINE)
-MERGE_FIELDS = "number,title,body,mergedAt,mergedBy,headRefOid,reviews"
+MERGE_FIELDS = "number,title,body,mergedAt,mergedBy,headRefOid,reviews,comments"
+ENQUEUED = "Enqueued under"   # merger.ENQUEUED: the merger's comment when it enqueues (#663)
 
 
 def bare(login: str | None) -> str:
@@ -1033,15 +1034,36 @@ def reviewed_at_head(pr: dict, owner: str) -> bool:
     return "APPROVED" in latest.values() and "CHANGES_REQUESTED" not in latest.values()
 
 
+def enqueued_by_merger(pr: dict) -> bool:
+    """Whether the merger App enqueued this PR at its merged head: its `Enqueued under ... at
+    <sha>` comment for that head (merger.enqueued_body)."""
+    head = pr.get("headRefOid")
+    return bool(head) and any(
+        bare((c.get("author") or {}).get("login")) == bare(MERGER_LOGIN)
+        and (c.get("body") or "").startswith(ENQUEUED) and f" at {head}" in (c.get("body") or "")
+        for c in pr.get("comments") or [] if isinstance(c, dict))
+
+
+def merged_by(pr: dict, owner: str) -> str:
+    """Who merged pr, bare. Under a merge queue GitHub merges, so `mergedBy` may not be the
+    merger (#746): a PR the merger enqueued at its merged head counts as the merger's unless
+    `mergedBy` is the owner."""
+    who = bare((pr.get("mergedBy") or {}).get("login"))
+    if who != bare(owner) and enqueued_by_merger(pr):
+        return bare(MERGER_LOGIN)
+    return who
+
+
 def merges_text(prs: list[dict], owner: str, start: dt.datetime, end: dt.datetime) -> str:
     """`swarm merges`' report: the week's merges into main split by who clicked merge, then
-    each revert and whether it was reviewed at head. PRs merged outside [start, end) are
-    dropped, so the caller's search may be loose."""
+    each revert and whether it was reviewed at head. A merge the merger enqueued counts as the
+    merger's (merged_by). PRs merged outside [start, end) are dropped, so the caller's search
+    may be loose."""
     def merged_at(p):
         return dt.datetime.fromisoformat((p.get("mergedAt") or "").replace("Z", "+00:00"))
     week = sorted((p for p in prs if p.get("mergedAt") and start <= merged_at(p) < end),
                   key=lambda p: (p["mergedAt"], p["number"]))
-    by = [bare((p.get("mergedBy") or {}).get("login")) for p in week]
+    by = [merged_by(p, owner) for p in week]
     n_merger, n_owner = by.count(bare(MERGER_LOGIN)), by.count(bare(owner))
     others = sorted({b or "unknown" for b in by} - {bare(MERGER_LOGIN), bare(owner)})
     last_day = (end - dt.timedelta(days=1)).date()
@@ -1055,7 +1077,7 @@ def merges_text(prs: list[dict], owner: str, start: dt.datetime, end: dt.datetim
     unreviewed = sum(not reviewed_at_head(p, owner) for p, _ in reverts)
     out.append(f"Reverts: {len(reverts)}" + (f", {unreviewed} unreviewed" if reverts else ""))
     for p, of in reverts:
-        who = bare((p.get("mergedBy") or {}).get("login")) or "unknown"
+        who = merged_by(p, owner) or "unknown"
         what = f"reverts #{of}" if of else "reverts a commit"
         state = ("reviewed (approved at head)" if reviewed_at_head(p, owner)
                  else "not reviewed (no approval at head by the reviewer or the owner)")

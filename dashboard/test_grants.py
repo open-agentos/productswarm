@@ -41,12 +41,17 @@ def merged(kind="standing grant"):
     return f"Merged under {kind} (GOV-0027) at {SHA}.\n\n-- merger"
 
 
+def enqueued(kind="standing grant"):
+    return f"Enqueued under {kind} (GOV-0027) at {SHA}.\n\n-- merger"
+
+
 def left(reason):
     return f"Left for the owner at {SHA}: {reason}.\n\n-- merger"
 
 
-def built(comments, titles=None, mode="shadow"):
-    return grants.build({"comments": comments, "titles": titles or {}, "mode": mode}, NOW)
+def built(comments, titles=None, mode="shadow", merged=()):
+    return grants.build({"comments": comments, "titles": titles or {}, "merged": list(merged),
+                         "mode": mode}, NOW)
 
 
 class MergerBodiesTest(unittest.TestCase):
@@ -59,6 +64,7 @@ class MergerBodiesTest(unittest.TestCase):
         for body, group, reason in (
                 (merger.would_body(d), "would", "standing grant"),
                 (merger.merged_body(d), "merged", "standing grant"),
+                (merger.enqueued_body(d), "enqueued", "standing grant"),
                 (merger.left_body(merger.Decision(number=701, head=SHA,
                                                   verdict="miss: the reviewer hasn't approved at head")),
                  "left", "the reviewer hasn't approved at head")):
@@ -94,6 +100,46 @@ class BuildTest(unittest.TestCase):
         self.assertFalse(g_["read"])
         self.assertIsNone(g_["mode"])
         self.assertEqual(grants.build({"comments": [], "mode": "sideways"}, NOW)["mode"], None)
+
+
+class QueueTest(unittest.TestCase):
+    """#746: under a merge queue the merger enqueues and GitHub merges later."""
+
+    def test_enqueued_then_merged_once_it_lands(self):
+        cs = [comment(701, enqueued(), 60), comment(702, enqueued("approved ask"), 30)]
+        g_ = built(cs, mode="live")
+        self.assertEqual([(x["number"], x["group"]) for x in g_["calls"]],
+                         [(702, "enqueued"), (701, "enqueued")])
+        html = grants.render(g_, REPO)
+        self.assertIn('<h3 class="enqueued">Enqueued</h3>', html)
+        self.assertIn("enqueued under approved ask, ", html)
+        live.tree(html)
+
+        g_ = built(cs, mode="live", merged=[701])
+        self.assertEqual([(x["number"], x["group"], x["queued"]) for x in g_["calls"]],
+                         [(702, "enqueued", True), (701, "merged", True)])
+        html = grants.render(g_, REPO)
+        self.assertIn("merged under standing grant via the queue, ", html)
+        self.assertLess(html.index('<h3 class="merged">'), html.index('<h3 class="enqueued">'))
+        self.assertIs(grants.state(g_)["calls"][1]["queued"], True)
+
+    def test_a_direct_merge_isnt_marked_queued(self):
+        g_ = built([comment(701, merged(), 60)], merged=[701])
+        self.assertFalse(g_["calls"][0]["queued"])
+        self.assertNotIn("via the queue", grants.render(g_, REPO))
+
+    def test_fetch_reads_whether_closed_prs_merged(self):
+        def gh_json(_api, path):
+            n = int(path.rsplit("/", 1)[1])
+            return {"title": f"PR {n}", "pull_request": {"merged_at": "2026-11-09T14:30:00Z" if n == 701 else None}}
+
+        raw = grants.fetch(REPO, NOW, lambda p, jq=".[]": [comment(701, enqueued(), 60),
+                                                           comment(703, enqueued(), 50),
+                                                           comment(702, enqueued(), 40)],
+                           gh_json, {702: "Open one"})
+        self.assertEqual(raw["merged"], [701])
+        groups = {x["number"]: x["group"] for x in grants.build(raw, NOW)["calls"]}
+        self.assertEqual(groups, {701: "merged", 702: "enqueued", 703: "enqueued"})
 
 
 class RenderTest(unittest.TestCase):
