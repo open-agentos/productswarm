@@ -1,6 +1,7 @@
 """`swarm trouble` (#803, stage 1 of #760): per open Goal and Area the owner opened, how its
 done test stands, what is stuck, what waits on the owner, and what agents did on the
-owner's authority. Spend is reported, never flagged (GOV-0033). Only reads.
+owner's authority. Spend is reported, never flagged (GOV-0033). Only reads GitHub; locally
+it syncs swarm.db's owner acts, as `swarm acts` does.
 
     launcher/swarm trouble [--json] [--hours 24]
 
@@ -10,12 +11,19 @@ For each Goal and Area (GOV-0031):
   `**Target:**` bullets. A ticked box is `met`. An unticked one is whatever its measure says
   (`met`, `progress` or `failing`), or `unmeasured` when no measure covers it: an
   unmeasured criterion is never reported as on track, and an Area is never "delivered".
-  A `**Date:**` that has passed with the Goal still open is `date_missed`.
+  A `**Date:**` that has passed with the Goal still open is `date_missed`. The measures
+  reuse the commands that count the same thing: M1's report streak from `swarm daily`,
+  M2's merge share and unreviewed reverts this UTC week from `swarm merges`, and M4's
+  acts from `swarm acts` (which first reads its webhook leads back into swarm.db).
 - **Stuck**: work nothing will start, with the reason and since when. Three rules, each from
   a real stall in #760's replays:
-    1. `changes-no-restart`: the reviewer requested changes at a PR's head, there is no push
-       since, and no trigger restarts the role: a PR another role opened (#704), or the
-       owner answered an overstep or the round bound and [respond] won't fire (#679);
+    1. `changes-no-restart`: the reviewer requested changes or found an overstep at a PR's
+       head, there is no push since, and no trigger restarts the role: requested changes on
+       a PR whose role [respond] doesn't start (#704); the owner answered the round bound,
+       which [respond] won't pass; or the owner answered an overstep on a PR whose role
+       [ruling] doesn't start (#679). An overstep is the reviewer's review at head with
+       `Authority: fail`, whatever its state (it is usually COMMENTED). Which roles
+       [respond] and [ruling] start is read from watch.py (RESPOND_ROLES, RULING_ROLES);
     2. `merged-issue-open`: a merged PR whose closing issue is still open (#760 replay 2);
     3. `waits-on-unplanned`: an open issue under no Goal or Area that another open issue
        waits on (`**Waits on:**` or a blocked-by link) (#786);
@@ -24,20 +32,23 @@ For each Goal and Area (GOV-0031):
   that is neither `ready` nor under a Goal or Area, a switch that is off), while the issue
   or PR it is on is still open.
 - **Waiting on the owner**, with its age: untriaged issues, `gov:question`s not yet
-  answered, PRs GOV-0011 hands to the owner, and protected-path PRs the reviewer approved
-  that need the owner's approval at head (GOV-0027).
-- **On the owner's authority**, in the last --hours: merges by the merger App (GOV-0027's
-  standing grant), merged agent PRs that cite a ruling (`per GOV-NNNN`), and call-ins by a
-  swarm App.
+  answered, PRs GOV-0011 hands to the owner (an overstep not yet answered, or answered
+  and replied to by the role [ruling] started), and every PR the reviewer approved at
+  head that the merger left for the owner, for whatever reason: the reason is the
+  merger's own `Left for the owner at <head>: <reason>` comment, not re-derived here.
+- **On the owner's authority**, in the last --hours: merges by the merger App (GOV-0027;
+  a PR it enqueued counts as its merge, as in `swarm merges`) and call-ins by a swarm App.
 - **Spend**: the runs ledger's total under it (ledger.totals), reported only.
 
 An item is filed under the Goal or Area above its issue (for a PR, the issue it closes);
 items under none are in `outside`.
 
 Limits: a `Call in:` asking for multi-step work gets one comment and can't be told apart
-here; asks in the daily report and `decide` calls under jurisdictions.yml aren't read; only
-the first measure (DAILY_STREAK, M1's report streak) exists, so most criteria read
-`unmeasured` until one is added to MEASURES.
+here; asks in the daily report and `decide` calls under jurisdictions.yml aren't read;
+only M1's streak, M2's two criteria and M4's acts are measured, so other criteria read
+`unmeasured` until one is added to MEASURES; a PR the merger hasn't judged at its head yet
+isn't listed as left for the owner; and a working day the webhook receiver wasn't running
+reads as one with no owner acts, as it does in `swarm acts`.
 """
 from __future__ import annotations
 
@@ -52,7 +63,6 @@ import swarm
 SCOPE_TYPES = ("Goal", "Area")
 PLAN_TYPES = ("Mission", "Goal", "Area")
 MERGER_APP = "productswarm-merger[bot]"
-BUILDER = "builder"
 CHANGES = "CHANGES_REQUESTED"
 COMMAND_DAYS = 7          # how far back owner commands are read for the fourth signal
 MERGED_DAYS = 14          # how far back merged PRs are read for rule 2
@@ -62,7 +72,6 @@ CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[([ xX])\]\s*(\S.*?)\s*$", re.MULTILINE)
 TARGET_RE = re.compile(r"^\s*\*\*Target:?\*\*:?[ \t]*(.*)$", re.MULTILINE)
 BULLET_RE = re.compile(r"^\s*[-*]\s+(?!\[[ xX]\])(\S.*?)\s*$")
 DATE_RE = re.compile(r"^\s*\*\*Date:?\*\*:?[ \t]*(\d{4}-\d{2}-\d{2})\b", re.MULTILINE)
-RULING_RE = re.compile(r"\bper\s+(GOV-\d{4})\b", re.IGNORECASE)
 APP_RE = re.compile(r"^(?:app/)?(productswarm-[a-z0-9-]+?)(?:\[bot\])?$")
 
 
@@ -93,6 +102,9 @@ class Data:
     report_issue: int | None = None
     switches: dict[str, bool] = field(default_factory=dict)   # asks, call_ins, research
     daily_streak: int | None = None                      # swarm daily's streak, None if unread
+    week_merges: list[dict] | None = None                # swarm.gh_merged() this UTC week, None if unread
+    owner_days: list[dict] | None = None                 # acts.per_day() for the last 10 working
+                                                         # days, newest first; None if unread
     spend: dict | None = None                            # ledger.totals(), None if unread
     hours: int = HOURS
     errors: list[str] = field(default_factory=list)
@@ -106,9 +118,62 @@ def daily_streak(m: re.Match, d: Data) -> tuple[str, str] | None:
             f"{d.daily_streak} of {need} working days (swarm daily)")
 
 
+def this_week(d: Data) -> list[dict] | None:
+    """This UTC week's merges, as `swarm merges` reads them, or None if unread."""
+    if d.week_merges is None:
+        return None
+    start, end = swarm.week_of(d.now)
+    return [p for p in d.week_merges if p.get("mergedAt") and start <= when(p["mergedAt"]) < end]
+
+
+def merge_share(m: re.Match, d: Data) -> tuple[str, str] | None:
+    """M2: over half of the week's merges without the owner's click (swarm.merged_by)."""
+    week = this_week(d)
+    if week is None:
+        return None
+    without = sum(swarm.merged_by(p, d.owner) != swarm.bare(d.owner) for p in week)
+    return ("met" if without * 2 > len(week) else "progress",
+            f"{without} of {len(week)} merges this week without the owner's click (swarm merges)")
+
+
+def reviewed_reverts(m: re.Match, d: Data) -> tuple[str, str] | None:
+    """M2: no unreviewed revert this week (swarm.reverted, swarm.reviewed_at_head)."""
+    week = this_week(d)
+    if week is None:
+        return None
+    reverts = [p for p in week if swarm.reverted(p) is not False]
+    bad = [p["number"] for p in reverts if not swarm.reviewed_at_head(p, d.owner)]
+    if bad:
+        return "failing", (f"{len(bad)} unreviewed revert(s) this week: "
+                           f"{', '.join(f'PR #{n}' for n in bad)} (swarm merges)")
+    return "met", f"{len(reverts)} revert(s) this week so far, none unreviewed (swarm merges)"
+
+
+def owner_acts(m: re.Match, d: Data) -> tuple[str, str] | None:
+    """M4: working days in a row, newest first, with under acts.LIMIT owner acts and none
+    'other' (checks 1 and 2, from swarm acts)."""
+    import acts
+    if d.owner_days is None:
+        return None
+    need, run = int(m.group(1)), 0
+    for day in d.owner_days:
+        if not (day["under_limit"] and day["c_team"]):
+            break
+        run += 1
+    return ("met" if run >= need else "progress",
+            f"{run} of {need} working days in a row under {acts.LIMIT} acts, all C-team (swarm acts)")
+
+
 # (pattern on the criterion's text, measure(match, data) -> (status, detail) or None if unread)
-DAILY_STREAK = (re.compile(r"\b(\d+) working days in a row with a daily report\b", re.I), daily_streak)
-MEASURES: list[tuple[re.Pattern, Callable[[re.Match, Data], tuple[str, str] | None]]] = [DAILY_STREAK]
+Measure = tuple[re.Pattern, Callable[[re.Match, Data], tuple[str, str] | None]]
+DAILY_STREAK: Measure = (re.compile(r"\b(\d+) working days in a row with a daily report\b", re.I),
+                         daily_streak)
+MERGE_SHARE: Measure = (re.compile(r"\bover half of a week's merges\b.*\bwithout the owner's click\b",
+                                   re.I), merge_share)
+REVERTS: Measure = (re.compile(r"\bno unreviewed revert\b", re.I), reviewed_reverts)
+OWNER_ACTS: Measure = (re.compile(r"\bacts are counted for each of the (\d+) working days\b", re.I),
+                       owner_acts)
+MEASURES: list[Measure] = [DAILY_STREAK, MERGE_SHARE, REVERTS, OWNER_ACTS]
 
 
 def criteria(body: str | None, kind: str) -> list[tuple[str, bool]]:
@@ -155,6 +220,23 @@ def item(kind: str, ref: str, url: str | None, reason: str, since: str | dt.date
             "age_hours": round((now - t).total_seconds() / 3600, 1) if t else None, **extra}
 
 
+def merger_left(comments: list[dict], head: str | None) -> tuple[str, str] | None:
+    """(when, reason) from the merger's latest verdict comment at head, if it is `Left for
+    the owner at <head>: <reason>.` (merger.left_body); None if it is anything else (a merge,
+    a "would merge") or there is none. comments are {login, at, body}, oldest first."""
+    import merger
+    if not head:
+        return None
+    verdicts = (merger.LEFT, merger.WOULD, merger.MERGED, merger.ENQUEUED)
+    mine = [c for c in comments if c["login"] == merger.MERGER and f" at {head}" in c["body"]
+            and c["body"].startswith(verdicts)]
+    if not mine or not mine[-1]["body"].startswith(merger.LEFT):
+        return None
+    body = mine[-1]["body"].removesuffix(merger.SIGN).strip()
+    reason = body.split(f" at {head}:", 1)[-1].strip().removesuffix(".")
+    return mine[-1]["at"], reason
+
+
 def report(d: Data, measures=None) -> dict:
     """The trouble report: {generated_at, repo, owner, scopes: [per Goal and Area], outside:
     the items under none, spend, errors}. Pure."""
@@ -193,6 +275,7 @@ def report(d: Data, measures=None) -> dict:
         (buckets[goal] if goal in buckets else outside)[section].append(x)
 
     # Rule 1, and PRs waiting on the owner.
+    import watch
     for p in d.prs:
         if p.get("isDraft"):
             continue
@@ -202,40 +285,62 @@ def report(d: Data, measures=None) -> dict:
                     "state": r.get("state"), "body": r.get("body"),
                     "commit_id": (r.get("commit") or {}).get("oid"), "at": r.get("submittedAt")}
                    for r in p.get("reviews") or []]
+        comments = [{"login": rest_login((c.get("author") or {}).get("login")),
+                     "at": c.get("createdAt"), "body": c.get("body") or ""}
+                    for c in p.get("comments") or []]
         rv = generate.reviewer_state(reviews, head)
         closes = [c["number"] for c in p.get("closingIssuesReferences") or []]
         goal, pr_url = pr_goal(closes), p.get("url") or url(n)
         at_head = [r for r in reviews if r["user"]["login"] == generate.REVIEWER and r["commit_id"] == head]
-        if rv["at_head"] == CHANGES:
-            asked = at_head[-1]["at"]
-            role = generate.pr_role(author)
-            why = generate.needs_owner(rv, author)
-            if why is None:
-                continue                                 # [respond] restarts the builder
-            answered = sorted(t for t in [*(c.get("createdAt") for c in p.get("comments") or []
-                                            if rest_login((c.get("author") or {}).get("login")) == owner),
-                                          *(r["at"] for r in reviews if r["user"]["login"] == owner)]
-                              if t and asked and t > asked)
-            if role != BUILDER and rv["authority"] != "fail":
+        role = generate.pr_role(author)
+        asked = at_head[-1]["at"] if at_head else None
+        answered = sorted(t for t in [*(c["at"] for c in comments if c["login"] == owner),
+                                      *(r["at"] for r in reviews if r["user"]["login"] == owner)]
+                          if t and asked and t > asked)
+        one = len(closes) == 1
+        if rv["at_head"] is not None and rv["authority"] == "fail":
+            # An overstep, whatever the review's state (#679's was COMMENTED). GOV-0011 hands it
+            # to the owner; once the owner comments, [ruling] restarts the PR's role if it can.
+            if not answered:
+                file(goal, "waiting", item("pr", ref(n, True), pr_url, "overstep: needs the owner",
+                                           asked, now))
+            elif role not in watch.RULING_ROLES or not one:
+                cant = (f"[ruling] restarts only {' and '.join(watch.RULING_ROLES)} PRs" if role not in
+                        watch.RULING_ROLES else f"[ruling] skips a PR that closes {len(closes)} issues")
+                file(goal, "stuck", item("changes-no-restart", ref(n, True), pr_url,
+                                         f"overstep; @{owner} answered, and no trigger starts the "
+                                         f"{role or 'author'} ({cant})", answered[0], now))
+            else:
+                replied = [c["at"] for c in comments
+                           if c["login"] == f"productswarm-{role}[bot]" and c["at"] and c["at"] > answered[-1]]
+                if replied:                              # [ruling] ran, and it asked back
+                    file(goal, "waiting", item("pr", ref(n, True), pr_url,
+                                               f"overstep: the {role} replied to @{owner}'s ruling "
+                                               f"and changed nothing", replied[0], now))
+        elif rv["at_head"] == CHANGES:
+            if role in watch.RESPOND_ROLES and one and not generate.past_bound(rv["changes_requested"]):
+                continue                                 # [respond] restarts it
+            if role not in watch.RESPOND_ROLES:
                 file(goal, "stuck", item("changes-no-restart", ref(n, True), pr_url,
                                          f"changes requested at {head[:7]}, no push since, and no "
-                                         f"trigger restarts the {role or 'author'} (GOV-0011 "
-                                         f"restarts only the builder)", asked, now))
-            elif answered:
+                                         f"trigger restarts the {role or 'author'} ([respond] "
+                                         f"restarts only {' and '.join(watch.RESPOND_ROLES)} PRs)",
+                                         asked, now))
+                continue
+            why = (generate.needs_owner(rv, author)
+                   or f"changes requested on a PR that closes {len(closes)} issues: needs the owner")
+            if answered:
                 file(goal, "stuck", item("changes-no-restart", ref(n, True), pr_url,
                                          f"{why.split(':')[0]}; @{owner} answered, and no trigger "
                                          f"starts the fix", answered[0], now))
             else:
                 file(goal, "waiting", item("pr", ref(n, True), pr_url, why, asked, now))
         elif rv["at_head"] == "APPROVED":
-            import merger
-            paths = [f.get("path") or "" for f in p.get("files") or []]
-            owner_ok = any(r["user"]["login"] == owner and r["state"] == "APPROVED"
-                           and r["commit_id"] == head for r in reviews)
-            if any(merger.is_protected(x) for x in paths) and not owner_ok:
+            left = merger_left(comments, head)
+            if left:
                 file(goal, "waiting", item("pr", ref(n, True), pr_url,
-                                           "touches a protected path: needs the owner's approval "
-                                           "at head (GOV-0027)", at_head[-1]["at"], now))
+                                           f"approved at head; the merger left it for the owner: "
+                                           f"{left[1]}", left[0], now))
 
     # Rule 2: merged, but its issue is still open.
     for p in d.merged:
@@ -247,7 +352,6 @@ def report(d: Data, measures=None) -> dict:
                     now, pr=p["number"]))
 
     # Rule 3: an issue under no Goal or Area that another issue waits on.
-    import watch
     seen: set[tuple[int, str | None]] = set()
     for a in sorted(open_issues):
         it = open_by_n[a]
@@ -329,15 +433,9 @@ def report(d: Data, measures=None) -> dict:
         if not at or at < since:
             continue
         goal = pr_goal([c["number"] for c in p.get("closingIssuesReferences") or []])
-        by = rest_login((p.get("mergedBy") or {}).get("login"))
-        author = rest_login((p.get("author") or {}).get("login"))
-        rulings = sorted(set(g.upper() for g in RULING_RE.findall(p.get("body") or "")))
-        if by == MERGER_APP:
+        if swarm.merged_by(p, owner) == swarm.bare(MERGER_APP):
             file(goal, "authority", item("grant", ref(p["number"], True), p.get("url"),
-                                         "merged by the merger under GOV-0027's standing grant", at, now))
-        if rulings and author.endswith("[bot]"):
-            file(goal, "authority", item("ruling", ref(p["number"], True), p.get("url"),
-                                         f"{author} acted under {', '.join(rulings)}", at, now))
+                                         "merged by the merger under GOV-0027", at, now))
 
     spent = (d.spend or {}).get("spent") or {}
     out_scopes = []
@@ -401,15 +499,18 @@ def text(r: dict) -> str:
 
 PR_FIELDS = ("number,title,url,author,isDraft,headRefOid,createdAt,reviews,comments,files,"
              "closingIssuesReferences")
-MERGED_FIELDS = "number,title,url,author,body,mergedAt,mergedBy,closingIssuesReferences"
+MERGED_FIELDS = ("number,title,url,author,body,mergedAt,mergedBy,headRefOid,comments,"
+                 "closingIssuesReferences")   # headRefOid and comments: swarm.merged_by
 
 
 def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
            now: dt.datetime | None = None) -> Data:
     """Read everything report() needs. Raises RuntimeError if GitHub can't be read; a local
     part that can't be read (the ledger, the daily streak) is left out and named in errors."""
+    import acts
     import ledger
     import manifest
+    import merger
     import watch
     g = swarm.dashboard()
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -448,6 +549,22 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
         except RuntimeError as e:
             errors.append(f"daily streak: {e}")
     try:
+        week_merges = swarm.gh_merged(repo, *swarm.week_of(now))
+    except RuntimeError as e:
+        week_merges = None
+        errors.append(f"swarm merges: {e}")
+    owner_days = None
+    try:
+        unread = acts.sync(launcher.dir, owner, (repo, report_issue) if report_issue else None,
+                           g.gh_json, g.gh_items, merger.is_protected)
+        if unread:                                       # a missed act could flip a day: unmeasured
+            errors.extend(f"swarm acts: not read yet: {e}" for e in unread)
+        else:
+            owner_days = acts.per_day(acts.stored(launcher.dir),
+                                      swarm.working_days(now.astimezone().date()))
+    except (OSError, sqlite3.Error) as e:
+        errors.append(f"swarm acts: {e}")
+    try:
         spend = ledger.totals(ledger.rows(launcher.dir), now)
     except (OSError, ValueError, sqlite3.Error) as e:
         spend = None
@@ -455,4 +572,5 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
     switches = {k: bool(getattr(limits, k, False)) for k in ("asks", "call_ins", "research")}
     return Data(repo=repo, owner=owner, now=now, issues=issues, scopes=scopes, other_scopes=other,
                 prs=prs, merged=merged, comments=comments, report_issue=report_issue,
-                switches=switches, daily_streak=streak, spend=spend, hours=hours, errors=errors)
+                switches=switches, daily_streak=streak, week_merges=week_merges, owner_days=owner_days,
+                spend=spend, hours=hours, errors=errors)
