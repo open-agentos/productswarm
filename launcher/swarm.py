@@ -139,7 +139,8 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     role was called in to the issue (GOV-0023, #520): the prompt says by whom and why, and
     that it posts one comment. With daily, a [daily] run (GOV-0029, #588): the planner posts
     `daily` ("the daily report", or on Mondays "the daily report and the Monday check-in")
-    on the report issue. With ask, an [ask] run (GOV-0029, #590): the role answers the
+    on the report issue, with its Trouble section built from `swarm trouble --json` (#804).
+    With ask, an [ask] run (GOV-0029, #590): the role answers the
     owner's question, from comment ask_comment on the report issue, in one comment there.
     With research, a [research] run (GOV-0029, #591): the analyst writes a brief on the
     question from comment research_comment in research/, as a PR that closes the issue. With
@@ -165,7 +166,8 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
         then = (f"write {daily} on issue #{issue}, as roles/{role}.md says. swarm watch started "
                 f"this run from its [daily] trigger (GOV-0029). Run launcher/swarm daily first: its "
                 f"\"M1: day N of 5\" goes in the report's first line and its Goal and Area edits "
-                f"under Risks (#709). Post on #{issue} and stop")
+                f"under Risks (#709). Then run launcher/swarm trouble --json and build the Trouble "
+                f"section from it, not by hand (#804). Post on #{issue} and stop")
     elif issue and called_by:
         # "issue #M" in the why would give the heartbeat two issues and so none: say "#M".
         safe = ISSUE_WORD_RE.sub(r"#\1", call_why) if call_why else ""
