@@ -34,14 +34,25 @@ approving a protected-path PR at head, GOV-0027), `protected-merge` (merging a P
 a protected path) and `other`, which fails check 2: a `ready` on a Task, a dispatching
 comment, a merge of an ordinary PR.
 
-Limits: an act the receiver missed (it was down, or the App isn't subscribed to the event)
-has no lead; an object deleted before sync() reads it is lost; Discussion comments aren't
-read. Back-room repairs leave no record at all (the checklist has the owner self-report them).
+**A day is counted only once it is backfilled (#844).** Leads only exist where the receiver
+runs (the engine host), and a receiver that was down leaves none, so a day with no stored acts
+may simply have no data. `backfill()` reads each finished day's acts from GitHub instead, as
+leads with the same keys, so an act seen both ways is stored once: the owner's label and merge
+events from each org repo's issue events, their comments from each repo's comment list, and
+their reviews and opened issues from search. Once every one of them is read back, the day's
+window goes in `act_backfills`, and only then does the day count, even at 0 acts. Any other
+day is `not counted` (never 0), and today is `in progress` until it ends. A day is backfilled
+SETTLE after it ends (search lags), and only within BACKFILL_DAYS (its comment list is long).
+
+Limits: an object deleted before it is read back is lost; Discussion comments aren't read; an
+org repo the owner's token can't list isn't searched. Back-room repairs leave no record at all
+(the checklist has the owner self-report them).
 """
 from __future__ import annotations
 
 import datetime as dt
 import sqlite3
+import urllib.parse
 from pathlib import Path
 from typing import Callable
 
@@ -53,6 +64,9 @@ EXEMPT_TYPES = ("Goal", "Area")  # opening or editing one is plan approval, not 
 KINDS = ("plan", "report", "ask", "protected-merge", "other")
 HOLD = "hold"                   # the owner's veto (GOV-0031)
 GOV_QUESTION = "gov:question"
+SETTLE = dt.timedelta(hours=1)  # a day is backfilled this long after it ends (search lags)
+BACKFILL_DAYS = 31              # older days aren't backfilled: not counted
+COUNTED, NOT_COUNTED, IN_PROGRESS = "counted", "not counted", "in progress"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS act_leads (
@@ -64,6 +78,7 @@ CREATE TABLE IF NOT EXISTS acts (
     what TEXT, repo TEXT NOT NULL, number INTEGER NOT NULL, url TEXT
 );
 CREATE INDEX IF NOT EXISTS acts_at ON acts (at);
+CREATE TABLE IF NOT EXISTS act_backfills (start TEXT NOT NULL, end TEXT NOT NULL, at TEXT NOT NULL);
 """
 
 
@@ -258,6 +273,169 @@ def sync(state_dir: Path, owner: str, report: tuple[str, int] | None, gh_json: C
     return errors
 
 
+# ---------------------------------------------------------------- backfill (#844)
+
+def utc(t: dt.datetime) -> str:
+    return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def bounds(d: dt.date, tz: dt.tzinfo | None = None) -> tuple[dt.datetime, dt.datetime]:
+    """A local day's start and end (tz, or this machine's)."""
+    def at(x: dt.date) -> dt.datetime:
+        t = dt.datetime.combine(x, dt.time())
+        return t.replace(tzinfo=tz) if tz else t.astimezone()
+    return at(d), at(d + dt.timedelta(days=1))
+
+
+def windows(db: sqlite3.Connection) -> list[tuple[dt.datetime, dt.datetime]]:
+    """Every backfilled window, as (start, end)."""
+    return [(dt.datetime.fromisoformat(a.replace("Z", "+00:00")),
+             dt.datetime.fromisoformat(b.replace("Z", "+00:00")))
+            for a, b in db.execute("SELECT start, end FROM act_backfills")]
+
+
+def day_state(d: dt.date, now: dt.datetime, backfills: list, tz: dt.tzinfo | None = None
+              ) -> tuple[str, str | None, bool]:
+    """(status, why it isn't counted, whether to backfill it now) for one day."""
+    start, end = bounds(d, tz)
+    if now < start:
+        return NOT_COUNTED, "the day hasn't started", False
+    if now < end:
+        return IN_PROGRESS, "the day isn't over", False
+    if any(a <= start and b >= end for a, b in backfills):
+        return COUNTED, None, False
+    if now < end + SETTLE:
+        return NOT_COUNTED, f"read back from GitHub {SETTLE.seconds // 3600}h after the day ends", False
+    if now - end > dt.timedelta(days=BACKFILL_DAYS):
+        return NOT_COUNTED, f"older than {BACKFILL_DAYS} days, never read back from GitHub", False
+    return NOT_COUNTED, "not read back from GitHub yet", True
+
+
+def scope_repos(repo: str, gh_items: Callable) -> tuple[str, list[str]]:
+    """(search qualifier, repos) for repo's org, or for repo alone if its owner isn't an org."""
+    org = repo.split("/")[0]
+    try:
+        names = {r.get("full_name") for r in gh_items(f"orgs/{org}/repos?per_page=100")}
+    except RuntimeError as e:
+        if not not_found(e):
+            raise
+        return f"repo:{repo}", [repo]
+    return f"org:{org}", sorted({n for n in names if isinstance(n, str)} | {repo})
+
+
+def recent_events(repo: str, since: str, gh_json: Callable) -> list[dict]:
+    """repo's issue events created at or after `since`, a page at a time from the newest, so a
+    busy repo's whole history isn't read. Raises RuntimeError if they aren't newest first."""
+    out, page = [], 1
+    while True:
+        batch = gh_json("api", f"repos/{repo}/issues/events?per_page=100&page={page}") or []
+        times = [e.get("created_at") or "" for e in batch]
+        if times != sorted(times, reverse=True):
+            raise RuntimeError(f"{repo}'s issue events aren't newest first")
+        out += [e for e in batch if (e.get("created_at") or "") >= since]
+        if len(batch) < 100 or times[-1] < since:
+            return out
+        page += 1
+
+
+def discover(owner: str, repo: str, since: str, gh_json: Callable, gh_items: Callable) -> list[tuple]:
+    """(key, event, action, repo, number, ref) per lead for the owner's possible acts since
+    `since` in repo's org, found on GitHub rather than from webhooks. Raises RuntimeError."""
+    def search(q: str) -> list[tuple[str, int]]:
+        items = gh_items(f"search/issues?q={urllib.parse.quote(q)}&per_page=100", ".items[]")
+        return [(it["repository_url"].split("/repos/", 1)[1], it["number"]) for it in items
+                if isinstance(it.get("number"), int) and "/repos/" in (it.get("repository_url") or "")]
+
+    qual, repos = scope_repos(repo, gh_items)
+    found: list[tuple] = []
+    for r in repos:
+        for e in recent_events(r, since, gh_json):
+            n = (e.get("issue") or {}).get("number")
+            if login(e.get("actor")) != owner or not isinstance(n, int) or e.get("id") is None:
+                continue
+            if e.get("event") in ("labeled", "unlabeled"):     # one read finds every label act
+                found.append((f"backfill:{r}:event:{e['id']}", "issues", "labeled", r, n, None))
+            elif e.get("event") == "merged":
+                found.append((f"backfill:{r}#{n}:merge", "pull_request", "merged", r, n, None))
+        for c in gh_items(f"repos/{r}/issues/comments?since={since}&per_page=100"):
+            num = (c.get("issue_url") or "").rsplit("/", 1)[-1]
+            if (login(c.get("user")) == owner and (c.get("created_at") or "") >= since
+                    and c.get("id") is not None and num.isdigit()):
+                found.append((f"backfill:{r}:comment:{c['id']}", "issue_comment", "created", r,
+                              int(num), str(c["id"])))
+    for r, n in search(f"{qual} is:issue author:{owner} created:>={since}"):
+        found.append((f"backfill:{r}#{n}:open", "issues", "opened", r, n, None))
+    for r, n in search(f"{qual} is:pr reviewed-by:{owner} updated:>={since}"):
+        for rv in gh_items(f"repos/{r}/pulls/{n}/reviews?per_page=100"):
+            if (login(rv.get("user")) == owner and (rv.get("submitted_at") or "") >= since
+                    and rv.get("id") is not None):
+                found.append((f"backfill:{r}:review:{rv['id']}", "pull_request_review", "submitted",
+                              r, n, str(rv["id"])))
+    return found
+
+
+def backfill(state_dir: Path, owner: str, report: tuple[str, int] | None, repo: str,
+             gh_json: Callable, gh_items: Callable, protected: Callable[[str], bool],
+             days: list[dt.date], now: dt.datetime | None = None,
+             tz: dt.tzinfo | None = None) -> list[str]:
+    """Read the owner's acts on each of `days` that is due (day_state) back from GitHub as leads,
+    then sync() every unread lead. The window counts only once no backfilled lead is left
+    unread. Returns the errors, sync()'s included."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    db = connect(state_dir)
+    try:
+        have = windows(db)
+        due = [bounds(d, tz) for d in days if day_state(d, now, have, tz)[2]]
+        errors: list[str] = []
+        if due:
+            start, end = min(a for a, _ in due), max(b for _, b in due)
+            try:
+                found = discover(owner, repo, utc(start), gh_json, gh_items)
+            except RuntimeError as e:
+                errors.append(f"backfill from {utc(start)}: {e}")
+                due = []
+            else:
+                db.execute("BEGIN IMMEDIATE")
+                for key, event, action, r, n, ref in found:
+                    record_lead(db, key, event, (action, r, n, ref, owner), now)
+                db.execute("COMMIT")
+    finally:
+        db.close()
+    errors += sync(state_dir, owner, report, gh_json, gh_items, protected, now)
+    if due:
+        db = connect(state_dir)
+        try:
+            unread = db.execute("SELECT COUNT(*) FROM act_leads WHERE read_at IS NULL "
+                                "AND delivery LIKE 'backfill:%'").fetchone()[0]
+            if not unread:
+                with db:
+                    db.execute("INSERT INTO act_backfills VALUES (?, ?, ?)",
+                               (utc(start), utc(end), now.isoformat(timespec="seconds")))
+        finally:
+            db.close()
+    return errors
+
+
+def backfilled(state_dir: Path) -> list[tuple[dt.datetime, dt.datetime]]:
+    if not (state_dir / statedb.DB_FILE).exists():
+        return []
+    db = connect(state_dir)
+    try:
+        return windows(db)
+    finally:
+        db.close()
+
+
+def refresh(state_dir: Path, owner: str, report: tuple[str, int] | None, repo: str,
+            gh_json: Callable, gh_items: Callable, protected: Callable[[str], bool],
+            days: list[dt.date], now: dt.datetime | None = None,
+            tz: dt.tzinfo | None = None) -> tuple[list[dict], list[str]]:
+    """backfill(), then per_day() for `days`: what `swarm acts` and `swarm trouble` read."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    errors = backfill(state_dir, owner, report, repo, gh_json, gh_items, protected, days, now, tz)
+    return per_day(stored(state_dir), days, tz, now, backfilled(state_dir)), errors
+
+
 # ---------------------------------------------------------------- per day
 
 def stored(state_dir: Path) -> list[dict]:
@@ -272,9 +450,13 @@ def stored(state_dir: Path) -> list[dict]:
         db.close()
 
 
-def per_day(acts: list[dict], days: list[dt.date], tz: dt.tzinfo | None = None) -> list[dict]:
-    """One entry per day, in the order given: {day, count, other, under_limit, c_team, acts},
-    each act with its local time. Days are local (tz, or this machine's)."""
+def per_day(acts: list[dict], days: list[dt.date], tz: dt.tzinfo | None = None,
+            now: dt.datetime | None = None, backfills: list | None = None) -> list[dict]:
+    """One entry per day, in the order given: {day, status, why, count, other, under_limit,
+    c_team, acts}, each act with its local time. Days are local (tz, or this machine's).
+    Only a `counted` day (backfilled, day_state) has a count and the two checks; a `not
+    counted` one has None for all three, never 0; an `in progress` one counts so far, unchecked."""
+    now = now or dt.datetime.now(dt.timezone.utc)
     by: dict[dt.date, list[dict]] = {d: [] for d in days}
     for a in acts:
         at = dt.datetime.fromisoformat(a["at"].replace("Z", "+00:00"))
@@ -286,24 +468,37 @@ def per_day(acts: list[dict], days: list[dt.date], tz: dt.tzinfo | None = None) 
     out = []
     for d in days:
         items = sorted(by[d], key=lambda a: a["at"])
+        status, why, _ = day_state(d, now, backfills or [], tz)
         other = sum(a["kind"] == "other" for a in items)
-        out.append({"day": d.isoformat(), "count": len(items), "other": other,
-                    "under_limit": len(items) < LIMIT, "c_team": other == 0, "acts": items})
+        row = {"day": d.isoformat(), "status": status, "why": why, "count": None, "other": None,
+               "under_limit": None, "c_team": None, "acts": items}
+        if status == COUNTED:
+            row.update(count=len(items), other=other, under_limit=len(items) < LIMIT, c_team=other == 0)
+        elif status == IN_PROGRESS:
+            row.update(count=len(items), other=other)
+        out.append(row)
     return out
 
 
 def text(rows: list[dict], owner: str, repo: str | None = None) -> str:
-    """`swarm acts`'s output: each day newest first, its count and each act."""
+    """`swarm acts`'s output: each day newest first, its count (or why it isn't counted) and each act."""
     out = [f"Owner acts by @{owner} (local time; check 1: under {LIMIT} a day, check 2: none 'other'):"]
     for r in rows:
         d = dt.date.fromisoformat(r["day"])
-        verdict = []
-        if not r["under_limit"]:
-            verdict.append(f"{LIMIT} or more")
-        if not r["c_team"]:
-            verdict.append(f"{r['other']} not C-team")
-        out.append(f"  {d:%a %Y-%m-%d}  {r['count']} act{'' if r['count'] == 1 else 's'}"
-                   + (f"  ({', '.join(verdict)})" if verdict else ""))
+        n = r["count"]
+        if r["status"] == NOT_COUNTED:
+            head = f"not counted ({r['why']})"
+        else:
+            head = f"{n} act{'' if n == 1 else 's'}"
+            if r["status"] == IN_PROGRESS:
+                head += " so far (the day isn't over)"
+            verdict = []
+            if r["under_limit"] is False:
+                verdict.append(f"{LIMIT} or more")
+            if r["c_team"] is False:
+                verdict.append(f"{r['other']} not C-team")
+            head += f"  ({', '.join(verdict)})" if verdict else ""
+        out.append(f"  {d:%a %Y-%m-%d}  {head}")
         for a in r["acts"]:
             ref = f"#{a['number']}" if a["repo"] == repo else f"{a['repo']}#{a['number']}"
             out.append(f"    {a['at'][11:16]}  {a['kind']:<15}  {a['what']} on {ref}  {a['url']}")

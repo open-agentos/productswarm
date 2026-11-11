@@ -14,7 +14,9 @@ For each Goal and Area (GOV-0031):
   A `**Date:**` that has passed with the Goal still open is `date_missed`. The measures
   reuse the commands that count the same thing: M1's report streak from `swarm daily`,
   M2's merge share and unreviewed reverts this UTC week from `swarm merges`, and M4's
-  acts from `swarm acts` (which first reads its webhook leads back into swarm.db).
+  acts from `swarm acts` (which first reads the owner's acts back from GitHub into
+  swarm.db). A day `swarm acts` hasn't counted breaks M4's run like a failing one, and
+  with no counted day M4's acts criterion is `unmeasured` (#844).
 - **Stuck**: work nothing will start, with the reason and since when. Three rules, each from
   a real stall in #760's replays:
     1. `changes-no-restart`: the reviewer requested changes or found an overstep at a PR's
@@ -47,8 +49,7 @@ Limits: a `Call in:` asking for multi-step work gets one comment and can't be to
 here; asks in the daily report and `decide` calls under jurisdictions.yml aren't read;
 only M1's streak, M2's two criteria and M4's acts are measured, so other criteria read
 `unmeasured` until one is added to MEASURES; a PR the merger hasn't judged at its head yet
-isn't listed as left for the owner; and a working day the webhook receiver wasn't running
-reads as one with no owner acts, as it does in `swarm acts`.
+isn't listed as left for the owner.
 """
 from __future__ import annotations
 
@@ -103,8 +104,9 @@ class Data:
     switches: dict[str, bool] = field(default_factory=dict)   # asks, call_ins, research
     daily_streak: int | None = None                      # swarm daily's streak, None if unread
     week_merges: list[dict] | None = None                # swarm.gh_merged() this UTC week, None if unread
-    owner_days: list[dict] | None = None                 # acts.per_day() for the last 10 working
-                                                         # days, newest first; None if unread
+    owner_days: list[dict] | None = None                 # acts.per_day() for the last 11 working
+                                                         # days (today may be in progress), newest
+                                                         # first; None if unread
     spend: dict | None = None                            # ledger.totals(), None if unread
     hours: int = HOURS
     errors: list[str] = field(default_factory=list)
@@ -150,18 +152,26 @@ def reviewed_reverts(m: re.Match, d: Data) -> tuple[str, str] | None:
 
 
 def owner_acts(m: re.Match, d: Data) -> tuple[str, str] | None:
-    """M4: working days in a row, newest first, with under acts.LIMIT owner acts and none
-    'other' (checks 1 and 2, from swarm acts)."""
+    """M4: working days in a row, newest first, that `swarm acts` counted with under
+    acts.LIMIT owner acts and none 'other' (checks 1 and 2). Today, while in progress, is
+    skipped; a day not counted breaks the run as a failing day does, and with no counted day
+    the criterion is unmeasured (#844)."""
     import acts
     if d.owner_days is None:
         return None
+    days = d.owner_days[1:] if d.owner_days and d.owner_days[0]["status"] == acts.IN_PROGRESS \
+        else d.owner_days
+    if not any(day["status"] == acts.COUNTED for day in days):
+        return "unmeasured", "no working day counted yet (swarm acts)"
     need, run = int(m.group(1)), 0
-    for day in d.owner_days:
-        if not (day["under_limit"] and day["c_team"]):
+    for day in days:
+        if not (day["status"] == acts.COUNTED and day["under_limit"] and day["c_team"]):
             break
         run += 1
+    missing = sum(day["status"] != acts.COUNTED for day in days[:need])
     return ("met" if run >= need else "progress",
-            f"{run} of {need} working days in a row under {acts.LIMIT} acts, all C-team (swarm acts)")
+            f"{run} of {need} working days in a row under {acts.LIMIT} acts, all C-team"
+            + (f"; {missing} of the last {need} not counted" if missing else "") + " (swarm acts)")
 
 
 # (pattern on the criterion's text, measure(match, data) -> (status, detail) or None if unread)
@@ -555,13 +565,12 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
         errors.append(f"swarm merges: {e}")
     owner_days = None
     try:
-        unread = acts.sync(launcher.dir, owner, (repo, report_issue) if report_issue else None,
-                           g.gh_json, g.gh_items, merger.is_protected)
-        if unread:                                       # a missed act could flip a day: unmeasured
-            errors.extend(f"swarm acts: not read yet: {e}" for e in unread)
-        else:
-            owner_days = acts.per_day(acts.stored(launcher.dir),
-                                      swarm.working_days(now.astimezone().date()))
+        today = now.astimezone().date()
+        owner_days, unread = acts.refresh(launcher.dir, owner,
+                                          (repo, report_issue) if report_issue else None, repo,
+                                          g.gh_json, g.gh_items, merger.is_protected,
+                                          swarm.working_days(today, swarm.DAILY_DAYS + 1), now)
+        errors.extend(f"swarm acts: not read yet: {e}" for e in unread)
     except (OSError, sqlite3.Error) as e:
         errors.append(f"swarm acts: {e}")
     try:
