@@ -1,5 +1,7 @@
 # Brief: what the finance and scenario planner will demand of productswarm
 
+> **Superseded as M4's brief by GOV-0035** (#758): the readiness review is for the first outside project, unnamed until the owner names one, not this planner. Kept for its general findings (private data, a correctness gate), which `research/readiness-review-checklist.md` still draws on. The body below is unchanged.
+
 **Question (#693):** what will the finance and scenario planner need from productswarm in its first month: the work, data, access and integrations, the risks (data sensitivity, correctness), and what we'd have to change to take it on?
 **For:** the M4 readiness review (#686) and its checklist (#692). **Written:** 2026-11-09. **By:** analyst.
 
