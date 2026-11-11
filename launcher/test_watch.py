@@ -2502,6 +2502,7 @@ class DailyTest(unittest.TestCase):
         cmd = [c for c in self.fake.commands if "roles/planner.md" in c][-1]
         self.assertIn("write the daily report on issue #600, as roles/planner.md says", cmd)
         self.assertNotIn("check-in", cmd)
+        self.assertIn("run launcher/swarm trouble --json and build the Trouble section from it", cmd)
         argv = headless_argv(cmd)          # GOV-0012's budget and turns, GOV-0013's denies
         self.assertEqual(argv[argv.index("--max-turns") + 1], "50")
         self.assertIn("Bash(gh pr merge *)", argv)
@@ -2532,6 +2533,8 @@ class DailyTest(unittest.TestCase):
                                            "the daily report and the Monday check-in")])
         cmd = [c for c in self.fake.commands if "roles/planner.md" in c][-1]
         self.assertIn("write the daily report and the Monday check-in on issue #600", cmd)
+        # #804: the check-in's Trouble section, like the daily report's, comes from swarm trouble.
+        self.assertIn("run launcher/swarm trouble --json and build the Trouble section from it", cmd)
 
     def test_off_by_default(self):
         self.manifest()

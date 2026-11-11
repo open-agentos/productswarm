@@ -308,6 +308,11 @@ RESEARCH = "research"         # GOV-0029's Research: trigger (#591)
 RESEARCH_RE = re.compile(r"^[ \t]*Research:[ \t]*([^\n]*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 RULING = "ruling"             # the owner's ruling on an overstep (#739, #781)
 RULING_MAX = 1500             # characters of the owner's ruling that go into the prompt
+# The roles [respond] and [ruling] start, each on a PR its own App opened: GOV-0011 restarts
+# only the builder (generate.needs_owner hands any other PR to the owner), and #777 rules
+# whether that changes. `swarm trouble` reads these to tell stuck PRs from restarted ones (#828).
+RESPOND_ROLES = ("builder",)
+RULING_ROLES = ("builder",)
 RESEARCH_DAYS = 7             # how far back [research] reads the repo's comments
 PLANNER_APP = "productswarm-planner[bot]"   # whose Research: lines count, with the owner's
 WORKDAYS = range(5)           # Monday to Friday, by date.weekday()
@@ -1102,7 +1107,7 @@ def rulings(p: dict, comments: list[dict], owner: str,
                     ruling=ruling_text(c.get("body")), ruling_comment=c.get("id"))
         closes = [x["number"] for x in p["closes"]]
         role = g.pr_role(p.get("author", ""))
-        if role != "builder":   # until #777 rules which role [respond] starts
+        if role not in RULING_ROLES:   # until #777 rules which role [respond] starts
             out.append(replace(t, skipped=f"it is a {role or 'non-swarm'} PR, and only the builder "
                                           f"is started on a ruling, on its own PR (#777)"))
         elif len(closes) != 1:

@@ -139,7 +139,8 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     role was called in to the issue (GOV-0023, #520): the prompt says by whom and why, and
     that it posts one comment. With daily, a [daily] run (GOV-0029, #588): the planner posts
     `daily` ("the daily report", or on Mondays "the daily report and the Monday check-in")
-    on the report issue. With ask, an [ask] run (GOV-0029, #590): the role answers the
+    on the report issue, with its Trouble section built from `swarm trouble --json` (#804).
+    With ask, an [ask] run (GOV-0029, #590): the role answers the
     owner's question, from comment ask_comment on the report issue, in one comment there.
     With research, a [research] run (GOV-0029, #591): the analyst writes a brief on the
     question from comment research_comment in research/, as a PR that closes the issue. With
@@ -165,7 +166,8 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
         then = (f"write {daily} on issue #{issue}, as roles/{role}.md says. swarm watch started "
                 f"this run from its [daily] trigger (GOV-0029). Run launcher/swarm daily first: its "
                 f"\"M1: day N of 5\" goes in the report's first line and its Goal and Area edits "
-                f"under Risks (#709). Post on #{issue} and stop")
+                f"under Risks (#709). Then run launcher/swarm trouble --json and build the Trouble "
+                f"section from it, not by hand (#804). Post on #{issue} and stop")
     elif issue and called_by:
         # "issue #M" in the why would give the heartbeat two issues and so none: say "#M".
         safe = ISSUE_WORD_RE.sub(r"#\1", call_why) if call_why else ""
@@ -290,6 +292,7 @@ class Started:
     research_comment: int | None = None   # and the id of the comment that asked it
     ruling: str | None = None         # a [ruling] run (#739): the owner's comment on the overstep
     ruling_comment: int | None = None     # and that comment's id
+    repo: str | None = None           # owner/name of the issue's repo; None: this repo (#829)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Started":
@@ -299,7 +302,8 @@ class Started:
                    called_by=d.get("called_by"), call_why=d.get("call_why"),
                    daily=d.get("daily"), ask=d.get("ask"), ask_comment=d.get("ask_comment"),
                    research=d.get("research"), research_comment=d.get("research_comment"),
-                   ruling=d.get("ruling"), ruling_comment=d.get("ruling_comment"))
+                   ruling=d.get("ruling"), ruling_comment=d.get("ruling_comment"),
+                   repo=d.get("repo"))
 
 
 def recovered(sid: str, cmd: str, started: float) -> Started:
@@ -1752,22 +1756,58 @@ def gh_go_reader(repo: str, n: int) -> GoReader:
                     scope=lambda: gh_scopes(repo, [n]).get(n))
 
 
-def holders(n: int, model: dict, started: list[Started], role: str | None = None) -> list[str]:
-    """Live sessions already on issue n: heartbeat sessions whose current issue is n, plus
-    launcher sessions started on n that have no heartbeat yet. With role, only that role's
-    (a call-in waits only for its own role, #520)."""
+def holders(n: int, model: dict, started: list[Started], role: str | None = None,
+            repo: str | None = None) -> list[str]:
+    """Live sessions already on issue n of repo (None: this repo): heartbeat sessions whose
+    current issue is n, plus launcher sessions started on n that have no heartbeat yet. With
+    role, only that role's (a call-in waits only for its own role, #520).
+
+    A session holds repo plus number (#829): one on open-agentos/scratch#5 doesn't hold this
+    repo's #5, nor the reverse. A heartbeat session's repo is its launcher entry's; one the
+    launcher didn't start is on this repo, the repo the heartbeat model reads."""
     names = {e.session_id: e.name for e in started}
+    repos = {e.session_id: e.repo for e in started}
     seen = {s["session_id"] for s in model["sessions"]}
+    want = same_repo_key(repo)
     out = [f"{names.get(s['session_id'], s['role'])} ({s['status']}, session {s['session_id']})"
            for s in model["sessions"] if s["status"] != "stopped" and s["issue"] == n
-           and role in (None, s["role"])]
+           and same_repo_key(repos.get(s["session_id"])) == want and role in (None, s["role"])]
     out += [f"{e.name} (starting, session {e.session_id})"
-            for e in started if e.issue == n and e.session_id not in seen and role in (None, e.role)]
+            for e in started if e.issue == n and same_repo_key(e.repo) == want
+            and e.session_id not in seen and role in (None, e.role)]
     return out
 
 
-def launch_name(role: str, n: int, taken: set[str], pr: int | None = None) -> str:
-    base = f"{role}-pr-{pr}" if pr else f"{role}-issue-{n}"
+def same_repo_key(repo: str | None) -> str | None:
+    """repo as holders() compares it: GitHub repo names ignore case."""
+    return repo.lower() if repo else None
+
+
+# `swarm launch --issue`: N, #N or owner/name#N (#829). A bare N or #N is this repo.
+ISSUE_REF_RE = re.compile(r"(?:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#)?(?P<n>[1-9][0-9]*)",
+                          re.ASCII)
+
+
+def parse_ref(ref: str, repo: str) -> tuple[str | None, int]:
+    """(owner/name, N) for an issue ref, with None for this repo (`repo`), so a bare N, #N
+    and this repo's own owner/name#N all come back the same. Raises ValueError if malformed."""
+    m = ISSUE_REF_RE.fullmatch(ref.strip())
+    if not m:
+        raise ValueError(f"'{ref}' isn't an issue ref: use N, #N or owner/name#N")
+    other = m["repo"]
+    return (None if other is None or other.lower() == repo.lower() else other), int(m["n"])
+
+
+def ref_text(n: int, repo: str | None) -> str:
+    """#n for this repo (None), owner/name#n for another."""
+    return f"{repo}#{n}" if repo else f"#{n}"
+
+
+def launch_name(role: str, n: int, taken: set[str], pr: int | None = None,
+                repo: str | None = None) -> str:
+    """<role>-issue-<n>, or <role>-<name>-issue-<n> for another repo's issue (#829)."""
+    where = f"{role}-{repo.split('/')[-1]}" if repo else role
+    base = f"{where}-pr-{pr}" if pr else f"{where}-issue-{n}"
     name, k = base, 2
     while name in taken:
         name, k = f"{base}-{k}", k + 1
@@ -1790,24 +1830,35 @@ def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, forc
            dry_run: bool = False, idle_minutes: int = 15, pr: int | None = None,
            get_issue: Callable = gh_issue, get_heartbeat: Callable = heartbeat,
            owner: Callable[[], str] = owner_login, agents: Callable[[], set[str]] = agent_logins,
-           get_reader: Callable[[str, int], GoReader] = gh_go_reader) -> int:
-    issue, events = get_issue(repo, n)
-    refused = go_refusals(n, issue, events, owner(), agents(), get_reader(repo, n),
-                          now=dt.datetime.fromtimestamp(launcher.clock(), dt.timezone.utc), repo=repo)
+           get_reader: Callable[[str, int], GoReader] = gh_go_reader,
+           issue_repo: str | None = None) -> int:
+    """Start a session on issue n of issue_repo (None: this repo, `repo`)."""
+    if issue_repo:
+        # Stage 1 of #820: worktrees are cut from this checkout, so a session there would work
+        # on this repo's code. Starting one waits for per-repo clones (stage 2).
+        launcher.out(f"swarm launch: refused: {issue_repo}#{n} is in another repo, and its "
+                     f"worktree would be cut from this checkout ({repo}); not until #820 stage 2")
+        return 1
+    where = issue_repo or repo
+    issue, events = get_issue(where, n)
+    refused = go_refusals(n, issue, events, owner(), agents(), get_reader(where, n),
+                          now=dt.datetime.fromtimestamp(launcher.clock(), dt.timezone.utc), repo=where)
     if refused:
         launcher.out(f"swarm launch: refused: {refused[0]}")
         return 1
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     live = launcher.live()
-    taken = holders(n, get_heartbeat(repo, idle_minutes, now), live)
+    ref = ref_text(n, issue_repo)
+    taken = holders(n, get_heartbeat(repo, idle_minutes, now), live, repo=issue_repo)
     if taken and not force:
-        launcher.out(f"swarm launch: refused: #{n} already has a live session: {'; '.join(taken)}. "
+        launcher.out(f"swarm launch: refused: {ref} already has a live session: {'; '.join(taken)}. "
                      f"Stop it (swarm stop <name>) or pass --force")
         return 1
     if taken:
-        launcher.out(f"--force: starting another session on #{n} alongside {'; '.join(taken)}")
-    entry = Started(name=launch_name(role, n, {e.name for e in live}, pr), role=role, model=model,
-                    session_id=str(uuid.uuid4()), started=launcher.clock(), issue=n, pr=pr)
+        launcher.out(f"--force: starting another session on {ref} alongside {'; '.join(taken)}")
+    entry = Started(name=launch_name(role, n, {e.name for e in live}, pr, issue_repo), role=role,
+                    model=model, session_id=str(uuid.uuid4()), started=launcher.clock(), issue=n,
+                    pr=pr, repo=issue_repo)
     return 0 if launcher.start(entry, live, dry_run) else 1
 
 
@@ -1864,7 +1915,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_trouble.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
     p_launch.add_argument("role")
-    p_launch.add_argument("--issue", type=int, required=True, help="the issue to work on")
+    p_launch.add_argument("--issue", required=True,
+                          help="the issue to work on: N or #N (this repo), or owner/name#N")
     p_launch.add_argument("--pr", type=int,
                           help="respond to requested changes on this PR, which closes --issue (GOV-0011)")
     p_launch.add_argument("--model", help="default: the manifest's model for the role")
@@ -1951,8 +2003,14 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             except (manifest.ManifestError, LookupError) as e:
                 launcher.out(f"swarm launch: {e}")
                 return 1
-            return launch(launcher, args.role, args.issue, model, repo=repo, force=args.force,
-                          dry_run=args.dry_run, idle_minutes=args.idle_minutes, pr=args.pr)
+            try:
+                issue_repo, n = parse_ref(args.issue, repo)
+            except ValueError as e:
+                launcher.out(f"swarm launch: {e}")
+                return 1
+            return launch(launcher, args.role, n, model, repo=repo, force=args.force,
+                          dry_run=args.dry_run, idle_minutes=args.idle_minutes, pr=args.pr,
+                          issue_repo=issue_repo)
         if args.cmd == "up":
             try:
                 sessions = manifest.load(args.manifest)
