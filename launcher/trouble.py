@@ -32,12 +32,20 @@ For each Goal and Area (GOV-0031):
   plus a fourth signal, `unheard-command`: an owner `Ask:`, `Call in:` or `Research:` line
   nothing listens to (an `Ask:` off the report issue, a `Call in:` on a PR or on an issue
   that is neither `ready` nor under a Goal or Area, a switch that is off), while the issue
-  or PR it is on is still open.
+  or PR it is on is still open; and three from the owner's findings on #858:
+    4. `conflict`: a PR approved at head (by the reviewer, and maybe the owner too) that
+       conflicts with `main`. The merger can't merge it and no trigger starts a fix (PR #839);
+    5. `quiet-session`: a hand-started session (not by `swarm watch`) that is still running
+       but whose role's App has posted nothing on its issue, or its PR, for QUIET_MINUTES (#773);
+    6. `stopped-no-issue`: the last word on an open issue is a role saying it stopped because
+       the next piece it needs has no issue yet (NO_ISSUE_RE), with no open PR for the issue
+       and no issue opened since that names it (#786).
 - **Waiting on the owner**, with its age: untriaged issues, `gov:question`s not yet
   answered, PRs GOV-0011 hands to the owner (an overstep not yet answered, or answered
   and replied to by the role [ruling] started), and every PR the reviewer approved at
   head that the merger left for the owner, for whatever reason: the reason is the
   merger's own `Left for the owner at <head>: <reason>` comment, not re-derived here.
+  Once the owner approves at head after that comment, the PR no longer waits on them.
 - **On the owner's authority**, in the last --hours: merges by the merger App (GOV-0027;
   a PR it enqueued counts as its merge, as in `swarm merges`) and call-ins by a swarm App.
 - **Spend**: the runs ledger's total under it (ledger.totals), reported only.
@@ -56,6 +64,8 @@ from __future__ import annotations
 import datetime as dt
 import re
 import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -68,12 +78,20 @@ CHANGES = "CHANGES_REQUESTED"
 COMMAND_DAYS = 7          # how far back owner commands are read for the fourth signal
 MERGED_DAYS = 14          # how far back merged PRs are read for rule 2
 HOURS = 24                # default window for "on the owner's authority"
+QUIET_MINUTES = 60        # rule 5: a hand-started session silent this long is stuck (#858)
+BUDGET_SECONDS = 20       # gather(): the acts backfill starts no read after this (#858)
 
 CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[([ xX])\]\s*(\S.*?)\s*$", re.MULTILINE)
 TARGET_RE = re.compile(r"^\s*\*\*Target:?\*\*:?[ \t]*(.*)$", re.MULTILINE)
 BULLET_RE = re.compile(r"^\s*[-*]\s+(?!\[[ xX]\])(\S.*?)\s*$")
 DATE_RE = re.compile(r"^\s*\*\*Date:?\*\*:?[ \t]*(\d{4}-\d{2}-\d{2})\b", re.MULTILINE)
 APP_RE = re.compile(r"^(?:app/)?(productswarm-[a-z0-9-]+?)(?:\[bot\])?$")
+# Rule 6: a role's stop comment saying the next piece has no issue (#786: "Stage 2 ... has no
+# issue yet"; #858: "stage 2 isn't opened").
+NO_ISSUE_RE = re.compile(r"\b(?:has|have|had|with) no issue\b|\bno issue (?:for it )?yet\b"
+                         r"|\b(?:isn't|is not|hasn't been|has not been|not yet) opened\b", re.I)
+ROLE_APP_RE = re.compile(r"^productswarm-([a-z]+)\[bot\]$")
+NOT_ROLES = ("reviewer", "merger")     # Apps that comment but don't build
 
 
 def rest_login(login: str | None) -> str:
@@ -108,6 +126,8 @@ class Data:
                                                          # days (today may be in progress), newest
                                                          # first; None if unread
     spend: dict | None = None                            # ledger.totals(), None if unread
+    sessions: list[dict] = field(default_factory=list)   # hand-started running sessions:
+                                                         # {name, role, issue, pr, started (ISO)}
     hours: int = HOURS
     errors: list[str] = field(default_factory=list)
 
@@ -346,8 +366,18 @@ def report(d: Data, measures=None) -> dict:
             else:
                 file(goal, "waiting", item("pr", ref(n, True), pr_url, why, asked, now))
         elif rv["at_head"] == "APPROVED":
+            mine = [r for r in reviews if r["user"]["login"] == owner and r["commit_id"] == head
+                    and r["state"] in ("APPROVED", CHANGES, "DISMISSED")]
+            owner_ok = mine[-1]["at"] if mine and mine[-1]["state"] == "APPROVED" else None
+            if p.get("mergeable") == "CONFLICTING":           # rule 4 (PR #839)
+                by = f"the reviewer and @{owner}" if owner_ok else "the reviewer"
+                file(goal, "stuck", item("conflict", ref(n, True), pr_url,
+                                         f"approved at head by {by}, but it conflicts with main: "
+                                         f"the merger can't merge it, and nothing will start a fix",
+                                         owner_ok or asked, now))
+                continue
             left = merger_left(comments, head)
-            if left:
+            if left and not (owner_ok and owner_ok > left[0]):    # the owner approved since
                 file(goal, "waiting", item("pr", ref(n, True), pr_url,
                                            f"approved at head; the merger left it for the owner: "
                                            f"{left[1]}", left[0], now))
@@ -379,6 +409,58 @@ def report(d: Data, measures=None) -> dict:
                                            f"#{a} waits on it, and it sits under no Goal or Area, "
                                            f"so nothing starts it", bt.get("created_at"), now,
                                            waited_on_by=a))
+
+    # Rule 5: a hand-started session gone quiet (#773). One whose work is over (its issue
+    # closed or closed by a merged PR, its PR no longer open) is only an idle window.
+    def closes(p: dict) -> list[int]:
+        return [x["number"] for x in p.get("closingIssuesReferences") or []]
+    open_prs = {p["number"] for p in d.prs}
+    done = {n for p in d.merged for n in closes(p)}
+    for s in d.sessions:
+        app, issue, pr_n, started = (f"productswarm-{s['role']}[bot]", s.get("issue"), s.get("pr"),
+                                     when(s["started"]))
+        if (issue is not None and (issue not in open_issues or issue in done)) or \
+                (pr_n is not None and pr_n not in open_prs):
+            continue
+        its_prs = {p["number"]: p for p in [*d.prs, *d.merged]
+                   if p["number"] == pr_n or (issue is not None and issue in closes(p))}
+        posts = [when(c.get("created_at")) for c in d.comments
+                 if (c.get("user") or {}).get("login") == app
+                 and (issue is None or watch.comment_issue(c) in {issue, *its_prs})]
+        posts += [when(p.get("createdAt")) for p in its_prs.values()
+                  if rest_login((p.get("author") or {}).get("login")) == app]
+        last = max((t for t in posts if t and t >= started), default=None)
+        quiet = last or started
+        mins = int((now - quiet).total_seconds() // 60)
+        if mins < QUIET_MINUTES:
+            continue
+        said = (f"last posted at {last:%Y-%m-%d %H:%M} UTC" if last
+                else f"nothing since it started at {started:%Y-%m-%d %H:%M} UTC")
+        file(goal_of(issue), "stuck", item(
+            "quiet-session", ref(issue) if issue else s["name"], url(issue) if issue else None,
+            f"hand-started {s['role']} session {s['name']} is still running but has posted nothing "
+            f"for {mins} min ({said}; flagged after {QUIET_MINUTES} min)", quiet, now,
+            session=s["name"]))
+
+    # Rule 6: a role stopped because the next piece it needs has no issue yet (#786).
+    pr_for = {x["number"] for p in d.prs for x in p.get("closingIssuesReferences") or []}
+    last_word: dict[int, dict] = {}
+    for c in d.comments:
+        n = watch.comment_issue(c)
+        if n in open_issues and (n not in last_word or c.get("created_at", "") >= last_word[n].get("created_at", "")):
+            last_word[n] = c
+    for n, c in sorted(last_word.items()):
+        m = ROLE_APP_RE.match((c.get("user") or {}).get("login") or "")
+        if not m or m.group(1) in NOT_ROLES or n in pr_for or not NO_ISSUE_RE.search(c.get("body") or ""):
+            continue
+        mention = re.compile(rf"(?<![\w/])#{n}\b")
+        if any(it.get("created_at", "") > c.get("created_at", "") and mention.search(it.get("body") or "")
+               for it in d.issues if it["number"] != n):
+            continue                                     # an issue opened since names it
+        file(goal_of(n), "stuck", item(
+            "stopped-no-issue", ref(n), c.get("html_url") or url(n),
+            f"the {m.group(1)} stopped: the next piece it needs has no issue yet, so nothing will "
+            f"start it", c.get("created_at"), now))
 
     # Fourth signal: owner commands nothing listens to. Call-ins by Apps are authority used.
     agents_call = []
@@ -508,15 +590,32 @@ def text(r: dict) -> str:
 # ---------------------------------------------------------------- reading
 
 PR_FIELDS = ("number,title,url,author,isDraft,headRefOid,createdAt,reviews,comments,files,"
-             "closingIssuesReferences")
-MERGED_FIELDS = ("number,title,url,author,body,mergedAt,mergedBy,headRefOid,comments,"
+             "closingIssuesReferences,mergeable")
+MERGED_FIELDS = ("number,title,url,author,body,createdAt,mergedAt,mergedBy,headRefOid,comments,"
                  "closingIssuesReferences")   # headRefOid and comments: swarm.merged_by
+
+
+def hand_sessions(launcher) -> list[dict]:
+    """Rule 5's sessions: the launcher's entries still running that `swarm watch` didn't start.
+    Reads only (Launcher.running, not live, so nothing is tidied)."""
+    out = []
+    for e in launcher.running():
+        if e.by == "watch" or launcher.state(e) != "running":
+            continue
+        started = dt.datetime.fromtimestamp(e.started, dt.timezone.utc)
+        out.append({"name": e.name, "role": e.role, "issue": e.issue, "pr": e.pr,
+                    "started": started.isoformat(timespec="seconds")})
+    return out
 
 
 def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
            now: dt.datetime | None = None) -> Data:
     """Read everything report() needs. Raises RuntimeError if GitHub can't be read; a local
-    part that can't be read (the ledger, the daily streak) is left out and named in errors."""
+    part that can't be read (the ledger, the daily streak) is left out and named in errors.
+
+    The reads that don't depend on each other run at once (#858): one at a time, they took
+    about 25 seconds. The acts backfill (acts.refresh) runs beside them and starts no read
+    after BUDGET_SECONDS; what it hasn't read back yet, the next run (or `swarm acts`) does."""
     import acts
     import ledger
     import manifest
@@ -524,62 +623,83 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
     import watch
     g = swarm.dashboard()
     now = now or dt.datetime.now(dt.timezone.utc)
+    deadline = time.monotonic() + BUDGET_SECONDS
     errors: list[str] = []
     try:
         limits = manifest.load_watch(manifest_path)
     except manifest.ManifestError as e:
         limits = None
         errors.append(f"swarm.toml: {e}")
-    issues = g.gh_items(f"repos/{repo}/issues?state=open&per_page=100")
-    prs = g.gh_json("pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
-                    "--json", PR_FIELDS) or []
-    day = (now - dt.timedelta(days=MERGED_DAYS)).date()
-    merged = g.gh_json("pr", "list", "--repo", repo, "--state", "merged", "--limit", "300",
-                       "--search", f"merged:>={day}", "--json", MERGED_FIELDS) or []
-    comments = watch.gh_recent_comments(repo, now - dt.timedelta(days=COMMAND_DAYS))
-    numbers = {it["number"] for it in issues if "pull_request" not in it}
-    numbers |= {c["number"] for p in [*prs, *merged] for c in p.get("closingIssuesReferences") or []}
-    scopes = swarm.gh_scopes(repo, sorted(numbers)) if numbers else {}
-    other: dict[str, dict] = {}
-    for sc in scopes.values():
-        for p in (sc or {}).get("parents") or []:
-            key = f"{p['repo']}#{p['number']}"
-            if (p["repo"] not in (None, repo) and p["type"] in SCOPE_TYPES and p["state"] == "open"
-                    and p["author"] == owner and key not in other):
-                other[key] = g.gh_json("api", f"repos/{p['repo']}/issues/{p['number']}") or {}
     report_issue = limits.report_issue if limits else None
-    streak = None
-    if report_issue:
+    today = now.astimezone().date()
+
+    def streak():
+        rows = swarm.daily_rows(swarm.working_days(today), watch.gh_comments(repo, report_issue),
+                                watch.load_state(launcher)["acted"], report_issue,
+                                swarm.agent_logins() | {owner})
+        return swarm.daily_streak(rows, today)
+
+    def owner_acts():
+        return acts.refresh(launcher.dir, owner, (repo, report_issue) if report_issue else None, repo,
+                            g.gh_json, g.gh_items, merger.is_protected,
+                            swarm.working_days(today, swarm.DAILY_DAYS + 1), now, deadline=deadline)
+
+    day = (now - dt.timedelta(days=MERGED_DAYS)).date()
+    with ThreadPoolExecutor(8) as pool:
+        jobs = {
+            "issues": pool.submit(g.gh_items, f"repos/{repo}/issues?state=open&per_page=100"),
+            "prs": pool.submit(g.gh_json, "pr", "list", "--repo", repo, "--state", "open", "--limit",
+                               "200", "--json", PR_FIELDS),
+            "merged": pool.submit(g.gh_json, "pr", "list", "--repo", repo, "--state", "merged",
+                                  "--limit", "300", "--search", f"merged:>={day}", "--json", MERGED_FIELDS),
+            "comments": pool.submit(watch.gh_recent_comments, repo, now - dt.timedelta(days=COMMAND_DAYS)),
+            "week": pool.submit(swarm.gh_merged, repo, *swarm.week_of(now)),
+            "acts": pool.submit(owner_acts),
+            "streak": pool.submit(streak) if report_issue else None,
+        }
+        issues = jobs["issues"].result()
+        prs = jobs["prs"].result() or []
+        merged = jobs["merged"].result() or []
+        numbers = {it["number"] for it in issues if "pull_request" not in it}
+        numbers |= {c["number"] for p in [*prs, *merged] for c in p.get("closingIssuesReferences") or []}
+        scopes = swarm.gh_scopes(repo, sorted(numbers)) if numbers else {}
+        keys = sorted({f"{p['repo']}#{p['number']}" for sc in scopes.values() for p in (sc or {}).get("parents") or []
+                       if p["repo"] not in (None, repo) and p["type"] in SCOPE_TYPES and p["state"] == "open"
+                       and p["author"] == owner})
+        got = list(pool.map(lambda k: g.gh_json("api", "repos/{}/issues/{}".format(*k.split("#"))) or {}, keys))
+        other = dict(zip(keys, got))
+        comments = jobs["comments"].result()
+        streak_n = None
+        if jobs["streak"]:
+            try:
+                streak_n = jobs["streak"].result()
+            except RuntimeError as e:
+                errors.append(f"daily streak: {e}")
         try:
-            today = now.astimezone().date()
-            rows = swarm.daily_rows(swarm.working_days(today), watch.gh_comments(repo, report_issue),
-                                    watch.load_state(launcher)["acted"], report_issue,
-                                    swarm.agent_logins() | {owner})
-            streak = swarm.daily_streak(rows, today)
+            week_merges = jobs["week"].result()
         except RuntimeError as e:
-            errors.append(f"daily streak: {e}")
-    try:
-        week_merges = swarm.gh_merged(repo, *swarm.week_of(now))
-    except RuntimeError as e:
-        week_merges = None
-        errors.append(f"swarm merges: {e}")
-    owner_days = None
-    try:
-        today = now.astimezone().date()
-        owner_days, unread = acts.refresh(launcher.dir, owner,
-                                          (repo, report_issue) if report_issue else None, repo,
-                                          g.gh_json, g.gh_items, merger.is_protected,
-                                          swarm.working_days(today, swarm.DAILY_DAYS + 1), now)
-        errors.extend(f"swarm acts: not read yet: {e}" for e in unread)
-    except (OSError, sqlite3.Error) as e:
-        errors.append(f"swarm acts: {e}")
+            week_merges = None
+            errors.append(f"swarm merges: {e}")
+        owner_days = None
+        try:
+            owner_days, unread = jobs["acts"].result()
+            errors.extend(f"swarm acts: not read yet: {e}" + (
+                "; `launcher/swarm acts` has no time limit and reads it all" if acts.OUT_OF_TIME in e else "")
+                for e in unread)
+        except (OSError, sqlite3.Error) as e:
+            errors.append(f"swarm acts: {e}")
     try:
         spend = ledger.totals(ledger.rows(launcher.dir), now)
     except (OSError, ValueError, sqlite3.Error) as e:
         spend = None
         errors.append(f"runs ledger: {e}")
+    try:
+        sessions = hand_sessions(launcher)
+    except OSError as e:
+        sessions = []
+        errors.append(f"launcher sessions: {e}")
     switches = {k: bool(getattr(limits, k, False)) for k in ("asks", "call_ins", "research")}
     return Data(repo=repo, owner=owner, now=now, issues=issues, scopes=scopes, other_scopes=other,
                 prs=prs, merged=merged, comments=comments, report_issue=report_issue,
-                switches=switches, daily_streak=streak, week_merges=week_merges, owner_days=owner_days,
-                spend=spend, hours=hours, errors=errors)
+                switches=switches, daily_streak=streak_n, week_merges=week_merges, owner_days=owner_days,
+                spend=spend, hours=hours, errors=errors, sessions=sessions)

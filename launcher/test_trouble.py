@@ -319,6 +319,91 @@ class Stuck(unittest.TestCase):
         self.assertTrue(any(ref == "PR #7" and "not PRs" in why for ref, why in got))
         self.assertTrue(any(ref == "#6" and "neither `ready`" in why for ref, why in got))
 
+    def test_rule4_approved_by_the_owner_but_conflicting_839(self):
+        # PR #839: the reviewer approved at head, the merger left it for the owner (a protected
+        # path), the owner approved at head 53 minutes later, and it conflicts with main.
+        why = "approved ask: touches `governance/INDEX.md`, and mattmcalister hasn't approved at head"
+        p = pr(839, 731, reviews=[review("APPROVED", 3), review("APPROVED", 2.1, author=OWNER)],
+               comments=[left(why, 3)], files=("governance/INDEX.md",))
+        p["mergeable"] = "CONFLICTING"
+        r = trouble.report(data(issues=[M1, issue(731)], scopes={731: under(1)}, prs=[p]))
+        self.assertEqual(scope(r)["waiting"], [])
+        [x] = scope(r)["stuck"]
+        self.assertEqual((x["kind"], x["ref"], x["age_hours"]), ("conflict", "PR #839", 2.1))
+        self.assertIn(f"approved at head by the reviewer and @{OWNER}", x["reason"])
+        self.assertIn("conflicts with main", x["reason"])
+        self.assertIn("nothing will start a fix", x["reason"])
+
+    def test_rule4_owner_approval_after_left_no_longer_waits(self):
+        p = pr(839, 731, reviews=[review("APPROVED", 3), review("APPROVED", 2, author=OWNER)],
+               comments=[left("the owner hasn't approved at head", 2.5)])
+        p["mergeable"] = "MERGEABLE"
+        r = trouble.report(data(issues=[M1, issue(731)], scopes={731: under(1)}, prs=[p]))
+        self.assertEqual(scope(r)["stuck"] + scope(r)["waiting"], [])     # the merger acts next
+        p["reviews"][-1] = review("APPROVED", 2, author=OWNER, commit="b" * 40)   # an older head's
+        [w] = scope(trouble.report(data(issues=[M1, issue(731)], scopes={731: under(1)}, prs=[p])))["waiting"]
+        self.assertIn("the merger left it for the owner", w["reason"])
+
+    def test_rule4_conflict_without_the_owner(self):
+        p = pr(5, 731, reviews=[review("APPROVED", 4)])
+        p["mergeable"] = "CONFLICTING"
+        [x] = scope(trouble.report(data(issues=[M1, issue(731)], scopes={731: under(1)}, prs=[p])))["stuck"]
+        self.assertIn("approved at head by the reviewer, but", x["reason"])
+
+    def test_rule5_quiet_hand_started_session_773(self):
+        # #773: the analyst run, started by hand, posted nothing for 75 minutes.
+        s = {"name": "analyst-issue-773", "role": "analyst", "issue": 773, "pr": None, "started": ago(3)}
+        posted = comment(773, "Starting the gate run.", hours=1.25, author="productswarm-analyst[bot]")
+        d = dict(issues=[M1, issue(773)], scopes={773: under(1)}, sessions=[s], comments=[posted])
+        [x] = scope(trouble.report(data(**d)))["stuck"]
+        self.assertEqual((x["kind"], x["ref"], x["session"], x["age_hours"]),
+                         ("quiet-session", "#773", "analyst-issue-773", 1.2))
+        self.assertIn("posted nothing for 75 min", x["reason"])
+        self.assertIn("last posted at 2026-11-11 16:45 UTC", x["reason"])
+        self.assertIn(f"flagged after {trouble.QUIET_MINUTES} min", x["reason"])
+        d["comments"] = [comment(773, "Halfway.", hours=0.5, author="productswarm-analyst[bot]")]
+        self.assertEqual(scope(trouble.report(data(**d)))["stuck"], [])   # posted 30 min ago
+        d["comments"] = [comment(773, "Halfway.", hours=0.5)]               # the owner's, not its own
+        [x] = scope(trouble.report(data(**d)))["stuck"]
+        self.assertIn("nothing since it started at 2026-11-11 15:00 UTC", x["reason"])
+
+    def test_rule5_post_on_its_pr_counts_and_finished_work_is_skipped(self):
+        s = {"name": "builder-issue-773", "role": "builder", "issue": 773, "pr": None, "started": ago(3)}
+        p = pr(900, 773)
+        on_pr = comment(900, "Pushed a fix.", hours=0.2, author="productswarm-builder[bot]", on_pr=True)
+        d = dict(issues=[M1, issue(773)], scopes={773: under(1)}, sessions=[s], prs=[p], comments=[on_pr])
+        self.assertEqual(scope(trouble.report(data(**d)))["stuck"], [])
+        d.update(prs=[], comments=[], merged=[merged(900, 773, 1)])      # its PR merged: work over
+        self.assertEqual([x["kind"] for x in scope(trouble.report(data(**d)))["stuck"]], ["merged-issue-open"])
+        d.update(merged=[], issues=[M1])                                  # its issue closed
+        self.assertEqual(trouble.report(data(**d))["outside"]["stuck"], [])
+        s.update(issue=None, pr=839)                                      # a PR session, PR gone
+        self.assertEqual(trouble.report(data(**d))["outside"]["stuck"], [])
+
+    def test_rule6_stopped_because_next_stage_has_no_issue_786(self):
+        stop = comment(786, "Started on this, and stopping without code.\n\n- **Stage 2** (a clone per "
+                            "repo) has no issue yet. The planner said it would open one.\n\n-- builder",
+                       hours=2.2, author="productswarm-builder[bot]")
+        d = dict(issues=[M1, issue(786)], scopes={786: under(1)}, comments=[stop])
+        [x] = scope(trouble.report(data(**d)))["stuck"]
+        self.assertEqual((x["kind"], x["ref"], x["age_hours"]), ("stopped-no-issue", "#786", 2.2))
+        self.assertIn("the builder stopped: the next piece it needs has no issue yet", x["reason"])
+        self.assertIn("nothing will start it", x["reason"])
+        # Stage 2 opened as #853, naming #786: nothing is stuck any more.
+        d["issues"] = [M1, issue(786), issue(853, created=1, body="Stage 2 of #786 (#820).")]
+        self.assertEqual(scope(trouble.report(data(**d)))["stuck"], [])
+
+    def test_rule6_only_a_role_s_last_word_without_a_pr(self):
+        stop = comment(786, "Stage 2 isn't opened, so I stopped.", hours=2, author="productswarm-builder[bot]")
+        base = dict(issues=[M1, issue(786)], scopes={786: under(1)})
+        later = comment(786, "Opened it.", hours=1)
+        self.assertEqual(scope(trouble.report(data(**base, comments=[stop, later])))["stuck"], [])
+        merger = comment(786, "Stage 2 has no issue yet.", hours=2, author="productswarm-merger[bot]")
+        self.assertEqual(scope(trouble.report(data(**base, comments=[merger])))["stuck"], [])
+        self.assertEqual(scope(trouble.report(data(**base, comments=[stop], prs=[pr(900, 786)])))["stuck"], [])
+        plain = comment(786, "Stopping: waits on #12.", hours=2, author="productswarm-builder[bot]")
+        self.assertEqual(scope(trouble.report(data(**base, comments=[plain])))["stuck"], [])
+
     def test_switch_off_is_unheard(self):
         r = trouble.report(data(issues=[M1, issue(249, kind=None)], comments=[comment(249, "Ask: builder: x")],
                                 switches={"asks": False}))

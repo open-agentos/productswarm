@@ -9,6 +9,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -393,6 +394,42 @@ class NotCounted(Base):
         self.assertEqual([r["status"] for r in rows], ["not counted", "not counted"])
         self.assertIn("older than 31 days", rows[0]["why"])
         self.assertEqual(self.gh.calls, [])
+
+    def test_out_of_time_search_stores_nothing_and_the_next_run_finishes(self):
+        # #858: `swarm trouble` passes a deadline; a backfill past it counts nothing yet.
+        gone = time.monotonic() - 1
+        rows, errors = acts.refresh(self.dir, OWNER, (REPO, REPORT), REPO, *self.fake(), merger.is_protected,
+                                    [dt.date(2026, 11, 10)], NOW, UTC, deadline=gone)
+        self.assertEqual(rows[0]["status"], "not counted")
+        self.assertTrue(any(acts.OUT_OF_TIME in e for e in errors), errors)
+        self.assertEqual(acts.stored(self.dir), [])
+        rows, errors = self.refresh(["2026-11-10"])
+        self.assertEqual((errors, rows[0]["status"], rows[0]["count"]), ([], "counted", 1))
+
+    def test_out_of_time_sync_leaves_its_leads_for_the_next_run(self):
+        self.deliver()
+        gh = FakeGitHub()
+        errors = acts.sync(self.dir, OWNER, (REPO, REPORT), gh.gh_json, gh.gh_items, merger.is_protected,
+                           now=NOW, deadline=time.monotonic() - 1)
+        self.assertEqual(gh.calls, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("not read back yet (out of time); the next run reads them", errors[0])
+        self.assertEqual(self.sync(), [])
+        self.assertTrue(acts.stored(self.dir))
+
+    def fake(self):
+        self.gh = FakeGitHub()
+        return self.gh.gh_json, self.gh.gh_items
+
+    def test_each_keeps_order_and_hands_back_errors(self):
+        def f(x):
+            if x == 3:
+                raise RuntimeError("three")
+            time.sleep(0.01 * (10 - x))        # later items finish first
+            return x * 2
+        got = acts.each(f, list(range(10)))
+        self.assertEqual([g if not isinstance(g, Exception) else "err" for g in got],
+                         [0, 2, 4, "err", 8, 10, 12, 14, 16, 18])
 
     def test_issue_events_stop_at_the_window(self):
         pages = {1: [{"created_at": f"2026-11-11T{h:02d}:00:00Z"} for h in range(23, 23 - 100, -1)

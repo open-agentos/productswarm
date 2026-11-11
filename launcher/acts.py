@@ -44,6 +44,14 @@ window goes in `act_backfills`, and only then does the day count, even at 0 acts
 day is `not counted` (never 0), and today is `in progress` until it ends. A day is backfilled
 SETTLE after it ends (search lags), and only within BACKFILL_DAYS (its comment list is long).
 
+**Reads run WORKERS at a time, within a deadline (#858).** Each read is a `gh` call of about a
+second, so a backfill read one at a time took minutes: a day is about 30 calls to find the
+leads and one or two per lead to read them back, and the first backfill of 15 days was 75
+and about 800. Repos, searches and leads are read in parallel. A caller with a deadline
+(`swarm trouble`) starts no read after it: leads found but not read back stay unread, so the
+next run carries on from them, and a search that runs out of time stores nothing, so the
+next run starts it again. `swarm acts` has no deadline and always finishes.
+
 Limits: an object deleted before it is read back is lost; Discussion comments aren't read; an
 org repo the owner's token can't list isn't searched. Back-room repairs leave no record at all
 (the checklist has the owner self-report them).
@@ -52,7 +60,9 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
+import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -67,6 +77,26 @@ GOV_QUESTION = "gov:question"
 SETTLE = dt.timedelta(hours=1)  # a day is backfilled this long after it ends (search lags)
 BACKFILL_DAYS = 31              # older days aren't backfilled: not counted
 COUNTED, NOT_COUNTED, IN_PROGRESS = "counted", "not counted", "in progress"
+WORKERS = 8                     # gh calls in flight at once (#858)
+OUT_OF_TIME = "out of time"
+
+
+def late(deadline: float | None) -> bool:
+    """Past the deadline, a time.monotonic() value; never with None."""
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def each(fn: Callable, items: list) -> list:
+    """fn over items, WORKERS at a time, in order: each result, or the exception it raised."""
+    def safe(x):
+        try:
+            return fn(x)
+        except Exception as e:   # noqa: BLE001 - handed back to the caller, which sorts them
+            return e
+    if len(items) < 2:
+        return [safe(x) for x in items]
+    with ThreadPoolExecutor(min(WORKERS, len(items))) as pool:
+        return list(pool.map(safe, items))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS act_leads (
@@ -238,10 +268,11 @@ class Reader:
 
 def sync(state_dir: Path, owner: str, report: tuple[str, int] | None, gh_json: Callable,
          gh_items: Callable, protected: Callable[[str], bool],
-         now: dt.datetime | None = None) -> list[str]:
-    """Read every unread lead the owner sent back from GitHub and store its acts. Leads from
-    anyone else are marked read without a call. Returns the errors; a lead that failed stays unread
-    for the next sync, and one whose object is gone (404) is marked read."""
+         now: dt.datetime | None = None, deadline: float | None = None) -> list[str]:
+    """Read every unread lead the owner sent back from GitHub and store its acts, WORKERS at a
+    time, starting none after `deadline`. Leads from anyone else are marked read without a call.
+    Returns the errors; a lead that failed or wasn't reached stays unread for the next sync, and
+    one whose object is gone (404) is marked read."""
     now = now or dt.datetime.now(dt.timezone.utc)
     stamp = now.isoformat(timespec="seconds")
     reader = Reader(owner, report, gh_json, gh_items, protected)
@@ -253,21 +284,25 @@ def sync(state_dir: Path, owner: str, report: tuple[str, int] | None, gh_json: C
         groups = db.execute(
             "SELECT event, action, repo, number, ref FROM act_leads WHERE read_at IS NULL "
             "GROUP BY event, action, repo, number, ref ORDER BY MIN(received_at)").fetchall()
-        for event, action, repo, n, ref in groups:
-            try:
-                found = reader.read(event, action, repo, n, ref)
-            except RuntimeError as e:
-                if not not_found(e):
-                    errors.append(f"{event} {action} {repo}#{n}: {e}")
-                    continue
-                found = []
-            db.execute("BEGIN IMMEDIATE")
-            db.executemany("INSERT OR IGNORE INTO acts (key, at, act, kind, what, repo, number, url) "
-                           "VALUES (:key, :at, :act, :kind, :what, :repo, :number, :url)", found)
-            db.execute("UPDATE act_leads SET read_at = ? WHERE read_at IS NULL AND event = ? AND "
-                       "action IS ? AND repo = ? AND number = ? AND ref IS ?",
-                       (stamp, event, action, repo, n, ref))
-            db.execute("COMMIT")
+        for i in range(0, len(groups), WORKERS):
+            if late(deadline):
+                errors.append(f"{len(groups) - i} lead(s) not read back yet ({OUT_OF_TIME}); "
+                              f"the next run reads them")
+                break
+            chunk = groups[i:i + WORKERS]
+            for (event, action, repo, n, ref), found in zip(chunk, each(lambda g: reader.read(*g), chunk)):
+                if isinstance(found, Exception):
+                    if not (isinstance(found, RuntimeError) and not_found(found)):
+                        errors.append(f"{event} {action} {repo}#{n}: {found}")
+                        continue
+                    found = []
+                db.execute("BEGIN IMMEDIATE")      # the reads ran in threads; writes stay here
+                db.executemany("INSERT OR IGNORE INTO acts (key, at, act, kind, what, repo, number, url) "
+                               "VALUES (:key, :at, :act, :kind, :what, :repo, :number, :url)", found)
+                db.execute("UPDATE act_leads SET read_at = ? WHERE read_at IS NULL AND event = ? AND "
+                           "action IS ? AND repo = ? AND number = ? AND ref IS ?",
+                           (stamp, event, action, repo, n, ref))
+                db.execute("COMMIT")
     finally:
         db.close()
     return errors
@@ -323,11 +358,14 @@ def scope_repos(repo: str, gh_items: Callable) -> tuple[str, list[str]]:
     return f"org:{org}", sorted({n for n in names if isinstance(n, str)} | {repo})
 
 
-def recent_events(repo: str, since: str, gh_json: Callable) -> list[dict]:
+def recent_events(repo: str, since: str, gh_json: Callable, deadline: float | None = None) -> list[dict]:
     """repo's issue events created at or after `since`, a page at a time from the newest, so a
-    busy repo's whole history isn't read. Raises RuntimeError if they aren't newest first."""
+    busy repo's whole history isn't read. Raises RuntimeError if they aren't newest first, or
+    when a page is due after `deadline`."""
     out, page = [], 1
     while True:
+        if late(deadline):
+            raise RuntimeError(f"{repo}'s issue events: {OUT_OF_TIME}")
         batch = gh_json("api", f"repos/{repo}/issues/events?per_page=100&page={page}") or []
         times = [e.get("created_at") or "" for e in batch]
         if times != sorted(times, reverse=True):
@@ -338,18 +376,25 @@ def recent_events(repo: str, since: str, gh_json: Callable) -> list[dict]:
         page += 1
 
 
-def discover(owner: str, repo: str, since: str, gh_json: Callable, gh_items: Callable) -> list[tuple]:
+def discover(owner: str, repo: str, since: str, gh_json: Callable, gh_items: Callable,
+             deadline: float | None = None) -> list[tuple]:
     """(key, event, action, repo, number, ref) per lead for the owner's possible acts since
-    `since` in repo's org, found on GitHub rather than from webhooks. Raises RuntimeError."""
+    `since` in repo's org, found on GitHub rather than from webhooks. Each repo and search is
+    read in parallel (each). Raises RuntimeError, also when a read is due after `deadline`."""
     def search(q: str) -> list[tuple[str, int]]:
         items = gh_items(f"search/issues?q={urllib.parse.quote(q)}&per_page=100", ".items[]")
         return [(it["repository_url"].split("/repos/", 1)[1], it["number"]) for it in items
                 if isinstance(it.get("number"), int) and "/repos/" in (it.get("repository_url") or "")]
 
-    qual, repos = scope_repos(repo, gh_items)
-    found: list[tuple] = []
-    for r in repos:
-        for e in recent_events(r, since, gh_json):
+    def ok(results: list) -> list:
+        for x in results:
+            if isinstance(x, Exception):
+                raise x if isinstance(x, RuntimeError) else RuntimeError(str(x))
+        return results
+
+    def in_repo(r: str) -> list[tuple]:
+        found: list[tuple] = []
+        for e in recent_events(r, since, gh_json, deadline):
             n = (e.get("issue") or {}).get("number")
             if login(e.get("actor")) != owner or not isinstance(n, int) or e.get("id") is None:
                 continue
@@ -357,30 +402,43 @@ def discover(owner: str, repo: str, since: str, gh_json: Callable, gh_items: Cal
                 found.append((f"backfill:{r}:event:{e['id']}", "issues", "labeled", r, n, None))
             elif e.get("event") == "merged":
                 found.append((f"backfill:{r}#{n}:merge", "pull_request", "merged", r, n, None))
+        if late(deadline):
+            raise RuntimeError(f"{r}'s comments: {OUT_OF_TIME}")
         for c in gh_items(f"repos/{r}/issues/comments?since={since}&per_page=100"):
             num = (c.get("issue_url") or "").rsplit("/", 1)[-1]
             if (login(c.get("user")) == owner and (c.get("created_at") or "") >= since
                     and c.get("id") is not None and num.isdigit()):
                 found.append((f"backfill:{r}:comment:{c['id']}", "issue_comment", "created", r,
                               int(num), str(c["id"])))
-    for r, n in search(f"{qual} is:issue author:{owner} created:>={since}"):
-        found.append((f"backfill:{r}#{n}:open", "issues", "opened", r, n, None))
-    for r, n in search(f"{qual} is:pr reviewed-by:{owner} updated:>={since}"):
-        for rv in gh_items(f"repos/{r}/pulls/{n}/reviews?per_page=100"):
-            if (login(rv.get("user")) == owner and (rv.get("submitted_at") or "") >= since
-                    and rv.get("id") is not None):
-                found.append((f"backfill:{r}:review:{rv['id']}", "pull_request_review", "submitted",
-                              r, n, str(rv["id"])))
+        return found
+
+    def reviews(pr: tuple[str, int]) -> list[tuple]:
+        r, n = pr
+        if late(deadline):
+            raise RuntimeError(f"reviews on {r}#{n}: {OUT_OF_TIME}")
+        return [(f"backfill:{r}:review:{rv['id']}", "pull_request_review", "submitted", r, n, str(rv["id"]))
+                for rv in gh_items(f"repos/{r}/pulls/{n}/reviews?per_page=100")
+                if login(rv.get("user")) == owner and (rv.get("submitted_at") or "") >= since
+                and rv.get("id") is not None]
+
+    qual, repos = scope_repos(repo, gh_items)
+    queries = [f"{qual} is:issue author:{owner} created:>={since}",
+               f"{qual} is:pr reviewed-by:{owner} updated:>={since}"]
+    *per_repo, opened, reviewed = ok(each(lambda job: job[0](job[1]),
+                                          [(in_repo, r) for r in repos] + [(search, q) for q in queries]))
+    found = [x for leads in per_repo for x in leads]
+    found += [(f"backfill:{r}#{n}:open", "issues", "opened", r, n, None) for r, n in opened]
+    found += [x for leads in ok(each(reviews, reviewed)) for x in leads]
     return found
 
 
 def backfill(state_dir: Path, owner: str, report: tuple[str, int] | None, repo: str,
              gh_json: Callable, gh_items: Callable, protected: Callable[[str], bool],
              days: list[dt.date], now: dt.datetime | None = None,
-             tz: dt.tzinfo | None = None) -> list[str]:
+             tz: dt.tzinfo | None = None, deadline: float | None = None) -> list[str]:
     """Read the owner's acts on each of `days` that is due (day_state) back from GitHub as leads,
-    then sync() every unread lead. The window counts only once no backfilled lead is left
-    unread. Returns the errors, sync()'s included."""
+    then sync() every unread lead, starting no read after `deadline`. The window counts only once
+    no backfilled lead is left unread. Returns the errors, sync()'s included."""
     now = now or dt.datetime.now(dt.timezone.utc)
     db = connect(state_dir)
     try:
@@ -390,7 +448,7 @@ def backfill(state_dir: Path, owner: str, report: tuple[str, int] | None, repo: 
         if due:
             start, end = min(a for a, _ in due), max(b for _, b in due)
             try:
-                found = discover(owner, repo, utc(start), gh_json, gh_items)
+                found = discover(owner, repo, utc(start), gh_json, gh_items, deadline)
             except RuntimeError as e:
                 errors.append(f"backfill from {utc(start)}: {e}")
                 due = []
@@ -401,7 +459,7 @@ def backfill(state_dir: Path, owner: str, report: tuple[str, int] | None, repo: 
                 db.execute("COMMIT")
     finally:
         db.close()
-    errors += sync(state_dir, owner, report, gh_json, gh_items, protected, now)
+    errors += sync(state_dir, owner, report, gh_json, gh_items, protected, now, deadline)
     if due:
         db = connect(state_dir)
         try:
@@ -429,10 +487,12 @@ def backfilled(state_dir: Path) -> list[tuple[dt.datetime, dt.datetime]]:
 def refresh(state_dir: Path, owner: str, report: tuple[str, int] | None, repo: str,
             gh_json: Callable, gh_items: Callable, protected: Callable[[str], bool],
             days: list[dt.date], now: dt.datetime | None = None,
-            tz: dt.tzinfo | None = None) -> tuple[list[dict], list[str]]:
-    """backfill(), then per_day() for `days`: what `swarm acts` and `swarm trouble` read."""
+            tz: dt.tzinfo | None = None, deadline: float | None = None) -> tuple[list[dict], list[str]]:
+    """backfill(), then per_day() for `days`: what `swarm acts` and `swarm trouble` read.
+    `swarm trouble` passes a deadline (#858); `swarm acts` doesn't."""
     now = now or dt.datetime.now(dt.timezone.utc)
-    errors = backfill(state_dir, owner, report, repo, gh_json, gh_items, protected, days, now, tz)
+    errors = backfill(state_dir, owner, report, repo, gh_json, gh_items, protected, days, now, tz,
+                      deadline)
     return per_day(stored(state_dir), days, tz, now, backfilled(state_dir)), errors
 
 
