@@ -82,9 +82,13 @@ QUIET_EVENTS = {"heartbeat", "prompt_submitted"}
 STATUS_ORDER = {"blocked": 0, "active": 1, "idle": 2, "stopped": 3}
 
 REVIEWER = "productswarm-reviewer[bot]"
-BUILDER = "productswarm-builder"   # the App GOV-0011's [respond] starts; `gh` shows it as app/<slug>
+# The roles whose own PRs GOV-0011's [respond] (and #739's [ruling]) restart: the PR's author
+# role, not only the builder (#738, Option 1 of the owner's answer on #777). The reviewer
+# opens no PRs. A PR by the owner or any other login has no role, so it stays the owner's.
+RESPONDERS = ("builder", "planner", "docs", "designer", "analyst")
+BUILDER = "productswarm-builder"   # the builder App; `gh` shows it as app/<slug>
 CHANGES = "CHANGES_REQUESTED"
-ROUNDS = 2         # builder rounds per PR before the owner steps in (GOV-0011)
+ROUNDS = 2         # author rounds per PR before the owner steps in (GOV-0011)
 # The rubric line roles/reviewer.md asks for: "- **Authority:** pass|fail".
 AUTHORITY_RE = re.compile(r"^[\s>*-]*Authority\s*:?[\s*]*:?\s*(pass|fail)\b", re.I | re.M)
 
@@ -245,23 +249,24 @@ def pr_role(author: str) -> str | None:
 
 
 def past_bound(changes_requested: int) -> bool:
-    """GOV-0011's round bound: the builder gets ROUNDS rounds, so the reviewer App's
+    """GOV-0011's round bound: the PR's author role gets ROUNDS rounds, so the reviewer App's
     (ROUNDS + 1)th "changes requested" on a PR sends it to the owner. evals/red_check.py
     (#330) counts with this too."""
     return changes_requested > ROUNDS
 
 
 def needs_owner(r: dict, author: str) -> str | None:
-    """Why GOV-0011 hands this PR to the owner instead of the builder, else None.
+    """Why GOV-0011 hands this PR to the owner instead of its author's role, else None.
 
-    The builder responds only on its own PR (GOV-0011), so requested changes on a PR
-    another author opened (a docs ruling PR, say) go to the owner too (#178)."""
+    A role responds only on a PR its own App opened, and only the RESPONDERS do (#738,
+    Option 1 of the owner's answer on #777), so requested changes on a PR the owner or
+    another login opened go to the owner too (#178)."""
     if r["at_head"] is None:
         return None
     if r["authority"] == "fail":
         return "overstep: needs the owner"
     role = pr_role(author)
-    if r["at_head"] == CHANGES and f"productswarm-{role}" != BUILDER:
+    if r["at_head"] == CHANGES and role not in RESPONDERS:
         return f"changes requested on a {role or 'non-swarm'} PR: needs the owner"
     if r["at_head"] == CHANGES and past_bound(r["changes_requested"]):
         return f"changes requested {r['changes_requested']} times: needs the owner"

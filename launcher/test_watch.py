@@ -1348,13 +1348,51 @@ class RespondTest(unittest.TestCase):
             self.assertEqual(self.needs_you(), ["overstep: needs the owner, closes #73"])
         self.assertEqual(self.fake.commands, [])
 
-    def test_changes_on_another_apps_pr_start_nothing_and_list_the_pr(self):
-        """#178: a docs ruling PR with requested changes goes to the owner, not the builder."""
+    def test_changes_on_an_analyst_pr_start_the_analyst_and_an_overstep_starts_none(self):
+        """#738 (Option 1 of the owner's answer on #777): [respond] starts the PR's author role."""
+        self.scene.prs[0]["author"] = {"login": "productswarm-analyst[bot]"}
+        self.manifest(ALL_CAPPED, extra='[[session]]\nrole = "analyst"\ncount = 1\n'
+                                        'model = "m-analyst"\nspend_cap_usd = 10\n')
+        roles = ROLES | {"analyst"}
+        self.watcher = lambda: watch.Watch(self.l, REPO, OWNER, roles, dry_run=False,
+                                           manifest_path=self.path, read=self.scene.read,
+                                           get_issue=self.scene.get_issue,
+                                           get_heartbeat=self.scene.heartbeat,
+                                           get_reader=self.scene.get_reader)
+        self.request(SHA1)
+        [t] = self.watcher().tick(NOW)
+        self.assertEqual((t.kind, t.role, t.issue, t.pr), ("respond", "analyst", 73, 72))
+        self.assertEqual(self.started(), [("analyst-pr-72", "analyst", "m-analyst", 73, "watch")])
+        self.assertIn("You are the analyst for productswarm. Read CLAUDE.md, PRODUCT.md and "
+                      "roles/analyst.md, then respond to the requested changes on PR #72",
+                      self.fake.commands[0])
+        self.exit("analyst-pr-72")
+        self.scene.prs[0]["headRefOid"] = SHA2                  # the analyst pushed
+        self.watcher().tick(NOW)
+        self.exit("reviewer-watch")
+        self.request(SHA2, authority="fail")                     # an overstep on the new head
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.assertEqual(len(self.fake.commands), 2)            # the analyst, then a reviewer
+        self.assertEqual(self.needs_you(), ["overstep: needs the owner, closes #73"])
+
+    def test_a_docs_record_pr_on_a_ruled_question_starts_docs(self):
+        """#738: a docs ruling PR closes a gov:question, which the owner's gov:ruled makes go."""
+        self.scene.issues = [issue(73, ["gov:question", "gov:ruled"])]
+        self.scene.events = {73: [ev("gov:ruled", eid=15)]}
         self.scene.prs[0]["author"] = {"login": "app/productswarm-docs"}
         self.request(SHA1)
-        self.assertEqual(self.watcher().tick(NOW), [])
+        self.assertEqual([(t.kind, t.role) for t in self.watcher().tick(NOW)], [("respond", "docs")])
+        self.assertEqual(self.started(), [("docs-pr-72", "docs", "m-docs", 73, "watch")])
+
+    def test_changes_on_a_pr_no_role_opened_start_nothing_and_list_the_pr(self):
+        """#178: a PR the owner (or any non-swarm login) opened stays the owner's."""
+        for login, who in [(OWNER, "non-swarm"), ("productswarm-stranger[bot]", "stranger")]:
+            self.scene.prs[0]["author"] = {"login": login}
+            self.scene.reviews = {}
+            self.request(SHA1)
+            self.assertEqual(self.watcher().tick(NOW), [])
+            self.assertEqual(self.needs_you(), [f"changes requested on a {who} PR: needs the owner, closes #73"])
         self.assertEqual(self.fake.commands, [])
-        self.assertEqual(self.needs_you(), ["changes requested on a docs PR: needs the owner, closes #73"])
 
     def test_comment_or_approve_starts_nothing(self):
         for state in ("COMMENTED", "APPROVED"):
@@ -1464,11 +1502,20 @@ class RulingTest(unittest.TestCase):
         self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["review"])
         self.assertEqual([c for c in self.fake.commands if "ruling" in c], [])
 
-    def test_another_apps_pr_or_one_closing_no_issue_is_skipped(self):
+    def test_another_roles_pr_starts_that_role(self):
+        """#738: a ruling starts the PR's author role, as [respond] does."""
         self.say(901)
         self.scene.prs[0]["author"] = {"login": "app/productswarm-docs"}
+        self.assertEqual([(t.kind, t.role) for t in self.watcher().tick(NOW)], [("ruling", "docs")])
+        self.assertEqual(self.started(), [("docs-pr-72", "docs", "m-docs", 73, "watch")])
+        self.assertIn("as roles/docs.md says", self.fake.commands[0])
+
+    def test_a_non_swarm_pr_or_one_closing_no_issue_is_skipped(self):
+        self.say(901)
+        self.scene.prs[0]["author"] = {"login": OWNER}
         self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["ruling"])
-        self.assertIn("skipped: it is a docs PR, and only the builder is started on a ruling", self.lines[-1])
+        self.assertIn("skipped: it is a non-swarm PR, and a ruling starts only builder, planner",
+                      self.lines[-1])
         self.scene.prs, self.scene.issues = [pr(72, SHA1)], []
         self.say(902, minutes_ago=5)
         self.watcher().tick(NOW)

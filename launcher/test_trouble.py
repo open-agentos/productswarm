@@ -196,12 +196,18 @@ class Progress(unittest.TestCase):
 
 
 class Stuck(unittest.TestCase):
-    def test_rule1_changes_on_non_builder_pr(self):
-        p = pr(704, 692, author="app/productswarm-analyst", reviews=[review("CHANGES_REQUESTED", 13.5)])
+    def test_rule1_changes_on_a_pr_no_role_opened(self):
+        p = pr(704, 692, author="someone", reviews=[review("CHANGES_REQUESTED", 13.5)])
         r = trouble.report(data(issues=[M1, issue(692)], scopes={692: under(1)}, prs=[p]))
         [x] = scope(r)["stuck"]
         self.assertEqual((x["kind"], x["ref"], x["age_hours"]), ("changes-no-restart", "PR #704", 13.5))
-        self.assertIn("no trigger restarts the analyst", x["reason"])
+        self.assertIn("no trigger restarts the author", x["reason"])
+
+    def test_rule1_analyst_pr_is_restarted_by_respond(self):
+        # #704's shape: since #738, [respond] restarts the analyst on its own PR.
+        p = pr(704, 692, author="app/productswarm-analyst", reviews=[review("CHANGES_REQUESTED", 13.5)])
+        r = trouble.report(data(issues=[M1, issue(692)], scopes={692: under(1)}, prs=[p]))
+        self.assertEqual(scope(r)["stuck"] + scope(r)["waiting"], [])
 
     def test_rule1_builder_pr_is_restarted_by_respond(self):
         p = pr(5, 692, reviews=[review("CHANGES_REQUESTED", 2)])
@@ -209,9 +215,10 @@ class Stuck(unittest.TestCase):
         self.assertEqual(scope(r)["stuck"] + scope(r)["waiting"], [])
 
     def test_rule1_overstep_waits_then_stuck_once_owner_answers(self):
-        # An overstep is a COMMENTED review with Authority: fail; [ruling] doesn't start docs.
+        # An overstep is a COMMENTED review with Authority: fail; [ruling] starts no role on a
+        # PR no role's App opened.
         rv = review("COMMENTED", 20, body="**Authority:** fail")
-        p = pr(679, 661, author="app/productswarm-docs", reviews=[rv])
+        p = pr(679, 661, author="someone", reviews=[rv])
         r = trouble.report(data(issues=[M1, issue(661)], scopes={661: under(1)}, prs=[p]))
         self.assertEqual(scope(r)["stuck"], [])
         [w] = scope(r)["waiting"]
@@ -221,7 +228,7 @@ class Stuck(unittest.TestCase):
         [x] = scope(r)["stuck"]
         self.assertEqual((x["ref"], x["age_hours"]), ("PR #679", 13.5))
         self.assertIn("answered", x["reason"])
-        self.assertIn("[ruling] restarts only builder", x["reason"])
+        self.assertIn("[ruling] restarts only builder and planner and docs", x["reason"])
         self.assertEqual(scope(r)["waiting"], [])
 
     def test_rule1_overstep_679_shape(self):
@@ -250,14 +257,14 @@ class Stuck(unittest.TestCase):
     def test_rule1_restart_roles_come_from_watch(self):
         p = pr(704, 692, author="app/productswarm-analyst", reviews=[review("CHANGES_REQUESTED", 13.5)])
         d = dict(issues=[M1, issue(692)], scopes={692: under(1)}, prs=[p])
-        self.assertEqual(len(scope(trouble.report(data(**d)))["stuck"]), 1)
+        self.assertEqual(scope(trouble.report(data(**d)))["stuck"], [])
         old = watch.RESPOND_ROLES
         try:
-            watch.RESPOND_ROLES = ("builder", "analyst")
+            watch.RESPOND_ROLES = ("builder",)
             r = trouble.report(data(**d))
         finally:
             watch.RESPOND_ROLES = old
-        self.assertEqual(scope(r)["stuck"] + scope(r)["waiting"], [])
+        self.assertEqual(len(scope(r)["stuck"]), 1)
 
     def test_rule1_past_round_bound_waits_then_stuck(self):
         rvs = [review("CHANGES_REQUESTED", h, commit=c) for h, c in ((9, "b" * 40), (6, "c" * 40))]

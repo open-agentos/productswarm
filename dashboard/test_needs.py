@@ -156,16 +156,18 @@ class ReviewerStateTest(unittest.TestCase):
         _, detail = self.detail([review("COMMENTED", "old", authority="fail")])  # an older head
         self.assertEqual(detail, "no reviewer review at hhhhhhh, closes #4")   # #332
 
-    def test_changes_on_a_pr_the_builder_did_not_open_need_the_owner(self):
-        """#178: the builder responds only on its own PR (GOV-0011)."""
-        for author, who in [("app/productswarm-docs", "docs"), ("productswarm-docs[bot]", "docs"),
-                            ("mattmcalister", "non-swarm")]:
+    def test_changes_on_a_pr_no_role_opened_need_the_owner(self):
+        """#178: a role responds only on its own PR (GOV-0011); #738 made that any author role."""
+        for author, who in [("mattmcalister", "non-swarm"), ("app/productswarm-reviewer", "reviewer"),
+                            ("productswarm-stranger[bot]", "stranger")]:
             _, detail = self.detail([review("CHANGES_REQUESTED", self.HEAD)], author)
             self.assertEqual(detail, f"changes requested on a {who} PR: needs the owner, closes #4")
             _, detail = self.detail([review("COMMENTED", self.HEAD)], author)
             self.assertEqual(detail, "awaiting review, closes #4")
-        _, detail = self.detail([review("CHANGES_REQUESTED", self.HEAD)], "productswarm-builder[bot]")
-        self.assertEqual(detail, "awaiting review, closes #4")
+        for author in ("productswarm-builder[bot]", "app/productswarm-docs", "productswarm-docs[bot]",
+                       "productswarm-analyst[bot]", "app/productswarm-planner"):
+            _, detail = self.detail([review("CHANGES_REQUESTED", self.HEAD)], author)
+            self.assertEqual(detail, "awaiting review, closes #4", author)
 
     def test_comment_or_approve_is_not_the_owners(self):
         for state in ("COMMENTED", "APPROVED"):

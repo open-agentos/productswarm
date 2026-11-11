@@ -145,8 +145,8 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     owner's question, from comment ask_comment on the report issue, in one comment there.
     With research, a [research] run (GOV-0029, #591): the analyst writes a brief on the
     question from comment research_comment in research/, as a PR that closes the issue. With
-    ruling and a PR, a [ruling] run (#739, the owner's answer on #781): the builder applies
-    the owner's comment ruling_comment on an overstep on the PR."""
+    ruling and a PR, a [ruling] run (#739, the owner's answer on #781): the PR's author role
+    applies the owner's comment ruling_comment on an overstep on the PR (#738)."""
     if issue and research:
         # As for an ask: "issue #M" in the question would give the heartbeat two issues.
         safe = ISSUE_WORD_RE.sub(r"#\1", research)
@@ -182,7 +182,7 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
                 f"swarm watch started this run from its [ruling] trigger (#739): the owner commented "
                 f"on the PR after the reviewer's Authority: fail review{where}: \"{ruling}\". Read the "
                 f"review and that comment in full, then push a fix that follows the ruling to the PR's "
-                f"branch, or reply on the PR saying why you can't, as roles/builder.md says, and stop")
+                f"branch, or reply on the PR saying why you can't, as roles/{role}.md says, and stop")
     elif issue and pr:
         then = f"respond to the requested changes on PR #{pr}, which closes issue #{issue}"
     elif pr:     # a reviewer on one PR: a run in GitHub Actions (#215)
