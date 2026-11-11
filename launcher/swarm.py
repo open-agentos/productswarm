@@ -16,6 +16,9 @@
                                     --last for the week before
     launcher/swarm daily            the last 10 working days' daily reports and who started
                                     each, and M1's streak (#707)
+    launcher/swarm acts [--day D] [--json]
+                                    the owner's acts on each of the last 10 working days, or
+                                    on day D, with count and kind (#771; acts.py)
     launcher/swarm watch [--dry-run] [--serve] [--container IMAGE]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
@@ -1290,6 +1293,41 @@ def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DE
     return 0
 
 
+# ---------------------------------------------------------------- acts (#771)
+
+def owner_acts(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DEFAULT_PATH,
+               day: dt.date | None = None, as_json: bool = False, now: dt.datetime | None = None,
+               tz: dt.tzinfo | None = None, owner: str | None = None, gh_json: Callable | None = None,
+               gh_items: Callable | None = None) -> int:
+    """`swarm acts`: read the webhook leads back from GitHub (acts.sync), then print the owner's
+    acts for each of the last 10 working days, or for `day`, from swarm.db."""
+    import acts
+    import merger
+    try:
+        limits = manifest.load_watch(manifest_path)
+    except manifest.ManifestError as e:
+        launcher.out(f"swarm acts: {e}")
+        return 1
+    report = (repo, limits.report_issue) if limits and limits.report_issue else None
+    owner = owner or owner_login()
+    g = None if gh_json and gh_items else dashboard()
+    errors = acts.sync(launcher.dir, owner, report, gh_json or g.gh_json, gh_items or g.gh_items,
+                       merger.is_protected)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    days = [day] if day else working_days((now.astimezone(tz) if tz else now.astimezone()).date())
+    rows = acts.per_day(acts.stored(launcher.dir), days, tz)
+    if as_json:
+        launcher.out(json.dumps({"owner": owner, "days": rows, "unread_errors": errors}, indent=2))
+    else:
+        launcher.out(acts.text(rows, owner, repo))
+        for e in errors:
+            launcher.out(f"swarm acts: not read yet, will retry: {e}")
+        if not report:
+            launcher.out(f"swarm acts: {manifest_path} has no [watch] report_issue, so no act "
+                         f"is counted as 'report'")
+    return 0
+
+
 # ---------------------------------------------------------------- launch (L3)
 
 JURISDICTIONS = ROOT / "governance" / "jurisdictions.yml"
@@ -1678,6 +1716,11 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_daily = sub.add_parser("daily", help="the last 10 working days' daily reports and the streak")
     p_daily.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_daily.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
+    p_acts = sub.add_parser("acts", help="the owner's acts per working day, with count and kind (M4 checks 1-2)")
+    p_acts.add_argument("--day", type=dt.date.fromisoformat, help="YYYY-MM-DD (default: last 10 working days)")
+    p_acts.add_argument("--json", action="store_true", dest="as_json", help="the same per-day list as JSON")
+    p_acts.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_acts.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_launch = sub.add_parser("launch", help="start one session on a given issue")
     p_launch.add_argument("role")
     p_launch.add_argument("--issue", type=int, required=True, help="the issue to work on")
@@ -1752,7 +1795,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             launcher.out(f"swarm watch: {e}")
             return 2
     repo = None
-    if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges", "daily"):
+    if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges", "daily", "acts"):
         repo = args.repo or dashboard().default_repo()
         if not repo:
             launcher.out(f"swarm {args.cmd}: can't tell the repo; pass --repo owner/name")
@@ -1788,6 +1831,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return status(launcher, args.manifest)
         if args.cmd == "daily":
             return daily(launcher, repo, args.manifest)
+        if args.cmd == "acts":
+            return owner_acts(launcher, repo, args.manifest, args.day, args.as_json)
         if args.cmd == "watch":
             import watch
             try:

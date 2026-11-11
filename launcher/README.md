@@ -244,6 +244,19 @@ Goal and Area edits not made by @mattmcalister since Fri 2026-11-06 00:00 (GOV-0
 - **`M1: day N of 5`** goes in the daily report's first line (#709). N is the streak, plus today once a `[daily]` run has started today's report, since that run's report is the day being counted. Before any `[daily]` run today it says today isn't counted; a report started by hand today makes it day 0. At 5 or more it says the done test is met.
 - **Goal and Area edits** (#709, GOV-0031): edits since the start of the previous working day to an open or closed Goal or Area issue the owner opened, by anyone but the owner: body edits, renames, closes and reopens. It searches the repo owner's account, so Goals in any of its repos count, with one GraphQL search per type. The planner lists them under Risks. If an issue's history is too long to read whole, it says to check that one by hand; if the search fails, it says so in one line and the rest still prints.
 
+## swarm acts: the owner's acts per day (#771)
+
+```
+launcher/swarm acts [--day YYYY-MM-DD] [--json] [--manifest swarm.toml] [--repo owner/name]
+```
+
+The owner's acts on each of the last 10 working days (Monday to Friday, local time), or on `--day`: the count, and each act with its time, kind and link. This is the evidence for M4's readiness checks 1 (under 5 a day) and 2 (only C-team acts). `--json` gives the same per-day list, with `under_limit` and `c_team` per day, for the daily report and the review.
+
+- **Kept from webhooks, not the events API**, which holds 300 events. For each delivery that could be an owner act, `swarm webhooks` stores a lead in `swarm.db`'s `act_leads`: event, action, repo, number, the comment or review id or label name, and the sender. No body. `swarm acts` first reads each unread lead the owner sent back from GitHub (the receiver holds only `WEBHOOK_SECRET`, so it can't), then prints from the `acts` table. A lead that couldn't be read is retried on the next run.
+- **Counts:** labels, issue and PR comments, reviews (an inline comment is part of one), merges, and issues opened other than Goals and Areas. **Doesn't count:** opening or editing a Goal or Area (a label on one is an edit), closing an issue, reading the report or the Desk.
+- **Kinds:** `plan` (on a Mission, Goal or Area, or a `hold` veto), `report` (on `[watch] report_issue`), `ask` (on a `gov:question`, or approving a protected-path PR), `protected-merge`, and `other`, which fails check 2.
+- **Gaps:** an act the receiver never got (it was down, or the App isn't subscribed to Issues, Issue comments, Pull requests and Pull request reviews) isn't counted; nor are Discussion comments or back-room repairs.
+
 ## swarm watch: the wake-up loop
 
 ```bash
