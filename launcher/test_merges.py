@@ -42,6 +42,48 @@ class WeekTest(unittest.TestCase):
         self.assertEqual(swarm.week_of(now)[0], END)
 
 
+def enqueued(oid=HEAD, login="productswarm-merger"):
+    return {"author": {"login": login},
+            "body": f"Enqueued under standing grant (GOV-0027) at {oid}.\n\n-- merger"}
+
+
+class QueuedMergeTest(unittest.TestCase):
+    """#746: under a merge queue GitHub does the final merge, so mergedBy may not be the merger."""
+
+    def text(self, prs):
+        return swarm.merges_text(prs, OWNER, START, END)
+
+    def queued(self, n, by="github-merge-queue", comments=None, **kw):
+        p = pr(n, by, **kw)
+        p["comments"] = [enqueued()] if comments is None else comments
+        return p
+
+    def test_a_merge_the_merger_enqueued_is_the_mergers(self):
+        out = self.text([self.queued(1), self.queued(2, by="productswarm-merger"), pr(3, OWNER)])
+        self.assertIn("by the merger (productswarm-merger[bot]): 2", out)
+        self.assertIn(f"by the owner (@{OWNER}): 1", out)
+        self.assertNotIn("anyone else", out)
+
+    def test_enqueued_at_another_head_or_by_someone_else_doesnt_count(self):
+        out = self.text([self.queued(1, comments=[enqueued(oid=OLD)]),
+                         self.queued(2, comments=[enqueued(login="someone")]),
+                         self.queued(3, comments=[])])
+        self.assertIn("by the merger (productswarm-merger[bot]): 0", out)
+        self.assertIn("by anyone else: 3 (@github-merge-queue)", out)
+
+    def test_the_owners_own_merge_stays_the_owners(self):
+        out = self.text([self.queued(1, by=OWNER)])
+        self.assertIn(f"by the owner (@{OWNER}): 1", out)
+
+    def test_a_queued_revert_names_the_merger(self):
+        out = self.text([self.queued(9, title='Revert "x"', body="Reverts #8",
+                                     reviews=[review("productswarm-reviewer")])])
+        self.assertIn("#9 reverts #8, merged by @productswarm-merger: reviewed", out)
+
+    def test_asks_gh_for_comments(self):
+        self.assertIn("comments", swarm.MERGE_FIELDS.split(","))
+
+
 class MergesTextTest(unittest.TestCase):
     def text(self, prs):
         return swarm.merges_text(prs, OWNER, START, END)

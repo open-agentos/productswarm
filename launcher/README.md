@@ -209,7 +209,7 @@ Reverts: 1, 1 unreviewed
   #646 reverts #640, merged by @mattmcalister: not reviewed (no approval at head by the reviewer or the owner)
 ```
 
-- **Who merged** is each PR's `merged_by` on GitHub. The owner is `humans.owner` in `jurisdictions.yml`. Anyone else gets a `by anyone else` line with their logins.
+- **Who merged** is each PR's `merged_by` on GitHub, except under a merge queue (#663), where GitHub does the final merge: a PR whose comments include the merger's `Enqueued under ... at <sha>` for its merged head counts as the merger's, unless `merged_by` is the owner (#746). The owner is `humans.owner` in `jurisdictions.yml`. Anyone else gets a `by anyone else` line with their logins.
 - **A revert** is a merged PR whose body has GitHub's `Reverts owner/repo#N` line or git's `This reverts commit` line, or whose title starts with `Revert`.
 - **Reviewed** means GOV-0027's test at the merged head: the latest approve or request-changes review on that commit by the reviewer App or the owner is an approval, and neither has changes requested there.
 
