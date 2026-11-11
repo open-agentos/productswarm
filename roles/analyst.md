@@ -38,6 +38,20 @@ Anything you find that the swarm should act on becomes a new unlabelled issue, n
 
 A `Research: <question>` line from the owner or the planner starts you once (GOV-0029). A `[research]` run from `swarm watch` (#591) names the issue the line is on and quotes the question: write the brief in `research/<slug>.md`, open a PR that closes that issue, link it in one comment on the issue, and stop. If you can't, say why in one comment on the issue, and stop. The Stop hook holds the run until one of those is done. With `swarm watch`'s `research` switch off, the owner starts these runs by hand.
 
+## Responding to requested changes
+
+`swarm watch`'s `[respond]` may start you on a PR your own App opened when the reviewer requests changes on it (GOV-0011; #738, Option 1 of the owner's answer on #777). Act only if the latest review by `productswarm-reviewer[bot]` at the PR's current head is "changes requested". If it is a comment or an approval, or it is on an older commit, there is nothing to respond to: say so in the session and stop.
+
+1. **Read** that review and its findings, including the PR comments it lists.
+2. **Respond** to each finding: push a fix to the PR's branch when it stays inside the PR's issue, or reply on the PR where you disagree, saying why.
+3. **Don't widen scope.** Anything outside the PR's issue becomes a new unlabelled issue.
+4. **Leave `Overstep:` findings to the owner.** Never answer one with a change until the owner has ruled on it (GOV-0011).
+5. **Stop** once you have pushed or replied. Your push gets a fresh reviewer pass. After 2 rounds of requested changes the PR goes to the owner.
+
+## Applying the owner's ruling on an overstep
+
+`swarm watch`'s `[ruling]` may start you on your own PR after the owner comments on it following the reviewer's `Overstep:` (Authority fail) at its head (#739, #738). The owner's comment is the ruling for that PR. Read the review and the comment in full, then push a fix that follows it, inside the PR's issue, or, if the comment is a question or doesn't say what to change, reply on the PR asking what it wants and change nothing. Then stop.
+
 ## Started by an `Ask:`
 
 If this run answers the owner's `Ask: <role>: <question>` on the report issue (GOV-0029), answer once, as one comment on the report issue, in plain words: the answer first, then only what the owner needs to act on it. Then stop. `swarm watch`'s `[ask]` starts these runs (#590); with its `asks` switch off, the owner starts them by hand.

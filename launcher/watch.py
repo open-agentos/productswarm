@@ -20,8 +20,8 @@ it has none (for example, the role has no spend_cap_usd).
 |        | needs a record (GOV-0007), with no open PR closing it                   |                      |
 | answer | gov:question whose most recent `ready` was added by the owner, again    | its "Raised by" role |
 |        | when the owner then adds `gov:ruled` (#495)                             | (planner if owner)   |
-| respond| open, non-draft PR the builder App opened, whose latest reviewer review | builder on the PR    |
-|        | at its head is CHANGES_REQUESTED, with Authority not `fail`, for at     | (GOV-0011)           |
+| respond| open, non-draft PR a role's App opened, whose latest reviewer review    | that role on the PR  |
+|        | at its head is CHANGES_REQUESTED, with Authority not `fail`, for at     | (GOV-0011, #738)     |
 |        | most 2 rounds                                                           |                      |
 | call-in| a `Call in: <role>, <role>: <why>` line in a comment on an issue whose  | each named role on   |
 |        | most recent `ready` was added by the owner, posted since that label, or | the issue, once per  |
@@ -33,7 +33,7 @@ it has none (for example, the role has no spend_cap_usd).
 |        | with asks = true (GOV-0029, #590)                                       | report issue, once   |
 | research| a `Research: <question>` comment by the owner or the planner App on an | analyst on that      |
 |        | open issue, with research = true (GOV-0029, #591)                       | issue, once          |
-| ruling | the owner's comment on an open builder PR, posted after the reviewer's  | builder on the PR,   |
+| ruling | the owner's comment on an open role's PR, posted after the reviewer's   | that role on the PR, |
 |        | Authority: fail review at its head (#739, the owner's answer on #781)   | once per comment     |
 
 [daily] (#588, GOV-0029): with `daily = true` in [watch], once each working day (Monday to
@@ -105,9 +105,11 @@ milestone again on fresh data.
 
 [respond] counts the reviewer's CHANGES_REQUESTED reviews on the PR from GitHub's review
 history, so the count holds across restarts. A third request starts nothing, and an
-Authority: fail review at the head starts nothing either, and nor do requested changes
-on a PR another App opened, such as a docs ruling PR (#178): the builder responds only on
-its own PR (GOV-0011). `needs_you()` lists all three as needing the owner. A PR that doesn't close exactly one issue is skipped with a reason.
+Authority: fail review at the head starts nothing either. Requested changes start the PR's
+author role, read from its App login (#738, Option 1 of the owner's answer on #777):
+the builder, planner, docs, designer or analyst, each only on a PR its own App opened, with
+its own spend cap. Requested changes on a PR the owner or any other login opened start
+nothing (#178). `needs_you()` lists all three as needing the owner. A PR that doesn't close exactly one issue is skipped with a reason.
 
 [ruling] (#739, Option 1 of the owner's answer on #781; direction until its record merges):
 an overstep (an Authority: fail review at the head) starts nothing by itself (GOV-0011), but
@@ -117,9 +119,9 @@ while its latest reviewer review at head is Authority: fail. Only comments by th
 (the same login `ready` is checked against, GOV-0006) posted after that review count; each
 is keyed on its id (`ruling:<PR>:<comment id>`), so each starts at most one run, and any
 owner comment there counts, even a question. A push moves the head and ends it: the new
-head is reviewed again. Until #777 rules which role [respond] starts, only the builder is
-started, on its own PR: an owner comment on another App's PR is skipped with a reason, as is
-a PR that doesn't close exactly one issue. It waits while a session is live on the PR's
+head is reviewed again. It starts the PR's author role, as [respond] does (#738): an owner
+comment on a PR no role's App opened is skipped with a reason, as is a PR that doesn't close
+exactly one issue. It waits while a session is live on the PR's
 issue, like [respond]. Its prompt quotes the comment (RULING_MAX characters, whitespace
 folded) and names its id; stophook.py holds the run until it pushed (the head is no longer
 Authority: fail) or commented on the PR, or the PR closed.
@@ -308,11 +310,11 @@ RESEARCH = "research"         # GOV-0029's Research: trigger (#591)
 RESEARCH_RE = re.compile(r"^[ \t]*Research:[ \t]*([^\n]*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 RULING = "ruling"             # the owner's ruling on an overstep (#739, #781)
 RULING_MAX = 1500             # characters of the owner's ruling that go into the prompt
-# The roles [respond] and [ruling] start, each on a PR its own App opened: GOV-0011 restarts
-# only the builder (generate.needs_owner hands any other PR to the owner), and #777 rules
-# whether that changes. `swarm trouble` reads these to tell stuck PRs from restarted ones (#828).
-RESPOND_ROLES = ("builder",)
-RULING_ROLES = ("builder",)
+# The roles [respond] and [ruling] start, each on a PR its own App opened: the PR's author
+# role (#738, Option 1 of the owner's answer on #777), from the dashboard's RESPONDERS, which
+# generate.needs_owner reads too; it hands any other PR to the owner. `swarm trouble` reads
+# these to tell stuck PRs from restarted ones (#828).
+RESPOND_ROLES = RULING_ROLES = swarm.dashboard().RESPONDERS
 RESEARCH_DAYS = 7             # how far back [research] reads the repo's comments
 PLANNER_APP = "productswarm-planner[bot]"   # whose Research: lines count, with the owner's
 WORKDAYS = range(5)           # Monday to Friday, by date.weekday()
@@ -370,7 +372,7 @@ class Trigger:
     command: str | None = None
     skipped: str | None = None
     issue: int | None = None  # the issue the session works on (none for a reviewer pass)
-    pr: int | None = None     # [respond]: the PR the builder responds on
+    pr: int | None = None     # [respond]: the PR its author role responds on
     after: str | None = None  # [answer]: the [record] key that must be acted on first (#495)
     held: str | None = None   # why it is held: a live session on the issue (#488), or [build]'s
                               # open Waits-on issues (#490); a held trigger starts nothing
@@ -383,7 +385,7 @@ class Trigger:
     research: str | None = None   # [research]: the question, for the analyst's prompt (#591)
     research_comment: int | None = None   # [research]: the comment that asked it
     repo: str | None = None       # another repo of the org it is in (#772); None: this one
-    ruling: str | None = None     # [ruling]: the owner's comment, for the builder's prompt (#739)
+    ruling: str | None = None     # [ruling]: the owner's comment, for the role's prompt (#739)
     ruling_comment: int | None = None   # [ruling]: that comment's id
 
     def line(self) -> str:
@@ -1054,24 +1056,26 @@ def blocked(body: str | None, w: World) -> str | None:
 
 
 def respond(p: dict, busy: Callable[[int], tuple[str, str] | None]) -> Trigger | None:
-    """GOV-0011's [respond] trigger for one open, non-draft PR, or None.
+    """GOV-0011's [respond] trigger for one open, non-draft PR, or None. It starts the PR's
+    author role, from its App login (#738, Option 1 of the owner's answer on #777).
 
-    Oversteps, a third request and requested changes on a PR the builder didn't open (#178)
-    are the owner's: needs_you() lists those PRs instead."""
+    Oversteps, a third request and requested changes on a PR no RESPOND_ROLES App opened
+    (#178) are the owner's: needs_you() lists those PRs instead."""
     g = swarm.dashboard()
     r, n, head = p["reviewer"], p["number"], p["head"]
-    if r["at_head"] != g.CHANGES or p["needs_owner"]:
+    role = g.pr_role(p.get("author", ""))
+    if r["at_head"] != g.CHANGES or p["needs_owner"] or role not in RESPOND_ROLES:
         return None
     key = f"respond:{n}:{head}"
     why = f"changes requested at {head[:7]} (round {r['changes_requested']} of {g.ROUNDS})"
     closes = [c["number"] for c in p["closes"]]
     if len(closes) != 1:
-        return Trigger(key=key, kind="respond", ref=f"PR #{n}", why=why, role="builder", pr=n,
-                       skipped=f"it closes {len(closes)} issues, and the builder responds only on "
+        return Trigger(key=key, kind="respond", ref=f"PR #{n}", why=why, role=role, pr=n,
+                       skipped=f"it closes {len(closes)} issues, and the {role} responds only on "
                                f"a PR that closes exactly one")
     h = busy(closes[0])
-    return Trigger(key=key, kind="respond", ref=f"PR #{n}", why=why, role="builder",
-                   command=launch_cmd("builder", closes[0], n), issue=closes[0], pr=n,
+    return Trigger(key=key, kind="respond", ref=f"PR #{n}", why=why, role=role,
+                   command=launch_cmd(role, closes[0], n), issue=closes[0], pr=n,
                    held=h[0] if h else None, once=h[1] if h else None)
 
 
@@ -1092,7 +1096,8 @@ def rulings(p: dict, comments: list[dict], owner: str,
             busy: Callable[[int], tuple[str, str] | None]) -> list[Trigger]:
     """#739's [ruling] triggers for one open, non-draft PR (Option 1 of the owner's answer
     on #781): one per comment the owner posted on it after the reviewer's Authority: fail
-    review at its head. Comments by anyone else start nothing."""
+    review at its head. Each starts the PR's author role, as [respond] does (#738).
+    Comments by anyone else start nothing."""
     if not overstepped(p):
         return []
     g = swarm.dashboard()
@@ -1103,19 +1108,19 @@ def rulings(p: dict, comments: list[dict], owner: str,
             continue
         key = f"ruling:{n}:{c.get('id')}"
         why = f"the owner commented after the overstep at {head[:7]} (comment {c.get('id')})"
-        t = Trigger(key=key, kind=RULING, ref=f"PR #{n}", why=why, role="builder", pr=n,
-                    ruling=ruling_text(c.get("body")), ruling_comment=c.get("id"))
         closes = [x["number"] for x in p["closes"]]
         role = g.pr_role(p.get("author", ""))
-        if role not in RULING_ROLES:   # until #777 rules which role [respond] starts
-            out.append(replace(t, skipped=f"it is a {role or 'non-swarm'} PR, and only the builder "
-                                          f"is started on a ruling, on its own PR (#777)"))
+        t = Trigger(key=key, kind=RULING, ref=f"PR #{n}", why=why, role=role, pr=n,
+                    ruling=ruling_text(c.get("body")), ruling_comment=c.get("id"))
+        if role not in RULING_ROLES:
+            out.append(replace(t, skipped=f"it is a {role or 'non-swarm'} PR, and a ruling starts "
+                                          f"only {', '.join(RULING_ROLES)}, on its own PR"))
         elif len(closes) != 1:
-            out.append(replace(t, skipped=f"it closes {len(closes)} issues, and the builder "
+            out.append(replace(t, skipped=f"it closes {len(closes)} issues, and the {role} "
                                           f"responds only on a PR that closes exactly one"))
         else:
             h = busy(closes[0])
-            out.append(replace(t, command=launch_cmd("builder", closes[0], n), issue=closes[0],
+            out.append(replace(t, command=launch_cmd(role, closes[0], n), issue=closes[0],
                                held=h[0] if h else None, once=h[1] if h else None))
     return out
 
@@ -2270,6 +2275,11 @@ class Watch:
             # The owner's `ready`, or the issue's milestone (GOV-0026, #583), as `swarm launch`.
             refused = swarm.go_refusals(t.issue, issue, events, self.owner, set(self.apps()),
                                         self.get_reader(self.repo, t.issue), now=now, repo=self.repo)
+            if refused and t.kind != "build" and issue and "gov:question" in {
+                    lb.get("name") for lb in issue.get("labels") or []}:
+                # #738: a docs record PR closes a gov:question, which the owner's `gov:ruled`
+                # makes go, as for [record].
+                refused = swarm.issue_refusals(t.issue, issue, events, self.owner, "gov:ruled") and refused
         else:
             label = "gov:ruled" if t.kind == "record" else "ready"
             refused = swarm.issue_refusals(t.issue, issue, events, self.owner, label)

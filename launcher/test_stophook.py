@@ -287,6 +287,14 @@ class RespondTest(HookCase):
         self.gh.put("pulls/50", {"state": "closed", "head": {"sha": "h1"}})
         self.assertAllows()
 
+    def test_another_author_role_is_held_the_same_way(self):
+        """#738: [respond] starts the PR's author role; its run has the builder's condition."""
+        self.run_as("analyst", 7, pr=50)
+        self.review("CHANGES_REQUESTED")
+        self.assertBlocks("PR #50", "Push a fix", "roles/analyst.md")
+        self.gh.put("issues/50/comments", [{"user": {"login": "productswarm-analyst[bot]"}, "created_at": AFTER}])
+        self.assertAllows()
+
 
 class RulingTest(HookCase):
     """#739: a builder applying the owner's ruling on an overstep on PR #50."""

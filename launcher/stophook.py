@@ -17,11 +17,11 @@ through the session's `gh`) and checks the run's done-condition:
 | run                                         | done when                                       |
 |---------------------------------------------|-------------------------------------------------|
 | builder on an issue ([build])               | a PR, open or merged, closes the issue          |
-| builder on a PR ([respond])                 | the reviewer's latest review at the PR's head   |
+| a PR's author role on it ([respond], #738)  | the reviewer's latest review at the PR's head   |
 |                                             | isn't "changes requested" (a push moved the     |
 |                                             | head, or there was nothing to respond to), or   |
 |                                             | the run commented on the PR, or the PR closed   |
-| builder on an owner's ruling ([ruling])     | the reviewer's latest review at the PR's head   |
+| a PR's author role on a ruling ([ruling])   | the reviewer's latest review at the PR's head   |
 |                                             | isn't Authority: fail (a push moved the head),  |
 |                                             | or the run commented on the PR, or the PR       |
 |                                             | closed (#739)                                   |
@@ -258,14 +258,14 @@ def missing_respond(g: GitHub, repo: str, e: swarm.Started, login: str) -> str |
     head = (p.get("head") or {}).get("sha")
     reviews = g.items(f"repos/{repo}/pulls/{e.pr}/reviews?per_page=100")
     if swarm.dashboard().reviewer_state(reviews, head)["at_head"] != CHANGES:
-        return None          # pushed (new head), or nothing to respond to (roles/builder.md)
+        return None          # pushed (new head), or nothing to respond to (roles/<role>.md)
     since = iso(e.started)
     for path in (f"repos/{repo}/issues/{e.pr}/comments?since={since}&per_page=100",
                  f"repos/{repo}/pulls/{e.pr}/comments?since={since}&per_page=100"):
         if any(mine(c, login) and since_start(c, e.started) for c in g.items(path)):
             return None      # replied where it disagrees
     return (f"The reviewer's changes requested at PR #{e.pr}'s head are unanswered. Push a fix "
-            f"to the PR's branch or reply on the PR where you disagree, as roles/builder.md "
+            f"to the PR's branch or reply on the PR where you disagree, as roles/{e.role}.md "
             f"says, then stop.")
 
 
@@ -340,10 +340,10 @@ def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
         what = missing_research(g, repo, e, login)
     elif e.role == "reviewer":
         what = missing_review(g, repo, e)
-    elif e.role == "builder" and e.pr and e.ruling is not None:
+    elif e.pr and e.ruling is not None:
         what = missing_ruling(g, repo, e, login)
-    elif e.role == "builder" and e.pr:
-        what = missing_respond(g, repo, e, login)
+    elif e.pr and e.issue:
+        what = missing_respond(g, repo, e, login)     # any author role (#738)
     elif e.role in ("builder", "docs") and e.issue:
         issue = g.get(f"repos/{repo}/issues/{e.issue}") or {}
         record = "gov:question" in labels_of(issue)
