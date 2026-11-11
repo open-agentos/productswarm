@@ -1,0 +1,6 @@
+#!/bin/sh
+# gh for a run's container (#680): the role App's token from the file the watcher keeps
+# fresh on the host, read on every call, so a run longer than a token's hour keeps access.
+GH_TOKEN=$(cat "${SWARM_TOKEN_FILE:?gh: SWARM_TOKEN_FILE not set}") || exit 1
+export GH_TOKEN
+exec /usr/bin/gh "$@"

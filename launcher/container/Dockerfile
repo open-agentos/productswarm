@@ -25,4 +25,6 @@ RUN apt-get update \
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && npm cache clean --force
 
 COPY entrypoint.sh /usr/local/bin/swarm-run
+# Ahead of /usr/bin/gh on PATH: gh with the token file read on every call (#680).
+COPY gh /usr/local/bin/gh
 ENTRYPOINT ["/usr/local/bin/swarm-run"]

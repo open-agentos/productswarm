@@ -301,9 +301,10 @@ class CommandTest(Base):
 
     IMAGE = "productswarm-run@sha256:" + "a" * 64
 
-    def test_a_watch_run_in_a_container_gets_only_its_token_and_the_claude_key(self):
-        # #661: the App token is minted on the host, and docker run passes in only it and
-        # the Claude key from the host's environment; nothing else, and no secret file.
+    def test_a_watch_run_in_a_container_gets_only_its_token_file_and_the_claude_key(self):
+        # #661: the App token is minted on the host; #680 (the owner on #749): it reaches the
+        # container as a read-only token file the host keeps fresh, and docker run passes in
+        # only the Claude key from the host's environment.
         import shlex
         self.l.use_container(self.IMAGE)
         e = self.watch_entry()
@@ -312,18 +313,23 @@ class CommandTest(Base):
         result = self.home / "launcher" / f"{e.session_id}.result.json"
         self.assertTrue(script.startswith(f"cd {wt} && echo $$ >| {self.home}/launcher/{e.session_id}.pid && "))
         before, rest = script.split(" exec docker run ", 1)
-        self.assertTrue(before.endswith(f' && tok=$({wt}/ops/swarm-token builder) && GH_TOKEN="$tok"'))
+        tokens = self.home / "launcher" / "tokens" / e.session_id
+        self.assertIn(f"mint() {{ {self.home}/runtime/ops/swarm-token builder >| {tokens}/token.tmp "
+                      f"&& mv -f {tokens}/token.tmp {tokens}/token; }} && mint && ", before)
+        self.assertNotIn(f"{wt}/ops/swarm-token", before)   # never the clone's: the run can change it
+        self.assertNotIn("GH_TOKEN", script)
         argv, redirect = rest.split(" >| ")
         self.assertEqual(shlex.split(redirect), [str(result)])
         uid, gid, rh = os.getuid(), os.getgid(), self.home / "runs" / e.session_id
         self.assertEqual(shlex.split(argv), [
             "--rm", "--init", "--name", f"swarm-{e.session_id}", "--user", f"{uid}:{gid}",
             "--tmpfs", f"/home/run:uid={uid},gid={gid},mode=0700",
-            "-e", "GH_TOKEN", "-e", "ANTHROPIC_API_KEY", "-e", "SWARM_ROLE=builder",
-            "-e", "HOME=/home/run", "-e", f"PRODUCTSWARM_HOME={rh}",
+            "-e", "ANTHROPIC_API_KEY", "-e", "SWARM_ROLE=builder",
+            "-e", "SWARM_TOKEN_FILE=/run/swarm-token/token", "-e", "HOME=/home/run", "-e", f"PRODUCTSWARM_HOME={rh}",
             "-v", f"{wt}:{wt}", "-v", f"{rh}:{rh}",
             "-v", f"{rh}/launcher/sessions.json:{rh}/launcher/sessions.json:ro",
             "-v", f"{self.home}/runtime:{self.home}/runtime:ro",
+            "-v", f"{tokens}:/run/swarm-token:ro",
             "-v", f"{rh}/claude/projects:/home/run/.claude/projects",
             "-w", str(wt), self.IMAGE,
             "--model", "claude-opus-5-5", "--session-id", e.session_id,
@@ -1105,6 +1111,60 @@ class ContainerCloneTest(Base):
         self.l.prepare(self.entry(by=None))
         self.assertIn("worktree add", self.git.subs())
         self.assertFalse((self.home / "runs").exists())
+
+    def test_prepare_makes_a_private_token_dir_the_run_cannot_write(self):
+        # #680: outside the run's home, which is mounted read-write, so the run can't plant
+        # a symlink there for the host to write the token through.
+        e = self.entry()
+        self.l.prepare(e)
+        d = self.l.token_dir(e.session_id)
+        self.assertTrue(d.is_dir())
+        self.assertEqual(d.stat().st_mode & 0o777, 0o700)
+        self.assertNotIn(self.home / "runs" / e.session_id, d.parents)
+
+    def test_the_host_keeps_the_token_file_fresh_while_the_run_lives_then_removes_it(self):
+        # #680, the owner on #749 (option 2): run the real command with a stand-in
+        # swarm-token that mints a new token each call and a docker that reads the file.
+        import shutil as sh
+        import subprocess
+        if not sh.which("bash"):
+            self.skipTest("needs bash")
+        e = self.entry()
+        wt, d = self.root / ".worktrees" / e.session_id, self.l.token_dir(e.session_id)
+        wt.mkdir(parents=True)
+        d.mkdir(parents=True, mode=0o700)
+        ops, bin_ = self.home / "runtime" / "ops", self.home / "bin"
+        ops.mkdir(parents=True)
+        bin_.mkdir()
+        seen, n = self.home / "seen", self.home / "n"
+        mint = ops / "swarm-token"
+        mint.write_text(f'#!/bin/sh\ni=$(( $(cat {n} 2>/dev/null || echo 0) + 1 )); echo $i >{n}; echo "tok-$1-$i"\n')
+        docker = bin_ / "docker"
+        docker.write_text(f"#!/bin/sh\nfor i in 1 2 3 4; do cat {d}/token >>{seen}; sleep 1; done\n")
+        for f in (mint, docker):
+            f.chmod(0o755)
+        with mock.patch.object(swarm, "TOKEN_REFRESH", 1):
+            cmd = self.l.command(e)
+        env = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}")
+        subprocess.run(["/bin/sh", "-c", cmd], env=env, check=True, timeout=30,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        tokens = seen.read_text().split()
+        self.assertEqual(tokens[0], "tok-builder-1")
+        self.assertGreater(len(set(tokens)), 1, tokens)          # the file changed under the run
+        for _ in range(50):                                       # the refresher ends after the run
+            if not d.exists():
+                break
+            time.sleep(0.1)
+        self.assertFalse(d.exists())
+
+    def test_live_removes_an_ended_runs_token_dir(self):
+        e = self.entry()
+        self.l.add(e)
+        d = self.l.token_dir(e.session_id)
+        d.mkdir(parents=True)
+        (d / "token").write_text("tok\n")
+        self.assertEqual(self.l.live(), [])
+        self.assertFalse(d.exists())
 
     def clone(self, sid="11111111-2222-4333-8444-555555555555"):
         wt = self.root / ".worktrees" / sid
