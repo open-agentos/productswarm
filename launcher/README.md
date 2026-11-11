@@ -265,13 +265,13 @@ launcher/swarm trouble [--json] [--hours 24] [--manifest swarm.toml] [--repo own
 
 Stage 1 of #760. For each open Goal and Area the owner opened (GOV-0031), and for the work under none:
 
-- **Progress** per done-test criterion (a Goal's checkboxes, an Area's `**Target:**` bullets): `met` when ticked, else what its measure says, else `unmeasured`. Unmeasured is never reported as on track. The only measure so far is M1's daily-report streak (`swarm daily`). A passed `**Date:**` is `date_missed`.
-- **Stuck**, with the reason nothing will start it and since when: requested changes at a PR's head with no push since and no trigger that restarts the role; a merged PR whose issue is still open; an issue under no Goal or Area that another issue waits on; and an owner `Ask:`, `Call in:` or `Research:` that nothing listens to.
-- **Waiting on the owner**, with its age: untriaged issues, unanswered `gov:question`s, PRs GOV-0011 hands to the owner, and protected-path PRs needing the owner's approval at head.
-- **On the owner's authority** in the last `--hours`: merges by the merger (GOV-0027), merged agent PRs citing `per GOV-NNNN`, and call-ins by a swarm App.
+- **Progress** per done-test criterion (a Goal's checkboxes, an Area's `**Target:**` bullets): `met` when ticked, else what its measure says, else `unmeasured`. Unmeasured is never reported as on track. The measures reuse the commands that count the same thing: M1's daily-report streak (`swarm daily`), M2's share of this UTC week's merges made without the owner's click and its unreviewed reverts (`swarm merges`), and M4's run of working days under 5 owner acts, all C-team (`swarm acts`, which first reads its webhook leads back into `swarm.db`; while any lead is unread, M4's criterion stays unmeasured). A passed `**Date:**` is `date_missed`.
+- **Stuck**, with the reason nothing will start it and since when: requested changes, or an overstep the owner has answered, at a PR's head with no push since and no trigger that restarts the role (which roles `[respond]` and `[ruling]` start is read from `watch.py`'s `RESPOND_ROLES` and `RULING_ROLES`); a merged PR whose issue is still open; an issue under no Goal or Area that another issue waits on; and an owner `Ask:`, `Call in:` or `Research:` that nothing listens to.
+- **Waiting on the owner**, with its age: untriaged issues, unanswered `gov:question`s, PRs GOV-0011 hands to the owner (an overstep is the reviewer's review at head with `Authority: fail`, whatever its state, usually COMMENTED), and every PR the reviewer approved at head that the merger left for the owner, with the reason from the merger's own `Left for the owner at <head>: <reason>` comment. A PR the merger hasn't judged at its head isn't listed.
+- **On the owner's authority** in the last `--hours`: merges by the merger (GOV-0027; a PR it enqueued counts, as in `swarm merges`) and call-ins by a swarm App.
 - **Spend** from the runs ledger, reported, never flagged (GOV-0033).
 
-It only reads. Stage 2 has the daily report and the check-in read it.
+It only reads GitHub; locally it syncs `swarm.db`'s owner acts as `swarm acts` does. Stage 2 has the daily report and the check-in read it.
 
 ## swarm watch: the wake-up loop
 
