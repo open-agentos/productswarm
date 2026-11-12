@@ -14,7 +14,7 @@ Scripted drills that show a Goal's capability on the scratch repo (`open-agentos
 
 **Steps.**
 
-1. The builder opened productswarm-scratch#2, the drill issue, and the owner linked it under #890 (the builder App gets 403 adding sub-issues).
+1. The builder opened productswarm-scratch#2, the drill issue, which was then linked under #890 (the builder App gets 403 adding sub-issues).
 2. Branched `builder/2-revert-first-commit` from scratch's `main`, ran `git revert 374023b`, pushed it, and opened #4. Nobody asked for a review.
 3. On 2026-11-12 at 13:57 UTC, from productswarm's `main` (`69be1ac`), ran the merger by hand against that PR, once for each command below. Neither command merges or comments: `plan` writes nothing, and `run --dry-run` only prints.
 
