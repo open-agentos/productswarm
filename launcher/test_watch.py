@@ -1057,7 +1057,10 @@ class ManifestWatchTest(unittest.TestCase):
     def test_repo_manifest_has_the_limits_from_88(self):
         import manifest
         limits = manifest.load_watch()
-        self.assertEqual((limits.interval_minutes, limits.max_live, limits.max_turns), (5, 2, 200))
+        # The limits are the owner's spend switches (GOV-0010): check only that they're set (#647).
+        self.assertGreaterEqual(limits.interval_minutes, 1)
+        self.assertGreaterEqual(limits.max_live, 1)
+        self.assertGreaterEqual(limits.max_turns, 1)
         # The Actions keys are the owner's switches (#260, #257): check only that they parse (#285).
         self.assertIsInstance(limits.review_in_actions, bool)
         self.assertTrue(limits.actions_max_reviews is None or limits.actions_max_reviews >= 1)
