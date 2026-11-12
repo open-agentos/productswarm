@@ -65,6 +65,12 @@ call_ins = true
 mode = "live"
 max_changed_lines = 500
 
+# The org's other repos ("owner/name") that swarm watch and the merger work beside this
+# one (#772). Left out, they work this repo only. productswarm-scratch is where M4's
+# scripted drill runs (#891).
+[org]
+repos = ["open-agentos/productswarm-scratch"]
+
 [[session]]
 role = "planner"
 count = 1
