@@ -266,11 +266,13 @@ drops this repo and any outside its org). Each check reads each one with gather(
 out [review], [build], [respond], [ruling], [record], [answer] and [call-in] there as here, so a Task in
 another repo under an owner's Goal in this one is go (GOV-0031). Their keys start
 `<owner/name>|` and their refs name the repo (`open-agentos/x#5`). [daily], [ask],
-[research] and swarm:halt stay with this repo's report issue. Sessions the launcher started
-work in this repo's checkout, so none holds another repo's trigger; that repo's heartbeat
-still does. --dry-run prints them like any other. A real check doesn't start them yet: it
-lists each once as not started (OTHER_REPO) and never records it, so once starting a session
-in another repo is built, every one still open fires. A repo it can't read is said once.
+[research] and swarm:halt stay with this repo's report issue. A real check starts them as it
+does this repo's (#912, GOV-0036 stage 3): in a worktree of that repo's clone, with an opener
+naming the repo, under the same [watch] limits and concurrency ceiling (GOV-0010), held by
+live sessions on the same repo plus number: launcher entries on that repo and that repo's
+heartbeat. --dry-run prints them like any other, with the command a start would run. A run
+there keeps no Waits-on hold from its builder's comments and isn't added to the runs ledger
+yet: both read this repo's issues by number. A repo it can't read is said once.
 With no [org] table nothing else is read and nothing changes.
 
 A paused repo (#892, swarm.toml's [org] paused): watch says so once and starts nothing
@@ -346,8 +348,6 @@ PUBLIC_FILE = "watch-public.json"   # the watch state's no-cost form, beside it 
 MAX_RETRIES = 2               # times a run that never started is started again (#550)
 WAIT_RE = re.compile(r"\bwait(?:s|ing)?\s+(?:on|for)\b([^\n]*)", re.IGNORECASE)
 BUILDER_APP = "productswarm-builder[bot]"
-OTHER_REPO = ("not started: swarm watch starts sessions only in this repo's checkout so far; "
-              "work it by hand (#772)")
 
 # How a headless run ended, from the `subtype` of its --output-format json result: the
 # SDKResultMessage type in the Claude Code Agent SDK reference (#149). Any other subtype,
@@ -1811,6 +1811,10 @@ class Watch:
     nudged: int | None = None         # the nudge file's mtime when the last check started
     checked_at: float | None = None   # clock() when the last check started
 
+    def __post_init__(self) -> None:
+        # Sessions in other org repos are told where governance is: this repo (#912).
+        self.launcher.home_name = self.launcher.home_name or self.repo
+
     def once(self, line: str) -> None:
         if line not in self.said:
             self.said.add(line)
@@ -1916,13 +1920,15 @@ class Watch:
         if manifest.is_paused(self.repo, paused):
             self.once(f"swarm watch: {manifest.paused_text(self.repo, paused)}; nothing starts there")
         new = []
-        here = triggers(w, self.owner, self.launcher.running(), self.roles, g.needs_you,
+        here = triggers(w, self.owner, in_repo(self.launcher.running()), self.roles, g.needs_you,
                         g.is_tracking, bool(limits and limits.review_in_actions), now,
                         limits.stale_minutes if limits else DEFAULT_STALE, one_way,
                         apps, bool(limits and limits.call_ins), *self.daily(limits),
                         ask_issue=ask_n, asks_since=since, research_since=r_since,
                         research_report=limits.report_issue if limits else None)
-        for t in here + self.other_triggers(limits, now, one_way, apps, paused):
+        others = [t for t, _ in self.other_worlds(limits, now, one_way, apps, paused,
+                                                  self.launcher.running())]
+        for t in here + others:
             key = f"{t.key}|held|{t.once}" if t.held else t.key
             if key in self.seen:
                 continue
@@ -1932,17 +1938,19 @@ class Watch:
                 continue
             new.append(t)
             if not t.skipped:
-                self.launcher.out(f"  (no headless command: {OTHER_REPO})" if t.repo
-                                  else f"  {self.headless(t)}")
+                self.launcher.out(f"  {self.headless(t)}")
         return new
 
-    def other_triggers(self, limits: "manifest.WatchLimits | None", now: dt.datetime,
-                       one_way: frozenset[str], apps: dict[str, str],
-                       paused: frozenset[str] | None = frozenset()) -> list[Trigger]:
+    def other_worlds(self, limits: "manifest.WatchLimits | None", now: dt.datetime,
+                     one_way: frozenset[str], apps: dict[str, str],
+                     paused: frozenset[str] | None = frozenset(),
+                     live: list | None = None) -> list[tuple[Trigger, World]]:
         """The triggers in each of swarm.toml's [org] repos (#772), named by repo, without
-        [daily], [ask] or [research]. A bad [org] table is reported by tick() and works none;
-        a repo outside this one's org, or one that can't be read, is said once and skipped.
-        A paused repo (#892) is said once and not read, so nothing there can start."""
+        [daily], [ask] or [research], each with its repo's reading. Live launcher entries on
+        a repo hold its triggers as this repo's hold here (#912). A bad [org] table is
+        reported by tick() and works none; a repo outside this one's org, or one that can't
+        be read, is said once and skipped. A paused repo (#892) is said once and not read,
+        so nothing there can start."""
         try:
             repos = manifest.load_repos(self.manifest_path)[0]
         except manifest.ManifestError:
@@ -1961,8 +1969,8 @@ class Watch:
                 self.once(f"swarm watch: can't read {repo} ({e}); its triggers wait")
                 continue
             w.repo = w.repo or repo
-            out += [elsewhere(t, repo) for t in triggers(
-                w, self.owner, [], self.roles, g.needs_you, g.is_tracking,
+            out += [(elsewhere(t, repo), w) for t in triggers(
+                w, self.owner, in_repo(live or [], repo), self.roles, g.needs_you, g.is_tracking,
                 bool(limits and limits.review_in_actions), now,
                 limits.stale_minutes if limits else DEFAULT_STALE, one_way, apps,
                 bool(limits and limits.call_ins))]
@@ -2036,7 +2044,7 @@ class Watch:
                              called_by=t.called_by, call_why=t.call_why, daily=t.daily,
                              ask=t.ask, ask_comment=t.ask_comment, research=t.research,
                              research_comment=t.research_comment, ruling=t.ruling,
-                             ruling_comment=t.ruling_comment, conflict=t.conflict)
+                             ruling_comment=t.ruling_comment, conflict=t.conflict, repo=t.repo)
 
     def start_tick(self, now: dt.datetime) -> list[Trigger]:
         """Start a session for each new trigger, within the [watch] limits (GOV-0010)."""
@@ -2076,7 +2084,7 @@ class Watch:
         home_paused = manifest.is_paused(self.repo, paused) and manifest.paused_text(self.repo, paused)
         if home_paused:
             self.once(f"swarm watch: {home_paused}; nothing starts there")
-        todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
+        todo = [t for t in triggers(w, self.owner, in_repo(live), self.roles, g.needs_you, g.is_tracking,
                                     limits.review_in_actions, now, limits.stale_minutes,
                                     one_way, apps, limits.call_ins,
                                     *self.daily(limits), ask_issue=ask_n, asks_since=since,
@@ -2091,7 +2099,11 @@ class Watch:
                 out(f"[daily] {x['ref']} {day}: no daily report run that day ({x.get('reason')}); "
                     f"not caught up (GOV-0029)")
         todo.sort(key=lambda t: before.get(t.key, {}).get("since", iso(now)))  # held longest first
-        held, done, reviewer = [], [], None
+        # #912: other repos' go work starts here too, after this repo's, under the same limits.
+        others = [(t, tw) for t, tw in self.other_worlds(limits, now, one_way, apps, paused, live)
+                  if t.key not in acted]
+        others.sort(key=lambda x: before.get(x[0].key, {}).get("since", iso(now)))
+        held, done, reviewer = [], [], {}
 
         def finish(t: Trigger, outcome: str) -> None:
             acted[t.key] = outcome
@@ -2113,14 +2125,14 @@ class Watch:
             if reason not in (limited, halted) and (was.get("once") or was.get("reason")) != (once or reason):   # each reason once
                 out(f"[{t.kind}] {t.ref} {t.why} -> {reason}")
 
-        for t in todo:
+        for t, tw in [(t, w) for t in todo] + others:
             if t.skipped in NOT_RECORDED:
                 # Not recorded in the watch state: flip the switch and the loop acts on it again.
                 if t.key not in self.seen:
                     self.seen.add(t.key)
                     out(t.line())
                 continue
-            if home_paused:
+            if home_paused and not t.repo:
                 # #892: the owner paused this repo. Not recorded, so each fires once it's unpaused.
                 hold(t, f"held: {home_paused}", code="paused")
                 continue
@@ -2145,14 +2157,16 @@ class Watch:
                 hold(t, f"held: docs records the ruling on {t.ref} first, then {t.role} starts",
                      code="record_first")
                 continue
-            if t.kind == "review" and reviewer:
-                out(f"[review] {t.ref} {t.why} -> covered by {reviewer}")
-                finish(t, f"covered by {reviewer}")
+            if t.kind == "review" and reviewer.get(t.repo):
+                # One reviewer pass per repo: it reviews the PRs in the repo it works in (#912).
+                out(f"[review] {t.ref} {t.why} -> covered by {reviewer[t.repo]}")
+                finish(t, f"covered by {reviewer[t.repo]}")
                 continue
-            if t.issue is not None and swarm.holders(t.issue, w.model, live, own_role(t)):
+            if t.issue is not None and swarm.holders(t.issue, tw.model, live, own_role(t),
+                                                     repo=t.repo, model_repo=t.repo):
                 continue      # a session started this check is on it; it fires again once that stops
             prev = runs.get(t.key) or {}
-            still = [n for n in prev.get("waits_on") or [] if n in open_issues(w)]
+            still = [n for n in prev.get("waits_on") or [] if n in open_issues(tw)]
             if still:
                 # #550: its last run's builder said it waits on these; it starts once they close.
                 hold(t, f"held: waits on {', '.join(f'#{n}' for n in still)} (the builder said so "
@@ -2177,7 +2191,7 @@ class Watch:
             if halted:
                 hold(t, halted, code="halted")         # said once above: it holds every start
                 continue
-            busy_with = overlap(t.issue, w, live) if t.kind == "build" else None
+            busy_with = overlap(t.issue, tw, in_repo(live, t.repo)) if t.kind == "build" else None
             if busy_with:
                 hold(t, busy_with, code="overlap")
                 continue
@@ -2196,18 +2210,17 @@ class Watch:
             out(f"[{t.kind}] {t.ref} {t.why} -> starting {entry.name}")
             if self.launcher.start(entry, live):
                 if t.kind == "review":
-                    reviewer = entry.name
+                    reviewer[t.repo] = entry.name
                 runs[t.key] = {"session_id": entry.session_id, "name": entry.name, "kind": t.kind,
                                "ref": t.ref, "started": iso(now)}
+                if t.repo:
+                    runs[t.key]["repo"] = t.repo     # #912: a run in another org repo
                 if prev.get("retry"):     # #550: the same trigger again, after a run that never started
                     runs[t.key]["tries"] = prev.get("tries", 1) + 1
                     runs[t.key]["never_started"] = prev.get("never_started", []) + [prev["session_id"]]
                 finish(t, f"started {entry.name}")
             else:
                 hold(t, "failed to start (see above); trying again next check", code="error")
-        for t in self.other_triggers(limits, now, one_way, apps, paused):
-            # #772: listed once, never recorded, so each fires once starting there is built.
-            self.once(t.line() if t.held or t.skipped else f"[{t.kind}] {t.ref} {t.why} -> {OTHER_REPO}")
         st = {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs,
               "asks_since": asks_since, "research_since": research_since}
         save_state(self.launcher, st)
@@ -2273,7 +2286,9 @@ class Watch:
                 continue
             if not r.get("ending") and r["session_id"] not in alive:
                 r = {**r, **read_result(self.launcher.result_file(r["session_id"])), "ended": iso(now)}
-                waits = self.said_waits(r, w) if w is not None and r["kind"] == "build" else []
+                # A run in another repo (#912): its builder's #N refs are that repo's, and w is this one.
+                waits = (self.said_waits(r, w) if w is not None and r["kind"] == "build"
+                         and not r.get("repo") else [])
                 if r["ending"] == LIMITED:
                     r["until"] = iso(limit_until(r["detail"], now))
                     again(key, r)
@@ -2311,8 +2326,9 @@ class Watch:
             if p.get("number") is not None and first is not None:
                 closes[p["number"]] = first     # the first issue GitHub lists, as gh_pr_closes
         try:
-            ledger.record(self.launcher.dir, [r for r in runs.values() if r.get("ended")],
-                          closes)
+            # Not yet runs in other repos (#912): the ledger reads issues by number, in this repo.
+            ledger.record(self.launcher.dir, [r for r in runs.values()
+                                              if r.get("ended") and not r.get("repo")], closes)
             prs = ledger.unresolved(self.launcher.dir)
             if prs:
                 ledger.set_prs(self.launcher.dir, (self.get_pr_closes or gh_pr_closes)(self.repo, prs))
@@ -2346,21 +2362,23 @@ class Watch:
     def refusal(self, t: Trigger, live: list, now: dt.datetime) -> tuple[str | None, bool]:
         """`swarm launch`'s refusal checks, run again on fresh GitHub data just before a
         start: (reason, False) refuses the trigger for good; (None, True) waits a check."""
-        hb = self.get_heartbeat(self.repo, self.idle_minutes, now)
+        repo = t.repo or self.repo       # #912: another org repo's trigger is checked there
+        hb = self.get_heartbeat(repo, self.idle_minutes, now)
+        ref = swarm.ref_text(t.issue, t.repo) if t.issue is not None else t.ref
         if t.kind == "review":
             # A pass already running may have listed PRs before this push: wait for it.
-            return None, bool(reviewers(hb, live))
-        issue, events = self.get_issue(self.repo, t.issue)
+            return None, bool(reviewers(hb, in_repo(live, t.repo)))
+        issue, events = self.get_issue(repo, t.issue)
         if t.kind in (DAILY, ASK, RESEARCH):
             # #588, #590: the report issue needs no label, only to exist and be open; nor
             # does a [research] line's issue (#591).
-            refused = ([f"#{t.issue} doesn't exist"] if issue is None else
-                       [f"#{t.issue} is a pull request, not an issue"] if "pull_request" in issue else
-                       [f"#{t.issue} is closed"] if issue.get("state") != "open" else [])
+            refused = ([f"{ref} doesn't exist"] if issue is None else
+                       [f"{ref} is a pull request, not an issue"] if "pull_request" in issue else
+                       [f"{ref} is closed"] if issue.get("state") != "open" else [])
         elif t.kind in ("build", "respond", RULING, CONFLICT):
             # The owner's `ready`, or the issue's milestone (GOV-0026, #583), as `swarm launch`.
             refused = swarm.go_refusals(t.issue, issue, events, self.owner, set(self.apps()),
-                                        self.get_reader(self.repo, t.issue), now=now, repo=self.repo)
+                                        self.get_reader(repo, t.issue), now=now, repo=repo)
             if refused and t.kind != "build" and issue and "gov:question" in {
                     lb.get("name") for lb in issue.get("labels") or []}:
                 # #738: a docs record PR closes a gov:question, which the owner's `gov:ruled`
@@ -2373,9 +2391,9 @@ class Watch:
                     and issue.get("state") == "open":
                 # #594, #681: a call-in counts on an issue under an open Goal or Area, or
                 # (until swarm.MILESTONE_UNTIL) an open milestone, too.
-                r = self.get_reader(self.repo, t.issue)
+                r = self.get_reader(repo, t.issue)
                 scope = r.scope()
-                whys = [call_scope(issue, scope, self.owner, set(self.apps()), self.repo)]
+                whys = [call_scope(issue, scope, self.owner, set(self.apps()), repo)]
                 if swarm.milestone_open(now) and swarm.milestone_of(issue.get("body")) is not None:
                     whys.append(call_milestone(issue, self.owner, set(self.apps()), r.plan))
                 if None in whys:
@@ -2384,18 +2402,19 @@ class Watch:
                     refused = [whys[-1], *refused]
         if refused:
             return refused[0], False
-        taken = swarm.holders(t.issue, hb, live, own_role(t))
+        taken = swarm.holders(t.issue, hb, live, own_role(t), repo=t.repo, model_repo=t.repo)
         if taken:
-            return f"#{t.issue} already has a live session: {'; '.join(taken)}", False
+            return f"{ref} already has a live session: {'; '.join(taken)}", False
         return None, False
 
     def name(self, t: Trigger, live: list) -> str:
         taken = {e.name for e in live}
         if t.issue is not None:
-            return swarm.launch_name(t.role, t.issue, taken, t.pr)
-        name, k = "reviewer-watch", 2
+            return swarm.launch_name(t.role, t.issue, taken, t.pr, t.repo)
+        name = f"reviewer-{t.repo.split('/')[-1]}-watch" if t.repo else "reviewer-watch"
+        base, k = name, 2
         while name in taken:
-            name, k = f"reviewer-watch-{k}", k + 1
+            name, k = f"{base}-{k}", k + 1
         return name
 
     def serve_note(self) -> str:
@@ -2472,6 +2491,12 @@ class Watch:
         except KeyboardInterrupt:
             self.launcher.out("swarm watch: stopped")
         return 0
+
+
+def in_repo(live: list, repo: str | None = None) -> list:
+    """The launcher entries working in repo (None: this one), for the checks that key an
+    issue by number alone: held_by(), overlap() and reviewers() (#912)."""
+    return [e for e in live if swarm.same_repo_key(getattr(e, "repo", None)) == swarm.same_repo_key(repo)]
 
 
 def own_role(t: Trigger) -> str | None:

@@ -524,6 +524,40 @@ class ResearchTest(HookCase):
         self.assertEqual((e.research, e.research_comment), ("who ships a daily report?", 901))
 
 
+class OtherRepoTest(HookCase):
+    """#912 (GOV-0036 stage 3): a run in another org repo is checked there and named there;
+    the gov:questions that block it are in this repo."""
+    X = "o/scratch"
+
+    def setUp(self):
+        super().setUp()
+        e = swarm.Started(name="builder-scratch-issue-7", role="builder", model="m", session_id=SID,
+                          started=T0, issue=7, by="watch", repo=self.X)
+        (self.home / "launcher" / "sessions.json").write_text(json.dumps([e.__dict__]))
+        self.put_x("issues/7", issue(7))
+        self.put_x("issues/7/events", [labeled("ready")])
+
+    def put_x(self, path, value):
+        self.gh.data[f"repos/{self.X}/{path}"] = value
+
+    def test_no_pr_blocks_naming_the_repo(self):
+        self.assertBlocks("No PR closes o/scratch#7", "Open the PR for o/scratch#7",
+                          "If a gov:question in o/r blocks the work", "naming o/scratch#7")
+        self.assertIn(f"repos/{self.X}/issues/7", self.gh.calls)
+        self.assertNotIn(f"repos/{R}/issues/7", self.gh.calls)
+
+    def test_reads_its_issue_in_its_repo_not_this_ones(self):
+        self.gh.put("issues/7", issue(7, state="closed"))      # this repo's #7: not the run's
+        self.assertBlocks("No PR closes o/scratch#7")
+        self.put_x("issues/7", issue(7, state="closed"))
+        self.assertAllows()
+
+    def test_a_gov_question_in_this_repo_naming_its_issue_is_done(self):
+        self.gh.put("issues", [{"number": 9, "created_at": AFTER, "user": {"login": ME["builder"]},
+                                "body": "Blocks o/scratch#7."}])
+        self.assertAllows()
+
+
 class GuardTest(HookCase):
     def setUp(self):
         super().setUp()

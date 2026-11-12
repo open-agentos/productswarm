@@ -29,7 +29,7 @@ def setUpModule():
         patcher = mock.patch.object(target, name, lambda repo, numbers: {})
         patcher.start()
         unittest.addModuleCleanup(patcher.stop)
-from test_swarm import Fake, FakeGit  # noqa: E402
+from test_swarm import Fake, FakeGit, runtime  # noqa: E402
 
 G = swarm.dashboard()
 REPO = "open-agentos/productswarm"
@@ -1166,12 +1166,31 @@ class OtherReposTest(unittest.TestCase):
         return watch.World(model=G.build(data, NOW, dt.timedelta(minutes=idle)),
                            issues=self.other["issues"], scopes=self.scopes, repo=SCRATCH)
 
-    def watch(self, org, dry_run=True):
-        path = write_manifest(self.home / "fixture", ALL_CAPPED, max_live=2)
+    # The fresh reads before a start, for whichever repo the trigger is in (#912).
+    def get_issue(self, repo, n):
+        if repo == SCRATCH:
+            found = [i for i in self.other["issues"] if i["number"] == n]
+            return (found[0] if found else None), []
+        return self.scene.get_issue(repo, n)
+
+    def heartbeat(self, repo, idle, now):
+        if repo == SCRATCH:
+            return self.read(SCRATCH, idle, now).model
+        return self.scene.heartbeat(repo, idle, now)
+
+    def get_reader(self, repo, n):
+        if repo == SCRATCH:
+            return swarm.GoReader(plan=lambda: None, state=lambda w: "open",
+                                  comments=lambda: [], scope=lambda: self.scopes.get(n))
+        return self.scene.get_reader(repo, n)
+
+    def watch(self, org, dry_run=True, max_live=2):
+        runtime(self.home)
+        path = write_manifest(self.home / "fixture", ALL_CAPPED, max_live=max_live)
         path.write_text(path.read_text() + org)
         return watch.Watch(self.l, REPO, OWNER, ROLES, read=self.read, manifest_path=path,
-                           dry_run=dry_run, get_issue=self.scene.get_issue,
-                           get_heartbeat=self.scene.heartbeat, get_reader=self.scene.get_reader)
+                           dry_run=dry_run, get_issue=self.get_issue,
+                           get_heartbeat=self.heartbeat, get_reader=self.get_reader)
 
     def test_no_org_table_reads_this_repo_only(self):
         self.watch("").tick(NOW)
@@ -1184,20 +1203,54 @@ class OtherReposTest(unittest.TestCase):
         self.assertEqual(got[-1].key, f"{SCRATCH}|build:5:G{REPO}#686")
         self.assertIn(f"[build] {SCRATCH}#5 go under Goal {REPO}#686 (GOV-0031) -> would start "
                       f"builder on {SCRATCH}#5", self.lines)
-        self.assertIn(f"  (no headless command: {watch.OTHER_REPO})", self.lines)
+        cmd = next(x for x in self.lines if "working in" in x and "work on issue #5" in x)
+        self.assertIn(f"You are the builder for productswarm, working in {SCRATCH}", cmd)
+        self.assertIn("--append-system-prompt", cmd)
         self.assertIn(("build", "#49"), self.kinds(got))          # this repo's work as before
 
-    def test_real_check_lists_other_repo_work_once_and_starts_nothing_there(self):
-        w = self.watch(f'[org]\nrepos = ["{SCRATCH}", "elsewhere/x"]\n', dry_run=False)
-        w.tick(NOW)
-        line = f"[build] {SCRATCH}#5 go under Goal {REPO}#686 (GOV-0031) -> {watch.OTHER_REPO}"
-        self.assertIn(line, self.lines)
+    # #912 (GOV-0036 stage 3): a real check starts other repos' go work too.
+    def test_real_check_starts_other_repo_work_there_once(self):
+        w = self.watch(f'[org]\nrepos = ["{SCRATCH}", "elsewhere/x"]\n', dry_run=False, max_live=10)
+        done = w.tick(NOW)
+        self.assertIn(("build", f"{SCRATCH}#5"), self.kinds(done))
+        self.assertIn(("review", f"PR {SCRATCH}#7"), self.kinds(done))
+        self.assertIn(("build", "#49"), self.kinds(done))          # this repo's work as before
+        self.assertIn(f"[build] {SCRATCH}#5 go under Goal {REPO}#686 (GOV-0031) -> starting "
+                      f"builder-scratch-issue-5", self.lines)
         self.assertIn("swarm watch: elsewhere/x isn't in the open-agentos org, so it is left out "
                       "(GOV-0031 covers one org)", self.lines)
-        self.assertFalse(any(e.issue == 5 for e in self.l.running()))
-        self.assertFalse(any(k.startswith(SCRATCH) for k in watch.load_state(self.l)["acted"]))
-        w.tick(NOW)
-        self.assertEqual(self.lines.count(line), 1)
+        e = next(e for e in self.l.running() if e.name == "builder-scratch-issue-5")
+        self.assertEqual((e.issue, e.repo, e.by), (5, SCRATCH, "watch"))
+        self.assertIn("reviewer-scratch-watch", {e.name for e in self.l.running()})
+        self.assertIn("reviewer-watch", {e.name for e in self.l.running()})   # one pass per repo
+        st = watch.load_state(self.l)
+        key = f"{SCRATCH}|build:5:G{REPO}#686"
+        self.assertEqual(st["acted"][key], "started builder-scratch-issue-5")
+        self.assertEqual(st["runs"][key]["repo"], SCRATCH)
+        n = len(self.l.running())
+        self.assertEqual(w.tick(NOW), [])
+        self.assertEqual(len(self.l.running()), n)
+
+    def test_other_repos_share_the_concurrency_ceiling(self):
+        w = self.watch(f'[org]\nrepos = ["{SCRATCH}"]\n', dry_run=False, max_live=2)
+        self.assertEqual(self.kinds(w.tick(NOW)), [("review", "PR #70"), ("record", "#87")])
+        self.assertIn(f"[build] {SCRATCH}#5 go under Goal {REPO}#686 (GOV-0031) -> held: 2 of 2 "
+                      f"sessions swarm watch started are live (GOV-0010)", self.lines)
+        self.assertFalse(any(e.repo for e in self.l.running()))
+
+    def test_a_session_holds_only_its_own_repos_issue(self):
+        # A launcher entry on scratch#49 doesn't hold this repo's #49; one on scratch#5 holds scratch#5.
+        for sid, n in (("0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41", 49), ("1b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41", 5)):
+            self.l.add(swarm.Started(f"builder-scratch-issue-{n}", "builder", "m", sid, 0, issue=n,
+                                     by="watch", repo=SCRATCH))
+            self.fake.procs[100 + n] = f"claude --session-id {sid}"
+            self.l.pid_file(sid).write_text(str(100 + n))
+        w = self.watch(f'[org]\nrepos = ["{SCRATCH}"]\n', dry_run=False, max_live=10)
+        done = self.kinds(w.tick(NOW))
+        self.assertIn(("build", "#49"), done)
+        self.assertNotIn(("build", f"{SCRATCH}#5"), done)
+        self.assertTrue(any(x.startswith(f"[build] {SCRATCH}#5 ") and "builder-scratch-issue-5 is live on #5" in x
+                            for x in self.lines), self.lines)
 
     def test_an_unreadable_repo_is_said_once(self):
         w = self.watch('[org]\nrepos = ["open-agentos/gone"]\n')
@@ -1213,22 +1266,21 @@ class OtherReposTest(unittest.TestCase):
         self.assertEqual(self.read_repos, [REPO])
         self.assertIn(f"swarm watch: {SCRATCH} is paused in swarm.toml's [org] paused (#892); "
                       f"nothing starts there", self.lines)
-        self.assertFalse(any(SCRATCH in x and watch.OTHER_REPO in x for x in self.lines))
+        self.assertFalse(any(e.repo for e in self.l.running()))
         self.assertEqual(self.kinds(done), [("review", "PR #70"), ("record", "#87")])   # max_live 2
         self.assertEqual(len(self.l.running()), 2)
 
     def test_this_repo_paused_starts_nothing_and_fires_once_unpaused(self):
         org = f'[org]\nrepos = ["{SCRATCH}"]\npaused = ["{REPO}"]\n'
-        w = self.watch(org, dry_run=False)
-        self.assertEqual(w.tick(NOW), [])
-        self.assertEqual(self.l.running(), [])
+        w = self.watch(org, dry_run=False, max_live=4)     # room for both repos' starts
+        # The other repo carries on (#912): its work starts while this repo's waits.
+        self.assertEqual(self.kinds(w.tick(NOW)), [("review", f"PR {SCRATCH}#7"), ("build", f"{SCRATCH}#5")])
+        self.assertFalse(any(e.repo is None for e in self.l.running()))
         self.assertIn(f"swarm watch: {REPO} is paused in swarm.toml's [org] paused (#892); "
                       f"nothing starts there", self.lines)
-        self.assertIn(SCRATCH, self.read_repos)                  # the other repo carries on
-        self.assertIn(f"[build] {SCRATCH}#5 go under Goal {REPO}#686 (GOV-0031) -> {watch.OTHER_REPO}",
-                      self.lines)
+        self.assertIn(SCRATCH, self.read_repos)
         st = watch.load_state(self.l)
-        self.assertEqual(st["acted"], {})
+        self.assertEqual([k for k in st["acted"] if not k.startswith(f"{SCRATCH}|")], [])
         self.assertIn("#49", {x["ref"] for x in st["waiting"] if x["code"] == "paused"})
         pub = watch.public_state(st, [], NOW)
         self.assertIn(("#49", "paused", "held: its repo is paused in swarm.toml"),

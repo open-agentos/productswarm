@@ -60,6 +60,10 @@ missing, and Claude Code continues the run. It allows the stop:
 - after MAX_BLOCKS blocks in one run, counted in ~/.productswarm/launcher/<id>.stop.json;
 - if GitHub can't be read, or anything else fails: it never fails closed.
 The run's budget (GOV-0012) is what bounds spend; MAX_BLOCKS is a code value.
+
+A run in another org repo (its launcher entry's repo, #912, GOV-0036) is checked in that
+repo, and its reasons name the issue or PR as owner/name#N; the gov:questions that block it
+are looked for in this repo, where governance is.
 """
 from __future__ import annotations
 
@@ -179,6 +183,11 @@ def labels_of(issue: dict) -> set[str]:
     return {lb.get("name") for lb in issue.get("labels") or []}
 
 
+def ref(n: int, e: swarm.Started) -> str:
+    """#n, or owner/name#n for a run in another org repo (#912), as the reasons name it."""
+    return swarm.ref_text(n, e.repo)
+
+
 def names_run(text: str | None, e: swarm.Started) -> bool:
     """Whether text cites the run's issue or PR as #N. Every session of a role acts as
     the same App, so this is what ties a question to this run rather than to another
@@ -244,7 +253,7 @@ def missing_review(g: GitHub, repo: str, e: swarm.Started) -> str | None:
                    if mine(r, login)]
         if not any(r.get("commit_id") == head or since_start(r, e.started, "submitted_at")
                    for r in reviews):
-            todo.append(f"#{p['number']}")
+            todo.append(ref(p["number"], e))
     if not todo:
         return None
     return (f"No review from you at the current head of PR {', '.join(todo)} yet. Review each "
@@ -264,7 +273,7 @@ def missing_respond(g: GitHub, repo: str, e: swarm.Started, login: str) -> str |
                  f"repos/{repo}/pulls/{e.pr}/comments?since={since}&per_page=100"):
         if any(mine(c, login) and since_start(c, e.started) for c in g.items(path)):
             return None      # replied where it disagrees
-    return (f"The reviewer's changes requested at PR #{e.pr}'s head are unanswered. Push a fix "
+    return (f"The reviewer's changes requested at PR {ref(e.pr, e)}'s head are unanswered. Push a fix "
             f"to the PR's branch or reply on the PR where you disagree, as roles/{e.role}.md "
             f"says, then stop.")
 
@@ -285,7 +294,7 @@ def missing_ruling(g: GitHub, repo: str, e: swarm.Started, login: str) -> str | 
                  f"repos/{repo}/pulls/{e.pr}/comments?since={since}&per_page=100"):
         if any(mine(c, login) and since_start(c, e.started) for c in g.items(path)):
             return None
-    return (f"The owner's ruling on the overstep on PR #{e.pr} isn't applied yet. Push a fix that "
+    return (f"The owner's ruling on the overstep on PR {ref(e.pr, e)} isn't applied yet. Push a fix that "
             f"follows it to the PR's branch, or reply on the PR saying why you can't, then stop.")
 
 
@@ -306,10 +315,10 @@ def missing_research(g: GitHub, repo: str, e: swarm.Started, login: str) -> str 
         files = g.items(f"repos/{repo}/pulls/{p['number']}/files?per_page=100")
         if any(str(f.get("filename", "")).startswith("research/") for f in files):
             return None
-    return (f"No PR of yours since this run started touches research/ and names #{e.issue}. "
-            f"Write the brief in research/, open a PR that closes #{e.issue}, link it in one "
-            f"comment on #{e.issue}, and stop. If you can't, say why in one comment on "
-            f"#{e.issue}, and stop.")
+    return (f"No PR of yours since this run started touches research/ and names {ref(e.issue, e)}. "
+            f"Write the brief in research/, open a PR that closes {ref(e.issue, e)}, link it in one "
+            f"comment on {ref(e.issue, e)}, and stop. If you can't, say why in one comment on "
+            f"{ref(e.issue, e)}, and stop.")
 
 
 def plan_on_main(g: GitHub, repo: str) -> str | None:
@@ -327,8 +336,10 @@ def go_reader(g: GitHub, repo: str, n: int) -> swarm.GoReader:
                           scope=lambda: g.scope(repo, n))
 
 
-def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
-    """What the run still has to do before it may stop, or None if it may stop."""
+def missing(g: GitHub, repo: str, e: swarm.Started, owner: str, home: str | None = None) -> str | None:
+    """What the run still has to do before it may stop, or None if it may stop. repo is
+    the repo the run works in; home, this repo, where gov:questions are (None: repo). They
+    differ for a run in another org repo (#912)."""
     login = app_login(e.role)
     if e.called_by:
         return None          # a call-in run (#520): one comment, whatever its role
@@ -359,16 +370,17 @@ def missing(g: GitHub, repo: str, e: swarm.Started, owner: str) -> str | None:
             return None      # it was right to refuse the issue (GOV-0006, GOV-0026)
         if blocked_on_prerequisite(g, repo, e, login):
             return None      # said on its issue which unfinished issue it waits for (#184)
-        what = (f"No PR closes #{e.issue} yet. Open the {'record ' if record else ''}PR for "
-                f"#{e.issue}, then stop. If an unfinished issue the work depends on blocks it, "
-                f"comment on #{e.issue} naming that issue, and stop.")
+        what = (f"No PR closes {ref(e.issue, e)} yet. Open the {'record ' if record else ''}PR for "
+                f"{ref(e.issue, e)}, then stop. If an unfinished issue the work depends on blocks it, "
+                f"comment on {ref(e.issue, e)} naming that issue, and stop.")
     else:
         return None
-    if what and blocked_on_question(g, repo, e, login):
+    if what and blocked_on_question(g, home or repo, e, login):
         return None
     if what:
-        ref = f" naming #{e.issue}" if e.issue else ""
-        what += (f" If a gov:question blocks the work, open or comment on it{ref}, and stop "
+        naming = f" naming {ref(e.issue, e)}" if e.issue else ""
+        where = f" in {home}" if home and e.repo else ""
+        what += (f" If a gov:question{where} blocks the work, open or comment on it{naming}, and stop "
                  f"work on that path.")
     return what
 
@@ -403,6 +415,7 @@ def decide(payload: dict, home: Path, repo: str | None, g: GitHub,
     e = entry_for(home, sid)
     if e is None or e.by not in HEADLESS or not repo:
         return None
+    work = e.repo or repo     # a run in another org repo is checked there (#912)
     count_file = home / "launcher" / f"{sid}.stop.json"
     try:
         blocks = int(json.loads(count_file.read_text()).get("blocks", 0))
@@ -411,14 +424,14 @@ def decide(payload: dict, home: Path, repo: str | None, g: GitHub,
     if blocks >= MAX_BLOCKS:
         return None
     try:
-        reason = missing(g, repo, e, owner())
+        reason = missing(g, work, e, owner(), home=repo)
     except Exception as ex:   # noqa: BLE001 -- GitHub unreachable or odd data: allow the stop
-        log(home, f"{sid}: allowing the stop, check failed: {ex!r}")
+        log(home, f"{sid}: allowing the stop, check failed on {work}: {ex!r}")
         return None
     if not reason:
         return None
     count_file.write_text(json.dumps({"blocks": blocks + 1}) + "\n")
-    log(home, f"{sid}: blocked stop {blocks + 1} of {MAX_BLOCKS}: {reason}")
+    log(home, f"{sid}: blocked stop {blocks + 1} of {MAX_BLOCKS} on {work}: {reason}")
     return {"decision": "block", "reason": reason}
 
 
