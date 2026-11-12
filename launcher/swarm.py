@@ -136,7 +136,7 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
            daily: str | None = None, ask: str | None = None,
            ask_comment: int | None = None, research: str | None = None,
            research_comment: int | None = None, ruling: str | None = None,
-           ruling_comment: int | None = None) -> str:
+           ruling_comment: int | None = None, conflict: bool = False) -> str:
     """The prompt ops/swarm-session uses when given no args (it passes args on unchanged).
 
     With an issue, it names it: the heartbeat's `working_on` detection matches
@@ -152,7 +152,8 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     With research, a [research] run (GOV-0029, #591): the analyst writes a brief on the
     question from comment research_comment in research/, as a PR that closes the issue. With
     ruling and a PR, a [ruling] run (#739, the owner's answer on #781): the PR's author role
-    applies the owner's comment ruling_comment on an overstep on the PR (#738)."""
+    applies the owner's comment ruling_comment on an overstep on the PR (#738). With conflict
+    and a PR, a [conflict] run (#893): the PR's author role brings the base into its branch."""
     if issue and research:
         # As for an ask: "issue #M" in the question would give the heartbeat two issues.
         safe = ISSUE_WORD_RE.sub(r"#\1", research)
@@ -189,6 +190,12 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
                 f"on the PR after the reviewer's Authority: fail review{where}: \"{ruling}\". Read the "
                 f"review and that comment in full, then push a fix that follows the ruling to the PR's "
                 f"branch, or reply on the PR saying why you can't, as roles/{role}.md says, and stop")
+    elif issue and pr and conflict:
+        then = (f"resolve the conflict between PR #{pr}, which closes issue #{issue}, and its base. "
+                f"swarm watch started this run from its [conflict] trigger (#893): GitHub reports the "
+                f"PR as conflicting, so it can't merge. Merge or rebase the base into the PR's branch, "
+                f"resolve the conflicts inside the PR's issue, run the tests and push. If you can't "
+                f"resolve them, say why in one comment on the PR, and stop")
     elif issue and pr:
         then = f"respond to the requested changes on PR #{pr}, which closes issue #{issue}"
     elif pr:     # a reviewer on one PR: a run in GitHub Actions (#215)
@@ -299,6 +306,7 @@ class Started:
     research_comment: int | None = None   # and the id of the comment that asked it
     ruling: str | None = None         # a [ruling] run (#739): the owner's comment on the overstep
     ruling_comment: int | None = None     # and that comment's id
+    conflict: bool = False            # a [conflict] run (#893): bring the base into the PR's branch
     repo: str | None = None           # owner/name of the issue's repo; None: this repo (#829)
 
     @classmethod
@@ -310,7 +318,7 @@ class Started:
                    daily=d.get("daily"), ask=d.get("ask"), ask_comment=d.get("ask_comment"),
                    research=d.get("research"), research_comment=d.get("research_comment"),
                    ruling=d.get("ruling"), ruling_comment=d.get("ruling_comment"),
-                   repo=d.get("repo"))
+                   conflict=bool(d.get("conflict")), repo=d.get("repo"))
 
 
 def recovered(sid: str, cmd: str, started: float) -> Started:
@@ -741,7 +749,7 @@ class Launcher:
                    "--model", shlex.quote(s.model), "--session-id", s.session_id]
         prompt = shlex.quote(opener(s.role, s.issue, s.pr, s.called_by, s.call_why, s.daily,
                                     s.ask, s.ask_comment, s.research, s.research_comment,
-                                    s.ruling, s.ruling_comment))
+                                    s.ruling, s.ruling_comment, s.conflict))
         if s.by == "watch":
             result = shlex.quote(str(self.result_file(s.session_id)))
             where = f" in container swarm-{s.session_id}" if self.container else ""

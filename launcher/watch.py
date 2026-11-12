@@ -35,6 +35,9 @@ it has none (for example, the role has no spend_cap_usd).
 |        | open issue, with research = true (GOV-0029, #591)                       | issue, once          |
 | ruling | the owner's comment on an open role's PR, posted after the reviewer's   | that role on the PR, |
 |        | Authority: fail review at its head (#739, the owner's answer on #781)   | once per comment     |
+| conflict| open, non-draft PR a role's App opened, closing one go issue, that      | that role on the PR, |
+|        | GitHub reports CONFLICTING with its base, with no changes requested or  | once per head (#893) |
+|        | overstep at its head                                                    |                      |
 
 [daily] (#588, GOV-0029): with `daily = true` in [watch], once each working day (Monday to
 Friday, in this machine's local time) at or after daily_at, it starts the planner on
@@ -125,6 +128,17 @@ exactly one issue. It waits while a session is live on the PR's
 issue, like [respond]. Its prompt quotes the comment (RULING_MAX characters, whitespace
 folded) and names its id; stophook.py holds the run until it pushed (the head is no longer
 Authority: fail) or commented on the PR, or the PR closed.
+
+[conflict] (#893): a PR that GitHub reports as conflicting with its base can't be merged,
+however it was reviewed, so the merger leaves it (GOV-0027). When an open, non-draft PR's
+`mergeable` is CONFLICTING, it starts the PR's author role once at that head, as [respond]
+does (#738), to merge or rebase the base into the branch and push. Only a PR whose one closing
+issue is go counts (the owner's `ready`, or GOV-0031's Goal or Area, as for [build]), and
+refusal() checks that again before the start. A PR with changes requested or an overstep at
+its head is left to [respond] and [ruling] (or the owner), whose push meets the conflict too.
+`UNKNOWN` (GitHub hasn't worked it out yet) counts as not conflicting. Keyed on the head
+(`conflict:<PR>:<head>`), so a push that still conflicts, after the base moves again, starts
+it once more. It waits while a session is live on the PR's issue, like [respond].
 
 [answer] on a ruling (#495): a question that is already `ready` when the owner rules it
 fires [answer] again, keyed on the owner's `gov:ruled` event (`answer:N:<event id>`), so
@@ -310,6 +324,7 @@ RESEARCH = "research"         # GOV-0029's Research: trigger (#591)
 RESEARCH_RE = re.compile(r"^[ \t]*Research:[ \t]*([^\n]*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 RULING = "ruling"             # the owner's ruling on an overstep (#739, #781)
 RULING_MAX = 1500             # characters of the owner's ruling that go into the prompt
+CONFLICT = "conflict"         # a go PR that conflicts with its base (#893)
 # The roles [respond] and [ruling] start, each on a PR its own App opened: the PR's author
 # role (#738, Option 1 of the owner's answer on #777), from the dashboard's RESPONDERS, which
 # generate.needs_owner reads too; it hands any other PR to the owner. `swarm trouble` reads
@@ -365,7 +380,7 @@ ENDINGS = {AT_CAP: "at_cap", ERROR: "error", NO_RESULT: "no_result", LIMITED: "l
 class Trigger:
     key: str                  # identity: a new key is a new trigger
     kind: str                 # review | build | record | answer | respond | call-in | daily | ask
-                              # | research | ruling
+                              # | research | ruling | conflict
     ref: str                  # "PR #12" or "#49"
     why: str
     role: str | None = None
@@ -387,6 +402,7 @@ class Trigger:
     repo: str | None = None       # another repo of the org it is in (#772); None: this one
     ruling: str | None = None     # [ruling]: the owner's comment, for the role's prompt (#739)
     ruling_comment: int | None = None   # [ruling]: that comment's id
+    conflict: bool = False        # [conflict]: bring the base into the PR's branch (#893)
 
     def line(self) -> str:
         if self.held:
@@ -620,6 +636,9 @@ def triggers(w: World, owner: str, started: list, roles: set[str], needs_you: Ca
         if t:
             out.append(t)
         out.extend(rulings(prs[n], w.comments.get(n, []), owner, busy))
+        t = conflict(prs[n], lambda i: issue_go(i, w, owner, set(apps or {}), now), busy)
+        if t:
+            out.append(t)
 
     # Questions: every open gov:question, from the model, plus any a session is blocked on.
     # Not from needs-you alone: it leaves out gov:ruled questions (#469), which [record]
@@ -1123,6 +1142,51 @@ def rulings(p: dict, comments: list[dict], owner: str,
             out.append(replace(t, command=launch_cmd(role, closes[0], n), issue=closes[0],
                                held=h[0] if h else None, once=h[1] if h else None))
     return out
+
+
+def conflict(p: dict, go: Callable[[int], bool],
+             busy: Callable[[int], tuple[str, str] | None]) -> Trigger | None:
+    """#893's [conflict] trigger for one open, non-draft PR, or None: GitHub reports it
+    CONFLICTING with its base, and its one closing issue is go. It starts the PR's author
+    role, as [respond] does (#738). Requested changes or an overstep at its head are left to
+    [respond], [ruling] and the owner (needs_owner); a PR no RESPOND_ROLES App opened starts
+    nothing."""
+    g = swarm.dashboard()
+    n, head, r = p["number"], p["head"], p.get("reviewer") or {}
+    role = g.pr_role(p.get("author", ""))
+    if (p.get("mergeable") != "CONFLICTING" or p.get("needs_owner") or r.get("at_head") == g.CHANGES
+            or overstepped(p) or role not in RESPOND_ROLES):
+        return None
+    closes = [c["number"] for c in p["closes"]]
+    key, why = f"conflict:{n}:{head}", f"conflicts with its base at {head[:7]}"
+    if len(closes) != 1:
+        return Trigger(key=key, kind=CONFLICT, ref=f"PR #{n}", why=why, role=role, pr=n,
+                       conflict=True,
+                       skipped=f"it closes {len(closes)} issues, and the {role} responds only on "
+                               f"a PR that closes exactly one")
+    if not go(closes[0]):
+        return None
+    h = busy(closes[0])
+    return Trigger(key=key, kind=CONFLICT, ref=f"PR #{n}", why=why, role=role,
+                   command=launch_cmd(role, closes[0], n), issue=closes[0], pr=n, conflict=True,
+                   held=h[0] if h else None, once=h[1] if h else None)
+
+
+def issue_go(n: int, w: World, owner: str, agents: set[str], now: dt.datetime | None) -> bool:
+    """Whether open issue n is go on this tick's reading, as [build] reads it: the owner's
+    `ready` (GOV-0006), a Goal or Area the owner opened (GOV-0031), or, until
+    swarm.MILESTONE_UNTIL, its milestone (GOV-0026); a gov:question by the owner's
+    `gov:ruled`, for a docs record PR (#738). For [conflict] (#893)."""
+    it = next((i for i in w.issues if i["number"] == n and "pull_request" not in i), None)
+    if it is None or it.get("state") != "open":
+        return False
+    labels, events = {lb.get("name") for lb in it.get("labels") or []}, w.events.get(n, [])
+    if "ready" in labels and owner_label(events, "ready", owner):
+        return True
+    if "gov:question" in labels:
+        return "gov:ruled" in labels and owner_label(events, "gov:ruled", owner) is not None
+    return bool(scope_go(it, w, owner, agents)
+                or swarm.milestone_open(now) and milestone_go(it, w, owner, agents) is not None)
 
 
 def gov_ids(title: str | None) -> set[str]:
@@ -1958,7 +2022,7 @@ class Watch:
                              called_by=t.called_by, call_why=t.call_why, daily=t.daily,
                              ask=t.ask, ask_comment=t.ask_comment, research=t.research,
                              research_comment=t.research_comment, ruling=t.ruling,
-                             ruling_comment=t.ruling_comment)
+                             ruling_comment=t.ruling_comment, conflict=t.conflict)
 
     def start_tick(self, now: dt.datetime) -> list[Trigger]:
         """Start a session for each new trigger, within the [watch] limits (GOV-0010)."""
@@ -2271,7 +2335,7 @@ class Watch:
             refused = ([f"#{t.issue} doesn't exist"] if issue is None else
                        [f"#{t.issue} is a pull request, not an issue"] if "pull_request" in issue else
                        [f"#{t.issue} is closed"] if issue.get("state") != "open" else [])
-        elif t.kind in ("build", "respond", RULING):
+        elif t.kind in ("build", "respond", RULING, CONFLICT):
             # The owner's `ready`, or the issue's milestone (GOV-0026, #583), as `swarm launch`.
             refused = swarm.go_refusals(t.issue, issue, events, self.owner, set(self.apps()),
                                         self.get_reader(self.repo, t.issue), now=now, repo=self.repo)

@@ -1561,6 +1561,94 @@ class RulingTest(unittest.TestCase):
         self.assertNotIn(74, w.comments)
 
 
+
+class ConflictTest(unittest.TestCase):
+    """#893: an approved go PR that GitHub reports CONFLICTING with its base starts its
+    author role once at that head. PR #72 closes #73."""
+
+    setUp_start = StartTest.setUp
+    manifest, watcher, started, exit = StartTest.manifest, StartTest.watcher, StartTest.started, StartTest.exit
+
+    def setUp(self):
+        self.setUp_start()
+        sc = self.scene
+        sc.issues, sc.events = [issue(73, ["ready"])], {73: [ev("ready", eid=15)]}
+        sc.prs = [{**pr(72, SHA1, closes=[73]), "mergeable": "CONFLICTING"}]
+        sc.reviewed, sc.reviews = {}, {72: [review("APPROVED", SHA1)]}
+
+    def test_a_conflicting_go_pr_starts_its_author_once_per_head(self):
+        done = self.watcher().tick(NOW)
+        self.assertEqual([(t.kind, t.ref) for t in done], [("conflict", "PR #72")])
+        self.assertEqual(self.started(), [("builder-pr-72", "builder", "m-builder", 73, "watch")])
+        e = self.l.load()[0]
+        self.assertEqual((e.pr, e.conflict), (72, True))
+        argv = headless_argv(self.fake.commands[0])
+        prompt = argv[argv.index("-p") + 1]
+        self.assertEqual(prompt, swarm.opener("builder", 73, 72, conflict=True))
+        self.assertIn("then resolve the conflict between PR #72, which closes issue #73, and its base.",
+                      prompt)
+        self.assertIn("[conflict] PR #72 conflicts with its base at aaaaaaa -> starting builder-pr-72",
+                      self.lines)
+        self.assertEqual(self.watcher().tick(NOW), [])          # busy on #73
+        self.exit("builder-pr-72")
+        self.assertEqual(self.watcher().tick(NOW), [])          # the same head: not again
+        self.assertEqual(len(self.fake.commands), 1)
+
+    def test_a_new_head_that_still_conflicts_starts_it_again(self):
+        self.watcher().tick(NOW)
+        self.exit("builder-pr-72")
+        self.scene.prs[0]["headRefOid"] = SHA2
+        self.scene.reviews[72].append(review("APPROVED", SHA2))
+        self.assertEqual([t.key for t in self.watcher().tick(NOW)], [f"conflict:72:{SHA2}"])
+
+    def test_a_non_go_pr_starts_nothing(self):
+        self.scene.issues, self.scene.events = [issue(73)], {}
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.scene.issues, self.scene.events = [issue(73, ["ready"])], {73: [ev("ready", "someone", 15)]}
+        self.assertEqual(self.watcher().tick(NOW), [])          # `ready`, but not the owner's
+        self.assertEqual(self.fake.commands, [])
+
+    def test_a_mergeable_or_unknown_pr_starts_nothing(self):
+        for state in ("MERGEABLE", "UNKNOWN", None):
+            self.scene.prs[0]["mergeable"] = state
+            self.assertEqual(self.watcher().tick(NOW), [])
+        self.assertEqual(self.fake.commands, [])
+
+    def test_changes_requested_or_an_overstep_is_left_to_respond_and_ruling(self):
+        self.scene.reviews = {72: [review("CHANGES_REQUESTED", SHA1)]}
+        self.assertEqual([t.kind for t in self.watcher().tick(NOW)], ["respond"])
+        self.exit("builder-pr-72")
+        self.scene.reviews = {72: [review("COMMENTED", SHA1, authority="fail")]}
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.assertEqual(len(self.fake.commands), 1)
+
+    def test_a_non_swarm_pr_or_one_closing_no_issue_starts_nothing(self):
+        self.scene.prs[0]["author"] = {"login": OWNER}
+        self.assertEqual(self.watcher().tick(NOW), [])
+        self.scene.prs = [{**pr(72, SHA1), "mergeable": "CONFLICTING"}]
+        self.watcher().tick(NOW)
+        self.assertIn("[conflict] PR #72 conflicts with its base at aaaaaaa -> skipped: it closes 0 "
+                      "issues, and the builder responds only on a PR that closes exactly one", self.lines)
+        self.assertEqual([c for c in self.fake.commands if "conflict" in c], [])   # #73 builds
+
+    def test_go_under_a_goal_counts(self):
+        """GOV-0031: an issue under an open Goal the owner opened is go without `ready`."""
+        it = {**issue(73), "user": {"login": "productswarm-planner[bot]"}}
+        self.scene.issues, self.scene.events = [it], {}
+        goal = {"number": 684, "repo": REPO, "type": "Goal", "state": "open",
+                "author": OWNER, "title": "M2"}
+        w = self.scene.read(REPO, 15, NOW)
+        w.scopes = {73: {"parents": [goal], "blocked_by": []}}
+        with mock.patch.object(swarm, "scope_refusal", lambda *a, **k: None), \
+                mock.patch.object(swarm, "scope_goal", lambda scope, owner: goal):
+            self.assertTrue(watch.issue_go(73, w, OWNER, set(), NOW))
+        self.assertFalse(watch.issue_go(73, w, OWNER, set(), NOW))   # the real check: no reader set up
+        self.assertFalse(watch.issue_go(99, w, OWNER, set(), NOW))   # not an open issue
+
+    def test_mergeable_reaches_the_model(self):
+        m = G.build(self.scene.data(), NOW, dt.timedelta(minutes=15))
+        self.assertEqual(m["prs"][0]["mergeable"], "CONFLICTING")
+
 class OverlapTest(unittest.TestCase):
     """#136 (the owner's answer on #127): a [build] waits while a live builder or an open PR
     shares a GOV id in its issue's title."""
