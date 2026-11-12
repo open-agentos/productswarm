@@ -15,17 +15,18 @@ It reads GitHub through `gh api`, so inside a swarm session it acts as the role'
 
 ## Pages
 
-One build writes five pages, and the fonts, into the `--out` page's directory (#401, part of #397):
+One build writes six pages, and the fonts, into the `--out` page's directory (#401, part of #397):
 
 | Page | What it shows |
 |---|---|
 | `bridge.html`, the **Bridge** | The owner's home, read-only, after the owner's "v5 · the bridge" mock-up ([the Bridge](#the-bridge), #926): status, decisions waiting, the crew's reports, Goals and Areas in flight, and the owner's acts on GitHub. |
+| `commissions.html` | Each open Goal and Area, grouped by what it needs from the owner, with a focus drawer ([Commissions](#commissions), #931) |
 | `index.html`, the **desk** | Today's report and the plan (#712), the trouble panel per Goal and Area (#903: `swarm trouble`'s report, built by `generate.py` without the owner-acts sync, so M4's acts criterion reads unmeasured here; no spend), [On the floor](#on-the-floor), [the wire](#the-wire), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), [How the questions went](#how-the-questions-went), [precedent in use](#precedent-in-use), a card per [past committee](#past-committees), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" with their round grids |
 | `authority.html` | The [authority map](#authority-map): who may decide what, one row per domain in `governance/jurisdictions.yml` |
 
-Every page opens with the [header](#header) and carries `noindex` and a [Content-Security-Policy](#live-refresh), reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the five pages. `generate.render(model)` returns the pages by file name.
+Every page opens with the [header](#header) and carries `noindex` and a [Content-Security-Policy](#live-refresh), reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the six pages. `generate.render(model)` returns the pages by file name.
 
 ### Look
 
@@ -44,6 +45,12 @@ The fonts are **self-hosted**, so the public page loads nothing from a third par
 - **Orders received:** the owner's acts on GitHub from the repo's events (the header's read), newest first, at most 8, with chair "GitHub". Branch creation and deletion are left out.
 
 The left column links Commissions to the desk (the plan and trouble panel) and Agents to Operations until those pages are drawn. "Your chairs", "Lead recommends", "Discuss with…" and spend aren't shown: chairs and writes come later (#760), and GOV-0033 sets no engine total. Links go only to github.com or a page beside it. The page carries no script.
+
+## Commissions
+
+`commissions.html` (`commissions.py`, #931, under M3) is the Commissions page from the same mock-up, read-only and with no API calls of its own. Each open Goal and Area the owner opened goes in the first group that fits: **needs a look** (flagged, as on the Bridge), **waits on you**, **running** (Goals) or **keep it so** (Areas). After those, **delivered this week** lists the owner's Goals and Areas closed in the last 7 days. Each row shows its type, its open and done sub-issues from the plan, a bar of criteria met of total from `swarm trouble`, and a status word.
+
+Picking a row opens its **focus drawer** without a script: the row links to `#c-<number>`, and CSS `:target` shows that drawer. The drawer has the done test (an unmeasured criterion reads "unmeasured: not known to be on track"), what's stuck and why nothing will start it, what waits on the owner, what was done on the owner's authority, the open sub-issues with their go status and PRs, and a link to it on GitHub. If the trouble report wasn't read, the page lists the plan alone. There's no cost, no shape filter and no pause, steer or halt buttons yet (GOV-0033, #760).
 
 ## Header
 

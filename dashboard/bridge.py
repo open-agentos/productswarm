@@ -380,14 +380,30 @@ def orders_html(b: dict) -> str:
     return f'<section class="br-orders">{head}{"".join(rows)}</section>'
 
 
-def nav_html(b: dict) -> str:
-    return ('<nav class="br-nav" aria-label="Bridge">'
-            '<span class="br-navi here" aria-current="page">Bridge</span>'
-            f'<a class="br-navi" href="index.html">Commissions<span class="mono muted">{b["commissions"]}</span></a>'
-            f'<a class="br-navi" href="operations.html">Agents<span class="mono muted">{b["agents"]}</span></a>'
-            '<p class="br-kind">YOUR CHAIRS</p>'
+# The Bridge's left column, shared by its pages: (file, name). Agents is Operations until #932.
+NAV = (("bridge.html", "Bridge"), ("commissions.html", "Commissions"), ("operations.html", "Agents"))
+
+
+def nav_html(current: str, counts: dict[str, int]) -> str:
+    """The left column: the Bridge's pages, the current one marked, each with its count."""
+    items = []
+    for file, name in NAV:
+        n = counts.get(name)
+        count = f'<span class="mono muted">{n}</span>' if n is not None else ""
+        if file == current:
+            items.append(f'<span class="br-navi here" aria-current="page">{esc(name)}{count}</span>')
+        else:
+            items.append(f'<a class="br-navi" href="{esc(file)}">{esc(name)}{count}</a>')
+    return ('<nav class="br-nav" aria-label="Bridge">' + "".join(items)
+            + '<p class="br-kind">YOUR CHAIRS</p>'
             '<p class="muted br-note">None connected yet. You give orders on GitHub; '
             'the Bridge is where you look.</p></nav>')
+
+
+def nav_counts(m: dict) -> dict[str, int]:
+    """The left column's counts: open Goals and Areas, and live sessions."""
+    live = [s for s in m.get("sessions") or [] if s.get("status") != "stopped" and not s.get("never_acted")]
+    return {"Commissions": len(in_flight(m)), "Agents": len(live)}
 
 
 def render(b: dict) -> str:
@@ -400,7 +416,7 @@ def render(b: dict) -> str:
             f'{status_html(b)}{decisions_html(b)}'
             f'<div class="br-cols"><div class="br-left">{reports_html(b)}</div>'
             f'<div class="br-right">{flights_html(b)}{orders_html(b)}</div></div></div>')
-    return f'<div class="bridge">{nav_html(b)}{main}</div>'
+    return f'<div class="bridge">{nav_html(FILE, {"Commissions": b["commissions"], "Agents": b["agents"]})}{main}</div>'
 
 
 def page(m: dict, owner: str | None, title: str, owner_line: str) -> str:
