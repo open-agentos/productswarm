@@ -79,6 +79,16 @@ class InvalidManifestTest(Base):
         self.assertIn("unknown top-level key 'sessions'",
                       self.problems('sessions = 1\n' + session())[0])
 
+    def test_specs_table_is_allowed_but_another_unknown_table_is_not(self):
+        """#952: [specs] parses (config.py checks its contents); [other] still fails."""
+        self.assertEqual(len(self.parse(session() + '[specs]\nbackend = "anything"\n')), 1)
+        self.assertIn("unknown top-level key 'other'",
+                      self.problems(session() + '[other]\nbackend = "fake"\n')[0])
+
+    def test_specs_must_be_a_table(self):
+        self.assertIn("specs: must be a [specs] table",
+                      self.problems('specs = "fake"\n' + session()))
+
     def test_count_zero_negative_or_not_whole(self):
         self.assertEqual(self.problems(session(count=0)),
                          ["session 1 (builder): count must be at least 1, got 0"])
