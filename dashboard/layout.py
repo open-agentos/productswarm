@@ -36,7 +36,8 @@ LATIN1 = ("U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6
           "U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02")
 
 # The pages, in footer order: (file, name).
-PAGES = (("bridge.html", "Bridge"), ("commissions.html", "Commissions"), ("index.html", "Desk"), ("operations.html", "Operations"), ("decisions.html", "Decisions"),
+PAGES = (("bridge.html", "Bridge"), ("commissions.html", "Commissions"), ("agents.html", "Agents"),
+         ("index.html", "Desk"), ("operations.html", "Operations"), ("decisions.html", "Decisions"),
          ("authority.html", "Authority"))
 
 # #397's palette: paper, ink, agents blue, owner amber, and red for live marks and blocks only.
@@ -276,6 +277,15 @@ ul.cm-list { margin:0; padding:0; list-style:none; font-size:14px; } ul.cm-list 
 ul.cm-list li.status-failing b { color:var(--red); } ul.cm-list li.status-met b { color:var(--agent); }
 ul.cm-list .st { font:600 13px/1.3 var(--cond); } ul.cm-list .st.go { color:var(--agent); }
 ul.cm-list .st.not_go { color:var(--owner); }
+/* The Agents page (#932): Commissions' list and drawer, with a badge per role. */
+.br-av.idle { background:#EDEBE3; color:var(--muted); }
+ul.cm-list .owner { color:var(--owner); }
+a.cm-row .br-av { align-self:flex-start; }
+.ag-n { font-size:13px; min-width:80px; }
+.ag-head { display:flex; gap:10px; align-items:center; margin:6px 0; } .ag-head .cm-dtitle { margin:0; }
+.ag-tiles { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; }
+.ag-tile { background:#fff; border:1px solid #E4E2D9; border-radius:8px; padding:8px 10px; display:flex;
+  flex-direction:column; gap:2px; font-size:13px; } .ag-tile .mono { font-size:18px; }
 """
 
 

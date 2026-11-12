@@ -15,12 +15,13 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
   - for every page's header (#402, activity.py): the repo's public events, 1 to 3 pages, to
     say when the owner last acted.
 
-Builds six pages in one look (layout.py), each headed by a red LIVE mark, the build time
+Builds seven pages in one look (layout.py), each headed by a red LIVE mark, the build time
 and the owner's last act (#402), and copies the self-hosted fonts beside them:
   - bridge.html, the Bridge (bridge.py, #926): the owner's home, read-only: status, decisions
     waiting, the crew's reports, Goals and Areas in flight, and the owner's acts on GitHub;
   - commissions.html (commissions.py, #931): each open Goal and Area, grouped by what it needs
     from the owner, with a focus drawer for the one picked;
+  - agents.html (agents.py, #932): one row per role, working or idle, with a focus drawer;
   - index.html, the desk: today's report and the plan (report.py, plan.py, #712), the trouble
     panel per Goal and Area (`swarm trouble`'s report without the acts sync, #903), on the floor (floor.py), grants in use (grants.py, #713), the wire (wire.py, #405), the committee desk while one is open (#404),
     what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
@@ -50,6 +51,7 @@ import sys
 from pathlib import Path
 
 import activity
+import agents
 import authority
 import bridge
 import commissions
@@ -877,6 +879,11 @@ def render_commissions(m: dict) -> str:
     return commissions.page(m, TITLE, owner_line(m))
 
 
+def render_agents(m: dict) -> str:
+    """agents.html: one row per role, each with a focus drawer (#932)."""
+    return agents.page(m, TITLE, owner_line(m))
+
+
 def render_authority(m: dict) -> str:
     """authority.html: who may decide what, from governance/jurisdictions.yml (#410)."""
     a = m.get("authority") or authority.build(None, [])
@@ -886,7 +893,8 @@ def render_authority(m: dict) -> str:
 
 def render(m: dict) -> dict[str, str]:
     """Every page, by file name, in layout.PAGES order."""
-    pages = {"bridge.html": render_bridge, "commissions.html": render_commissions, "index.html": render_desk, "operations.html": render_operations,
+    pages = {"bridge.html": render_bridge, "commissions.html": render_commissions,
+             "agents.html": render_agents, "index.html": render_desk, "operations.html": render_operations,
              "decisions.html": render_decisions, "authority.html": render_authority}
     return {f: pages[f](m) for f, _ in layout.PAGES}
 
