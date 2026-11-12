@@ -157,7 +157,7 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
     comments = tracking_comments(repo, [s["issue"] for s in tracking_issues(issues.values())])
     prs = gh_json("pr", "list", "--repo", repo, "--state", "open", "--limit", "100", "--json",
                   "number,title,url,author,isDraft,createdAt,reviewDecision,closingIssuesReferences,"
-                  "headRefOid")
+                  "headRefOid,mergeable")      # mergeable: swarm watch's [conflict] (#893)
     reviews = {p["number"]: gh_items(f"repos/{repo}/pulls/{p['number']}/reviews?per_page=100")
                for p in prs or [] if not p.get("isDraft")}
     try:
@@ -449,7 +449,8 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
         prs.append({"number": p["number"], "title": p["title"], "url": p["url"],
                     "author": (p.get("author") or {}).get("login", ""), "draft": p.get("isDraft"),
                     "review": p.get("reviewDecision") or "", "created_ts": parse_ts(p["createdAt"]),
-                    "closes": closes, "head": p.get("headRefOid")})
+                    "closes": closes, "head": p.get("headRefOid"),
+                    "mergeable": p.get("mergeable")})
         prs[-1]["reviewer"] = rv = reviewer_state((data.get("reviews") or {}).get(p["number"], []),
                                                   p.get("headRefOid"))
         prs[-1]["needs_owner"] = needs_owner(rv, prs[-1]["author"])
