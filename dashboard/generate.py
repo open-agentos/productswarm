@@ -15,8 +15,10 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
   - for every page's header (#402, activity.py): the repo's public events, 1 to 3 pages, to
     say when the owner last acted.
 
-Builds four pages in one look (layout.py), each headed by a red LIVE mark, the build time
+Builds five pages in one look (layout.py), each headed by a red LIVE mark, the build time
 and the owner's last act (#402), and copies the self-hosted fonts beside them:
+  - bridge.html, the Bridge (bridge.py, #926): the owner's home, read-only: status, decisions
+    waiting, the crew's reports, Goals and Areas in flight, and the owner's acts on GitHub;
   - index.html, the desk: today's report and the plan (report.py, plan.py, #712), the trouble
     panel per Goal and Area (`swarm trouble`'s report without the acts sync, #903), on the floor (floor.py), grants in use (grants.py, #713), the wire (wire.py, #405), the committee desk while one is open (#404),
     what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
@@ -47,6 +49,7 @@ from pathlib import Path
 
 import activity
 import authority
+import bridge
 import committees
 import floor
 import ghql
@@ -184,7 +187,17 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
                       if with_grants else None,
             "plan": plan.fetch(repo) if with_plan else None,
             "report": fetch_report(repo, now) if with_plan else None,
-            "trouble": fetch_trouble(repo, now) if with_trouble else None}
+            "trouble": fetch_trouble(repo, now) if with_trouble else None,
+            # The Bridge's shipped and delivered reports (#926), from the closed items read above.
+            "merged": merged_prs(items.values())}
+
+
+def merged_prs(items) -> list[dict]:
+    """PRs among `items` (REST issues) that GitHub has merged, as {number, title, url, author,
+    merged_at}. No API calls: the closed items fetch() reads already carry merged_at."""
+    return [{"number": it["number"], "title": it.get("title") or "", "url": it.get("html_url"),
+             "author": (it.get("user") or {}).get("login"), "merged_at": pr["merged_at"]}
+            for it in items if (pr := it.get("pull_request") or {}).get("merged_at")]
 
 
 def fetch_report(repo: str, now: dt.datetime) -> dict:
@@ -527,7 +540,8 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
                                 data["report"]["daily_at"]) if data.get("report") else None,
          # with_plan reads both; the plan's own None means its read failed, which the panel says
          "plan": plan.build(data.get("plan"), owner, repo) if data.get("report") else None,
-         "trouble": data.get("trouble"),   # #903: trouble.report()'s dict, or {"error": why}
+         "trouble": data.get("trouble"),
+         "merged": data.get("merged") or [],   # #926: the Bridge's reports   # #903: trouble.report()'s dict, or {"error": why}
          "spend": {"per_day": per_day, "today": per_day[today],
                    "unpriced": [s for s in sessions if s["cost"] is None]}}
     m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
@@ -844,6 +858,11 @@ def render_decisions(m: dict) -> str:
     return layout.page("decisions.html", TITLE, repo, now, "\n".join(o for o in out if o), owner_line(m))
 
 
+def render_bridge(m: dict) -> str:
+    """bridge.html: the Bridge, the owner's "v5 · the bridge" home, read-only (#926)."""
+    return bridge.page(m, committees.owner_login(), TITLE, owner_line(m))
+
+
 def render_authority(m: dict) -> str:
     """authority.html: who may decide what, from governance/jurisdictions.yml (#410)."""
     a = m.get("authority") or authority.build(None, [])
@@ -853,7 +872,7 @@ def render_authority(m: dict) -> str:
 
 def render(m: dict) -> dict[str, str]:
     """Every page, by file name, in layout.PAGES order."""
-    pages = {"index.html": render_desk, "operations.html": render_operations,
+    pages = {"bridge.html": render_bridge, "index.html": render_desk, "operations.html": render_operations,
              "decisions.html": render_decisions, "authority.html": render_authority}
     return {f: pages[f](m) for f, _ in layout.PAGES}
 

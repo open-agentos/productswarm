@@ -36,7 +36,7 @@ LATIN1 = ("U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6
           "U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02")
 
 # The pages, in footer order: (file, name).
-PAGES = (("index.html", "Desk"), ("operations.html", "Operations"), ("decisions.html", "Decisions"),
+PAGES = (("bridge.html", "Bridge"), ("index.html", "Desk"), ("operations.html", "Operations"), ("decisions.html", "Decisions"),
          ("authority.html", "Authority"))
 
 # #397's palette: paper, ink, agents blue, owner amber, and red for live marks and blocks only.
@@ -199,6 +199,53 @@ footer.foot { margin-top:40px; padding-top:8px; border-top:2px solid var(--ink);
   display:flex; flex-wrap:wrap; gap:4px 18px; font:600 13px/1.6 var(--cond);
   text-transform:uppercase; letter-spacing:.06em; }
 footer.foot .here { text-decoration:none; color:var(--muted); }
+/* The Bridge (#926): bridge.py, after the owner's "v5 · the bridge" mock-up. */
+.bridge { display:flex; flex-wrap:wrap; gap:0 28px; align-items:flex-start; }
+.br-nav { flex:1 1 170px; max-width:200px; display:flex; flex-direction:column; gap:2px;
+  padding:14px 0; }
+.br-navi { display:flex; justify-content:space-between; gap:8px; padding:8px 10px; text-decoration:none;
+  font-size:14px; }
+.br-navi.here { background:#EDEBE3; font-weight:600; }
+.br-nav .br-kind { padding:18px 10px 4px; margin:0; }
+.br-note { font-size:13px; padding:0 10px; margin:0; }
+.br-main { flex:999 1 520px; min-width:0; display:flex; flex-direction:column; gap:26px; }
+.br-titlebar { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 16px; }
+.br-titlebar h1 { font-size:30px; margin:12px 0 0; }
+.br-status { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:10px; }
+.br-tile { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px;
+  display:flex; flex-direction:column; gap:2px; font-size:13px; }
+.br-tile.hot { border-color:var(--owner); background:#FFF8EE; }
+.br-tile.hot .br-big { color:var(--owner); }
+.br-big { font:24px/1.2 var(--mono); } .br-big small { font-size:15px; color:var(--muted); }
+.br-sub { color:var(--muted); } .br-red { color:var(--red); }
+.br-colh { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:4px 10px;
+  padding-bottom:8px; border-bottom:1px solid var(--line); font-size:13px; }
+h2.br-h { font:600 20px/1.2 var(--cond); margin:0; padding:0; border:0; text-transform:none; letter-spacing:0; }
+h2.br-h.owner, .br-kind.owner { color:var(--owner); }
+.br-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; margin-top:12px; }
+.br-dec { background:#FFF8EE; border:1px solid var(--owner); border-radius:10px; padding:14px 16px;
+  display:flex; flex-direction:column; gap:6px; }
+.br-dec a { color:var(--owner); text-decoration-color:var(--owner); }
+.br-kind { font:11px/1.4 var(--mono); letter-spacing:.06em; color:var(--muted); }
+.br-kind time { font-size:11px; }
+.br-title { font-weight:600; }
+.br-cols { display:flex; flex-wrap:wrap; gap:26px 32px; align-items:flex-start; }
+.br-left { flex:3 1 340px; min-width:0; } .br-right { flex:2 1 260px; min-width:0; display:flex;
+  flex-direction:column; gap:26px; }
+.br-rep { display:flex; gap:12px; padding:12px 0; border-bottom:1px solid #E4E2D9; }
+.br-body { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.br-body .muted { font-size:13px; }
+.br-av { width:32px; height:32px; border-radius:8px; flex:none; display:flex; align-items:center;
+  justify-content:center; font:12px var(--mono); background:#E1E7F5; color:var(--agent); }
+.br-av.lead { background:var(--agent); color:#fff; }
+.br-row { display:flex; gap:10px; align-items:baseline; padding:9px 0; border-bottom:1px solid #E4E2D9;
+  font-size:14px; }
+.br-row .muted { font-size:13px; }
+.br-row time { flex:none; width:70px; }
+.br-grow { flex:1; min-width:0; }
+.br-dot { width:9px; height:9px; border-radius:50%; flex:none; align-self:center; background:var(--quiet); }
+.br-dot.agent { background:var(--agent); } .br-dot.owner { background:var(--owner); }
+.br-dot.red { background:var(--red); }
 """
 
 
