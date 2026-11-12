@@ -1206,6 +1206,47 @@ class OtherReposTest(unittest.TestCase):
         self.assertEqual(self.lines.count("swarm watch: can't read open-agentos/gone (gh failed); "
                                           "its triggers wait"), 1)
 
+    # #892: [org] paused stops dispatch in one repo while the rest carry on.
+    def test_a_paused_other_repo_isnt_read_and_this_repo_still_starts(self):
+        w = self.watch(f'[org]\nrepos = ["{SCRATCH}"]\npaused = ["{SCRATCH}"]\n', dry_run=False)
+        done = w.tick(NOW)
+        self.assertEqual(self.read_repos, [REPO])
+        self.assertIn(f"swarm watch: {SCRATCH} is paused in swarm.toml's [org] paused (#892); "
+                      f"nothing starts there", self.lines)
+        self.assertFalse(any(SCRATCH in x and watch.OTHER_REPO in x for x in self.lines))
+        self.assertEqual(self.kinds(done), [("review", "PR #70"), ("record", "#87")])   # max_live 2
+        self.assertEqual(len(self.l.running()), 2)
+
+    def test_this_repo_paused_starts_nothing_and_fires_once_unpaused(self):
+        org = f'[org]\nrepos = ["{SCRATCH}"]\npaused = ["{REPO}"]\n'
+        w = self.watch(org, dry_run=False)
+        self.assertEqual(w.tick(NOW), [])
+        self.assertEqual(self.l.running(), [])
+        self.assertIn(f"swarm watch: {REPO} is paused in swarm.toml's [org] paused (#892); "
+                      f"nothing starts there", self.lines)
+        self.assertIn(SCRATCH, self.read_repos)                  # the other repo carries on
+        self.assertIn(f"[build] {SCRATCH}#5 go under Goal {REPO}#686 (GOV-0031) -> {watch.OTHER_REPO}",
+                      self.lines)
+        st = watch.load_state(self.l)
+        self.assertEqual(st["acted"], {})
+        self.assertIn("#49", {x["ref"] for x in st["waiting"] if x["code"] == "paused"})
+        pub = watch.public_state(st, [], NOW)
+        self.assertIn(("#49", "paused", "held: its repo is paused in swarm.toml"),
+                      {(x["ref"], x["code"], x["reason"]) for x in pub["held"]})
+        w.manifest_path.write_text(w.manifest_path.read_text().replace(f'paused = ["{REPO}"]', ""))
+        self.assertEqual(self.kinds(w.tick(NOW)), [("review", "PR #70"), ("record", "#87")])
+
+    def test_a_bad_paused_list_starts_nothing_anywhere(self):
+        w = self.watch(f'[org]\nrepos = ["{SCRATCH}"]\npaused = "{SCRATCH}"\n', dry_run=False)
+        self.assertEqual(w.tick(NOW), [])
+        self.assertEqual(self.l.running(), [])
+        self.assertTrue(any("paused must be a list" in x for x in self.lines), self.lines)
+
+    def test_dry_run_says_this_repo_is_paused(self):
+        self.watch(f'[org]\npaused = ["{REPO}"]\n').tick(NOW)
+        self.assertIn(f"swarm watch: {REPO} is paused in swarm.toml's [org] paused (#892); "
+                      f"nothing starts there", self.lines)
+
 
 if __name__ == "__main__":
     unittest.main()

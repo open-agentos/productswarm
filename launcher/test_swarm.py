@@ -622,10 +622,24 @@ class LsTest(Base):
 
     def test_ls_all_flag_reaches_ls_rows(self):
         seen = []
-        with mock.patch.object(swarm, "ls", lambda l, repo, idle, show_all=False: seen.append(show_all) or 0):
+        with mock.patch.object(swarm, "ls", lambda l, repo, idle, show_all=False, manifest_path=None:
+                               seen.append(show_all) or 0):
             swarm.main(["ls", "--repo", "o/r"], self.l)
             swarm.main(["ls", "--all", "--repo", "o/r"], self.l)
         self.assertEqual(seen, [False, True])
+
+    def test_ls_names_each_paused_repo(self):   # #892
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "swarm.toml"
+            p.write_text('[org]\nrepos = ["o/x"]\n')
+            self.assertEqual(swarm.paused_lines(p), [])
+            p.write_text('[org]\nrepos = ["o/x"]\npaused = ["o/x", "o/r"]\n')
+            self.assertEqual(swarm.paused_lines(p), [
+                f"paused: {r} (swarm.toml's [org] paused): swarm watch starts nothing there and "
+                f"the merger merges nothing" for r in ("o/r", "o/x")])
+            p.write_text('[org]\npaused = "o/x"\n')
+            self.assertEqual(len(swarm.paused_lines(p)), 1)
+            self.assertTrue(swarm.paused_lines(p)[0].startswith("paused: every repo, until"))
 
     def test_spend_column(self):
         usd = lambda x: "-" if x is None else f"${x:,.2f}"  # noqa: E731

@@ -992,7 +992,8 @@ def heartbeat(repo: str, idle_minutes: int, now: dt.datetime) -> dict:
     return snapshot(repo, idle_minutes, now)[1]
 
 
-def ls(launcher: Launcher, repo: str, idle_minutes: int, show_all: bool = False) -> int:
+def ls(launcher: Launcher, repo: str, idle_minutes: int, show_all: bool = False,
+       manifest_path: Path | str = manifest.DEFAULT_PATH) -> int:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     model = heartbeat(repo, idle_minutes, now)
     g = dashboard()
@@ -1004,7 +1005,18 @@ def ls(launcher: Launcher, repo: str, idle_minutes: int, show_all: bool = False)
                             "SESSION"], rows))
     for wt in launcher.kept:
         launcher.out(f"worktree kept: {wt} (uncommitted or unpushed work)")
+    for line in paused_lines(manifest_path):
+        launcher.out(line)
     return 0
+
+
+def paused_lines(manifest_path: Path | str) -> list[str]:
+    """One line per repo paused in swarm.toml's [org] paused (#892), for `swarm ls`."""
+    paused, problems = manifest.load_paused(manifest_path)
+    if paused is None:
+        return [f"paused: every repo, until swarm.toml is fixed: {p}" for p in problems]
+    return [f"paused: {r} (swarm.toml's [org] paused): swarm watch starts nothing there and "
+            f"the merger merges nothing" for r in sorted(paused)]
 
 
 REVIEW_IN_ACTIONS = ("swarm watch leaves [review] to the GitHub Actions reviewer "
@@ -1964,6 +1976,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_ls.add_argument("--idle-minutes", type=int, default=15)
     p_ls.add_argument("--all", action="store_true", dest="show_all",
                       help="also list sessions that never acted, marked (#454)")
+    p_ls.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_stop = sub.add_parser("stop", help="end one session the launcher started")
     p_stop.add_argument("session", help="its name (builder-1) or session id")
     p_inbox = sub.add_parser("inbox", help="what's waiting on the owner, most urgent first")
@@ -2098,7 +2111,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                 return 1
             return launcher.up(sessions, dry_run=args.dry_run)
         if args.cmd == "ls":
-            return ls(launcher, repo, args.idle_minutes, args.show_all)
+            return ls(launcher, repo, args.idle_minutes, args.show_all, args.manifest)
         if args.cmd == "inbox":
             return inbox(launcher, repo, args.idle_minutes, args.manifest)
         if args.cmd == "cost":

@@ -41,6 +41,12 @@ An optional [org] table (#772) lists in `repos` the org's other repos ("owner/na
 bad table is a problem like a bad [[session]] entry: it is reported, and the other repos
 are left out until it is fixed. others() drops this repo and any repo outside its org
 (GOV-0031's go covers sub-issues in any repo of the org, and no further).
+
+The [org] table's optional `paused` list (#892) names repos ("owner/name", this one or any
+in `repos`) that are paused: `swarm watch` starts no session on their work and the merger
+neither merges nor comments there, while every other repo carries on. Delete the line, or
+the repo from it, to unpause. A bad `paused` value fails closed: load_paused() then says
+every repo is paused until it is fixed, since we can't tell which one the owner meant.
 """
 from __future__ import annotations
 
@@ -270,7 +276,9 @@ def repos_of(data: dict) -> tuple[tuple[str, ...], list[str]]:
     t = data["org"]
     if not isinstance(t, dict):
         return (), ["org: must be an [org] table"]
-    problems = [f"org: unknown key '{k}' (allowed: repos)" for k in sorted(set(t) - {"repos"})]
+    problems = [f"org: unknown key '{k}' (allowed: repos, paused)"
+                for k in sorted(set(t) - {"repos", "paused"})]
+    problems += paused_of(data)[1]
     repos = t.get("repos", [])
     if not isinstance(repos, list):
         return (), problems + [f"org: repos must be a list of \"owner/name\" strings, got {repos!r}"]
@@ -283,6 +291,41 @@ def repos_of(data: dict) -> tuple[tuple[str, ...], list[str]]:
         else:
             seen.add(r.lower())
     return ((), problems) if problems else (tuple(repos), [])
+
+
+def paused_of(data: dict) -> tuple[frozenset[str] | None, list[str]]:
+    """[org] paused from parsed TOML (#892): (the paused repos, lowercased, the problems).
+    None, with problems, when the list is bad: every repo is then paused (fails closed)."""
+    t = data.get("org")
+    if not isinstance(t, dict) or "paused" not in t:
+        return frozenset(), []
+    paused = t["paused"]
+    if not isinstance(paused, list):
+        return None, [f"org: paused must be a list of \"owner/name\" strings, got {paused!r}; "
+                      f"every repo is paused until it is fixed"]
+    bad = [f"org: each paused repo must be \"owner/name\", got {r!r}; every repo is paused "
+           f"until it is fixed" for r in paused if not isinstance(r, str) or not REPO_RE.match(r)]
+    return (None, bad) if bad else (frozenset(r.lower() for r in paused), [])
+
+
+def load_paused(path: Path | str = DEFAULT_PATH) -> tuple[frozenset[str] | None, list[str]]:
+    """The manifest's [org] paused repos, as paused_of(). A file that can't be read or isn't
+    TOML pauses nothing: whatever reads it reports that already, and stops on its own."""
+    try:
+        return paused_of(tomllib.loads(_read(Path(path))))
+    except (ManifestError, tomllib.TOMLDecodeError):
+        return frozenset(), []
+
+
+def is_paused(repo: str, paused: frozenset[str] | None) -> bool:
+    """Whether repo is paused, given load_paused()'s set (None: all are)."""
+    return paused is None or repo.lower() in paused
+
+
+def paused_text(repo: str, paused: frozenset[str] | None) -> str:
+    """Why repo is paused, for watch, the merger and `swarm ls`."""
+    return (f"{repo} is paused: swarm.toml's [org] paused is bad, so every repo is until it is fixed"
+            if paused is None else f"{repo} is paused in swarm.toml's [org] paused (#892)")
 
 
 def load_repos(path: Path | str = DEFAULT_PATH) -> tuple[tuple[str, ...], list[str]]:
@@ -376,9 +419,13 @@ def main(argv: list[str]) -> int:
         research = "[research] on" if limits.research else "[research] off"
         print(f"watch\tevery {limits.interval_minutes:g} min\tat most {limits.max_live} live\t{turns}"
               f"\t{planned}\t{reviews}\t{calls}\t{daily}\t{asks}\t{research}")
-    repos = repos_of(tomllib.loads(_read(path)))[0]
+    data = tomllib.loads(_read(path))
+    repos = repos_of(data)[0]
     if repos:
         print(f"org\talso works {', '.join(repos)}")
+    paused = paused_of(data)[0]
+    if paused is None or paused:
+        print(f"org\tpaused {'every repo' if paused is None else ', '.join(sorted(paused))}")
     return 0
 
 

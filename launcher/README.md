@@ -744,6 +744,27 @@ What changes once a repo is listed:
 
 A repo outside this repo's org is left out, with a line saying so. This repo listed again is ignored. If the `[org]` table is bad (not a list, not `owner/name`, a repo twice, or an unknown key), it is reported like a bad `[[session]]` entry and no other repo is worked until it is fixed.
 
+### Pausing one repo (#892)
+
+To stop the swarm in one repo while the others carry on, add that repo to `paused` in the `[org]` table. It can be this repo or any repo in `repos`:
+
+```toml
+[org]
+repos = ["open-agentos/scratch"]
+paused = ["open-agentos/scratch"]   # "owner/name"; case doesn't matter
+```
+
+To unpause it, take the repo out of the list or delete the line.
+
+- **`swarm watch`** reads `swarm.toml` on every check. For a paused repo it prints `swarm watch: <repo> is paused in swarm.toml's [org] paused (#892); nothing starts there` once and starts no session on its work.
+  - If another repo is paused, watch doesn't read that repo at all.
+  - If this repo is paused, each of its triggers is held with the code `paused`, so `swarm inbox`, `swarm status` and the Desk list it as `held: its repo is paused in swarm.toml`. Watch never records these triggers, so each one fires on the first check after you unpause.
+  - Sessions that are already running are left alone (GOV-0008). Use `swarm stop` if you want them gone.
+- **The merger** stops before it reads any PR in a paused repo. It prints `merger: <repo> is paused …: nothing posted or merged` (`plan` prints `no PR is considered`), so nothing there is merged, enqueued or commented on. This holds with `--repo` and `--pr` too. The merger workflow runs from `main`, so a pause reaches the merger only once the `swarm.toml` change is merged. `swarm watch` sees the pause as soon as it is in the `swarm.toml` it reads.
+- **`swarm ls`** ends with a `paused: <repo> …` line for each paused repo. `python3 launcher/manifest.py` prints `org  paused <repos>`.
+
+The pause fails closed. If `paused` isn't a list of `owner/name` strings, it is reported like any other bad `[org]` value and **every** repo counts as paused until the list is fixed, because there's no telling which repo you meant.
+
 ## Tests
 
 ```bash
