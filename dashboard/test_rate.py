@@ -262,13 +262,17 @@ class CallCountTest(unittest.TestCase):
         # 60 tracking issues: 3 GraphQL queries of 25, never one REST call per issue.
         self.assertEqual(sum(bool(re.search(r"\bi\d+: issue\(\w+: \d+\) { comments", q))
                              for q in queries), 3)
-        self.assertFalse([c for c in rest if "/comments" in " ".join(c)
-                          and "/comments?since=" not in " ".join(c)], rest)
+        # The trouble panel (#903) reads the report issue's comments whole, as `swarm daily`
+        # does for M1; no other comments read is unbounded.
+        daily = [["api", "--paginate", f"repos/{REPO}/issues/249/comments?per_page=100", "--jq", ".[]"]]
+        self.assertEqual([c for c in rest if "/comments" in " ".join(c)
+                          and "/comments?since=" not in " ".join(c)], daily)
         # Precedent (#408): one paginated read each of issue and review comments, and one
         # GraphQL query of PR reviews per 25 PRs in the window (none here). Grants in use
         # (#713): one read of the last 24 hours' issue comments, and no titles (no merger calls).
+        # The trouble panel (#903): one read of the last COMMAND_DAYS' issue comments.
         self.assertEqual(len([c for c in rest if "/comments?since=" in " ".join(c)
-                              and "/issues/249/" not in " ".join(c)]), 3)
+                              and "/issues/249/" not in " ".join(c)]), 4)
         # Today's report (#712): one read of the report issue's last 4 days of comments.
         self.assertEqual(len([c for c in rest if f"repos/{REPO}/issues/249/comments?since=" in " ".join(c)]), 1)
         # The plan (#712): one query searching for Goals and Areas (none here, so no more).
@@ -288,9 +292,11 @@ class CallCountTest(unittest.TestCase):
         # #402's header: the repo's events, one page here (fewer than 100, so the last).
         self.assertEqual([c for c in rest if "/events?" in " ".join(c)],
                          [["api", f"repos/{REPO}/events?per_page=100&page=1"]])
-        # The whole rebuild: 40 calls (30 before #406 added 4, #408 added 2, #402 added 1,
-        # #712 added 2 and #713 added 1). On main before #392 the same data took 100.
-        self.assertLessEqual(len(calls), 40, "\n".join(map(str, calls)))
+        # The whole rebuild: 49 calls (30 before #406 added 4, #408 added 2, #402 added 1,
+        # #712 added 2, #713 added 1 and #903's trouble panel 9: three `pr list`s, open issues,
+        # recent comments, the report issue's comments and one scope query per 25 issues).
+        # On main before #392 the same data took 100.
+        self.assertLessEqual(len(calls), 49, "\n".join(map(str, calls)))
         self.assertLess(len(rest), g.PAGE_NEEDS["core"])
         self.assertLess(len(graphql), g.PAGE_NEEDS["graphql"])
 

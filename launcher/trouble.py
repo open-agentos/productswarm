@@ -614,13 +614,17 @@ def hand_sessions(launcher) -> list[dict]:
 
 
 def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
-           now: dt.datetime | None = None) -> Data:
+           now: dt.datetime | None = None, sync_acts: bool = True) -> Data:
     """Read everything report() needs. Raises RuntimeError if GitHub can't be read; a local
     part that can't be read (the ledger, swarm daily's reports) is left out and named in errors.
 
     The reads that don't depend on each other run at once (#858): one at a time, they took
     about 25 seconds. The acts backfill (acts.refresh) runs beside them and starts no read
-    after BUDGET_SECONDS; what it hasn't read back yet, the next run (or `swarm acts`) does."""
+    after BUDGET_SECONDS; what it hasn't read back yet, the next run (or `swarm acts`) does.
+
+    With sync_acts off (the desk's build, #903), the acts backfill doesn't run and M4's acts
+    criterion reads unmeasured, named in errors: the desk only reads, and on the engine host
+    swarm.db holds no acts."""
     import acts
     import ledger
     import manifest
@@ -658,7 +662,7 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
                                   "--limit", "300", "--search", f"merged:>={day}", "--json", MERGED_FIELDS),
             "comments": pool.submit(watch.gh_recent_comments, repo, now - dt.timedelta(days=COMMAND_DAYS)),
             "week": pool.submit(swarm.gh_merged, repo, *swarm.week_of(now)),
-            "acts": pool.submit(owner_acts),
+            "acts": pool.submit(owner_acts) if sync_acts else None,
             "daily": pool.submit(daily) if report_issue else None,
         }
         issues = jobs["issues"].result()
@@ -685,13 +689,16 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
             week_merges = None
             errors.append(f"swarm merges: {e}")
         owner_days = None
-        try:
-            owner_days, unread = jobs["acts"].result()
-            errors.extend(f"swarm acts: not read yet: {e}" + (
-                "; `launcher/swarm acts` has no time limit and reads it all" if acts.OUT_OF_TIME in e else "")
-                for e in unread)
-        except (OSError, sqlite3.Error) as e:
-            errors.append(f"swarm acts: {e}")
+        if not jobs["acts"]:
+            errors.append("swarm acts: not synced here; `launcher/swarm acts` counts the owner's acts")
+        else:
+            try:
+                owner_days, unread = jobs["acts"].result()
+                errors.extend(f"swarm acts: not read yet: {e}" + (
+                    "; `launcher/swarm acts` has no time limit and reads it all" if acts.OUT_OF_TIME in e else "")
+                    for e in unread)
+            except (OSError, sqlite3.Error) as e:
+                errors.append(f"swarm acts: {e}")
     try:
         spend = ledger.totals(ledger.rows(launcher.dir), now)
     except (OSError, ValueError, sqlite3.Error) as e:

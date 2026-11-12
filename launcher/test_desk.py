@@ -222,20 +222,21 @@ class TroublePanelTest(unittest.TestCase):
         self.html = desk.trouble_panel(self.report)
 
     def scope(self, ref: str) -> str:
-        """The rendered <article> for one Goal or Area."""
+        """The rendered scope <div> for one Goal or Area, up to the next one."""
         start = self.html.index(f">{ref}</a>")
-        return self.html[start:self.html.index("</article>", start)]
+        end = self.html.find('<div class="scope', start)
+        return self.html[start:end if end >= 0 else len(self.html)]
 
     def test_a_stalled_pr_shows_as_stuck_with_since(self):
         goal = self.scope("o/r#200")
-        stuck = goal[goal.index("<h4>Stuck</h4>"):goal.index("<h4>Waiting on the owner</h4>")]
+        stuck = goal[goal.index(desk._part("Stuck")):goal.index(desk._part("Waiting on the owner"))]
         self.assertIn('<a href="https://github.com/o/r/pull/210">PR #210</a>', stuck)
         self.assertIn("no trigger restarts the planner", stuck)
         self.assertIn("since 2026-11-10, 2d", stuck)
 
     def test_a_question_waiting_a_week_shows_with_its_age(self):
         goal = self.scope("o/r#200")
-        waiting = goal[goal.index("<h4>Waiting on the owner</h4>"):goal.index("<h4>On the owner")]
+        waiting = goal[goal.index(desk._part("Waiting on the owner")):goal.index('<strong>On the owner')]
         self.assertIn('<a href="https://github.com/o/r/issues/220">#220</a>', waiting)
         self.assertIn("gov:question not answered", waiting)
         self.assertIn("waiting since 2026-11-05, 7d", waiting)

@@ -19,7 +19,9 @@ replayed event can at most cause one extra build (the reconciler's rule, GOV-002
              and fonts/. Any other method is 405 and any other path 404. There is no form
              and no POST route until Google login.
     trouble  trouble_panel(report) renders `swarm trouble --json` per Goal and Area as a
-             read-only HTML section (#889). It is not served yet.
+             read-only HTML section (#889). generate.py builds the report itself, without
+             the owner-acts sync, and puts the panel on the desk (index.html) under the
+             plan (#903), so it needs no served path of its own.
 
 Usage: swarm desk [--host 127.0.0.1] [--port 8080] [--repo owner/name]. generate.py reads
 GitHub with `gh`, so it uses GH_TOKEN from the environment: on the host, a read-only token.
@@ -216,15 +218,20 @@ def _age(hours) -> str:
     return f"{hours / 24:.0f}d" if hours >= 48 else f"{hours:.0f}h"
 
 
+def _part(head: str) -> str:
+    """A part's heading inside a scope, in tags live.py's allow list takes (#903)."""
+    return f'<p class="part"><strong>{_esc(head)}</strong></p>'
+
+
 def _items(head: str, xs: list[dict], since_word: str) -> str:
     if not xs:
-        return f'<h4>{_esc(head)}</h4><p class="none">none</p>'
+        return f'{_part(head)}<p class="none">none</p>'
     rows = "".join(
         f'<li class="{_esc(x.get("kind"))}">{_link(x.get("url"), x.get("ref") or "")} '
         f'{_esc(x.get("reason"))} <span class="age">({since_word} '
         f'{_esc((x.get("since") or "")[:10] or "?")}, {_age(x.get("age_hours"))})</span></li>'
         for x in xs)
-    return f"<h4>{_esc(head)}</h4><ul>{rows}</ul>"
+    return f"{_part(head)}<ul>{rows}</ul>"
 
 
 def _sections(s: dict, hours) -> str:
@@ -246,22 +253,22 @@ def trouble_panel(report: dict) -> str:
         if s.get("date"):
             date = f' <span class="date">date {_esc(s["date"])}'
             date += ' <strong class="missed">MISSED</strong></span>' if s.get("date_missed") else "</span>"
-        out.append(f'<article class="scope"><h3>{_esc(s.get("type"))} '
+        out.append(f'<div class="scope"><h3>{_esc(s.get("type"))} '
                    f'{_link(s.get("url"), s.get("ref") or "")} {_esc(s.get("title"))}{date}</h3>')
         crit = s.get("progress") or []
         if crit:
-            out.append("<h4>Progress</h4><ul>" + "".join(
+            out.append(_part("Progress") + "<ul>" + "".join(
                 f'<li class="status-{_esc(c.get("status"))}"><strong>'
                 f'{_esc(STATUS.get(c.get("status"), c.get("status")))}</strong> '
                 f'{_esc(c.get("criterion"))} <span class="muted">({_esc(c.get("detail"))})</span></li>'
                 for c in crit) + "</ul>")
         else:
-            out.append('<h4>Progress</h4><p class="none">no done-test criteria found</p>')
-        out.append(_sections(s, hours) + "</article>")
+            out.append(_part("Progress") + '<p class="none">no done-test criteria found</p>')
+        out.append(_sections(s, hours) + "</div>")
     outside = report.get("outside") or {}
     if any(outside.values()):
-        out.append('<article class="scope outside"><h3>Under no Goal or Area</h3>'
-                   + _sections(outside, hours) + "</article>")
+        out.append('<div class="scope outside"><h3>Under no Goal or Area</h3>'
+                   + _sections(outside, hours) + "</div>")
     for e in report.get("errors") or []:
         out.append(f'<p class="error">not read: {_esc(e)}</p>')
     out.append("</section>")

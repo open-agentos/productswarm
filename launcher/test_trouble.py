@@ -538,5 +538,28 @@ class Cli(unittest.TestCase):
         self.assertEqual(e.exception.code, 0)
 
 
+
+class GatherWithoutActsTest(unittest.TestCase):
+    """#903: the desk's build reads the report without the owner-acts sync."""
+
+    def test_no_acts_sync_and_says_so(self):
+        from unittest import mock
+        import acts
+        fake = mock.Mock()
+        fake.gh_items.return_value = []
+        fake.gh_json.return_value = []
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.object(swarm, "dashboard", return_value=fake), \
+                mock.patch.object(swarm, "gh_merged", return_value=[]), \
+                mock.patch.object(watch, "gh_recent_comments", return_value=[]), \
+                mock.patch.object(watch, "gh_comments", return_value=[]), \
+                mock.patch.object(acts, "refresh", side_effect=AssertionError("synced acts")) as refresh:
+            d = trouble.gather(swarm.Launcher(Path(home)), REPO, OWNER, swarm.ROOT / "swarm.toml",
+                               now=NOW, sync_acts=False)
+        refresh.assert_not_called()
+        self.assertIsNone(d.owner_days)
+        self.assertTrue(any(e.startswith("swarm acts: not synced") for e in d.errors), d.errors)
+        self.assertEqual(trouble.report(d)["scopes"], [])
+
 if __name__ == "__main__":
     unittest.main()
