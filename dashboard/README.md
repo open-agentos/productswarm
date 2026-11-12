@@ -15,22 +15,35 @@ It reads GitHub through `gh api`, so inside a swarm session it acts as the role'
 
 ## Pages
 
-One build writes four pages, and the fonts, into the `--out` page's directory (#401, part of #397):
+One build writes five pages, and the fonts, into the `--out` page's directory (#401, part of #397):
 
 | Page | What it shows |
 |---|---|
+| `bridge.html`, the **Bridge** | The owner's home, read-only, after the owner's "v5 · the bridge" mock-up ([the Bridge](#the-bridge), #926): status, decisions waiting, the crew's reports, Goals and Areas in flight, and the owner's acts on GitHub. |
 | `index.html`, the **desk** | Today's report and the plan (#712), the trouble panel per Goal and Area (#903: `swarm trouble`'s report, built by `generate.py` without the owner-acts sync, so M4's acts criterion reads unmeasured here; no spend), [On the floor](#on-the-floor), [the wire](#the-wire), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), [How the questions went](#how-the-questions-went), [precedent in use](#precedent-in-use), a card per [past committee](#past-committees), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" with their round grids |
 | `authority.html` | The [authority map](#authority-map): who may decide what, one row per domain in `governance/jurisdictions.yml` |
 
-Every page opens with the [header](#header) and carries `noindex` and a [Content-Security-Policy](#live-refresh), reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the four pages. `generate.render(model)` returns the pages by file name.
+Every page opens with the [header](#header) and carries `noindex` and a [Content-Security-Policy](#live-refresh), reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the five pages. `generate.render(model)` returns the pages by file name.
 
 ### Look
 
 `layout.py` holds the look and the page shell every page uses, so colours and fonts are set in one place: paper `#F4F3EE`, ink, agents blue `#1F4FB8` (active sessions), owner amber `#A35A00` (what waits on the owner), and red `#C2361B` only for live marks and blocks (#397). Text is IBM Plex Sans, numbers, times and code Plex Mono, headings Plex Sans Condensed.
 
 The fonts are **self-hosted**, so the public page loads nothing from a third party. `static/fonts/` holds the Latin-1 subset, as woff2, of only the four faces the CSS uses (Sans 400 and 600, Mono 400, Sans Condensed 600), from IBM's `@ibm/plex-sans` 1.1.0, `@ibm/plex-mono` 2.5.0 and `@ibm/plex-sans-condensed` 2.0.0 packages, with their SIL Open Font License. Together they add 82,776 bytes (87,232 with the licence) to the published site. `generate.py` copies them to `fonts/` beside the pages on every build, before writing the pages. A character outside Latin-1 (an arrow, say) falls back to the system font.
+
+## The Bridge
+
+`bridge.html` (`bridge.py`, #926, under M3 #685) is the Bridge from the owner's "v5 · the bridge" mock-up, built read-only from data the build already reads, so it adds no API calls. Top to bottom:
+
+- **Status:** open Goals and Areas and how many are flagged; agents working (the floor's cards) of the live sessions; decisions waiting, with the oldest one's age; and authority used in `swarm trouble`'s window. A Goal or Area is **flagged** when something under it is stuck, one of its criteria is failing, or its date is missed.
+- **Decisions waiting**, in owner amber: what `swarm trouble` says waits on the owner, then open gov questions it doesn't already list (not ruled, no session blocked on them), oldest first, at most 12. Each links to where it's answered on GitHub; there are no buttons until the desk can write (#752).
+- **Reports**, newest first, at most 12, each with its role: today's daily report (a red flag when it's late), each item `swarm trouble` says is stuck (a flag), and the PRs a role's App had merged in the last 7 days (`SHIPPED`, or `DELIVERED` for a PR whose title starts "Brief").
+- **In flight:** each open Goal and Area with its criteria met of total and a dot: red if flagged, amber if it waits on the owner, blue otherwise. If the trouble report wasn't read, it falls back to the plan's sub-issues done of total.
+- **Orders received:** the owner's acts on GitHub from the repo's events (the header's read), newest first, at most 8, with chair "GitHub". Branch creation and deletion are left out.
+
+The left column links Commissions to the desk (the plan and trouble panel) and Agents to Operations until those pages are drawn. "Your chairs", "Lead recommends", "Discuss with…" and spend aren't shown: chairs and writes come later (#760), and GOV-0033 sets no engine total. Links go only to github.com or a page beside it. The page carries no script.
 
 ## Header
 
