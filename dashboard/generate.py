@@ -17,7 +17,8 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
 
 Builds four pages in one look (layout.py), each headed by a red LIVE mark, the build time
 and the owner's last act (#402), and copies the self-hosted fonts beside them:
-  - index.html, the desk: on the floor (floor.py), grants in use (grants.py, #713), the wire (wire.py, #405), the committee desk while one is open (#404),
+  - index.html, the desk: today's report and the plan (report.py, plan.py, #712), the trouble
+    panel per Goal and Area (`swarm trouble`'s report without the acts sync, #903), on the floor (floor.py), grants in use (grants.py, #713), the wire (wire.py, #405), the committee desk while one is open (#404),
     what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
     committee (#409), and a pointer to the other pages (#397 fills it);
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
@@ -134,7 +135,7 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
           with_actions: bool = False, with_committees: bool = False,
           with_questions: bool = False, with_precedent: bool = False,
           with_activity: bool = False, with_grants: bool = False,
-          with_plan: bool = False, prev: Path | None = None) -> dict:
+          with_plan: bool = False, with_trouble: bool = False, prev: Path | None = None) -> dict:
     """Everything the page needs, as plain API data. build() does the rest. `with_progress`
     also reads the v3 progress section's data (progress.py), `with_actions` the Actions
     reviewer section's (reviewer_runs.py), `with_committees` the committee Discussions
@@ -142,9 +143,9 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
     read (questions.py, REST, search and GraphQL), and `with_precedent` the GOV citations
     (precedent.py), `with_activity` the repo's events for the header (activity.py), and
     `with_plan` the desk's plan and today's report (plan.py, report.py, #712), and `with_grants`
-    the merger's comments for grants in use (grants.py, #713). Only the page shows them, so
-    swarm's snapshot() and the digest leave all eight off and make none of those calls;
-    main() asks for them."""
+    the merger's comments for grants in use (grants.py, #713), and `with_trouble` the trouble
+    report (fetch_trouble, #903). Only the page shows them, so swarm's snapshot() and the
+    digest leave all nine off and make none of those calls; main() asks for them."""
     since = (now - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     issues: dict[int, dict] = {}
     items: dict[int, dict] = {}   # issues and PRs, for precedent.py's bodies
@@ -182,13 +183,47 @@ def fetch(repo: str, now: dt.datetime, days: int, with_progress: bool = False,
                                    {p["number"]: p.get("title") or "" for p in prs or []})
                       if with_grants else None,
             "plan": plan.fetch(repo) if with_plan else None,
-            "report": fetch_report(repo, now) if with_plan else None}
+            "report": fetch_report(repo, now) if with_plan else None,
+            "trouble": fetch_trouble(repo, now) if with_trouble else None}
 
 
 def fetch_report(repo: str, now: dt.datetime) -> dict:
     """report.py's data: swarm.toml's report issue and daily_at, and the issue's recent comments."""
     issue, daily_at = report.config()
     return {"issue": issue, "daily_at": daily_at, "comments": report.fetch(repo, issue, now, gh_items)}
+
+
+def fetch_trouble(repo: str, now: dt.datetime) -> dict:
+    """`swarm trouble --json`'s report (launcher/trouble.py) for the desk's trouble panel (#903),
+    without the owner-acts sync: the desk only reads, and on the engine host swarm.db holds no
+    acts, so M4's acts criterion reads unmeasured and the panel says why. The rest it reads from
+    GitHub, and from the launcher's state directory where it exists (the runs ledger, swarm
+    watch's state, hand-started sessions); a part it can't read is named in the panel. If
+    GitHub can't be read, {"error": why}: the panel says so and the rest of the desk builds."""
+    try:
+        sys.path.insert(0, str(HERE.parent / "launcher"))
+        import manifest
+        import swarm
+        import trouble
+        owner = swarm.owner_login()
+        d = trouble.gather(swarm.Launcher(swarm.home()), repo, owner, manifest.DEFAULT_PATH,
+                           now=now, sync_acts=False)
+        return trouble.report(d)
+    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
+        return {"error": str(e) or type(e).__name__}
+
+
+def trouble_panel(r: dict | None) -> str:
+    """The desk's trouble panel (#903): launcher/desk.py's trouble_panel (#889) on the report,
+    or why it wasn't read. Empty when the build didn't ask for it."""
+    if r is None:
+        return ""
+    if "error" in r:
+        return ('<section class="trouble"><h2>Trouble</h2>'
+                f'<p class="error">not read: {esc(r["error"])}</p></section>')
+    sys.path.insert(0, str(HERE.parent / "launcher"))
+    import desk
+    return desk.trouble_panel(r)
 
 
 def fetch_precedent(repo: str, now: dt.datetime, days: int, items: list[dict],
@@ -492,6 +527,7 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
                                 data["report"]["daily_at"]) if data.get("report") else None,
          # with_plan reads both; the plan's own None means its read failed, which the panel says
          "plan": plan.build(data.get("plan"), owner, repo) if data.get("report") else None,
+         "trouble": data.get("trouble"),   # #903: trouble.report()'s dict, or {"error": why}
          "spend": {"per_day": per_day, "today": per_day[today],
                    "unpriced": [s for s in sessions if s["cost"] is None]}}
     m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
@@ -700,8 +736,8 @@ def rfc3339(t: dt.datetime) -> str:
 
 
 def desk_panels(m: dict) -> dict[str, str]:
-    """The desk's panels by name, in page order: today's report and the plan (#712), on the
-    floor (#403) and grants in use (#713), as #711 lays them out, then the wire (#405), the
+    """The desk's panels by name, in page order: today's report and the plan (#712), the
+    trouble panel per Goal and Area (#903), on the floor (#403) and grants in use (#713), as #711 lays them out, then the wire (#405), the
     committee desk while a committee is open (#404), what the numbers say (#406), how the
     questions went (#407), precedent in use (#408) and a card per past committee (#409). Each is drawn into a
     `data-panel` box that the live refresh redraws from state.json (#411), so an empty one
@@ -709,6 +745,7 @@ def desk_panels(m: dict) -> dict[str, str]:
     repo = m["repo"]
     return {"report": report.render(m.get("report"), repo),
             "plan": plan.render(m.get("plan")),
+            "trouble": trouble_panel(m.get("trouble")),
             "floor": floor.render(m.get("floor"), repo, m.get("watcher")),
             "grants": grants.render(m.get("grants"), repo),
             "wire": wire.render(m.get("wire")),
@@ -842,7 +879,10 @@ def default_repo() -> str | None:
 # header's repo events (#402, activity.py) 1 to 3 REST calls. The desk's report panel (#712)
 # adds 1 or 2 REST calls and its plan panel 3 or 4 GraphQL queries. Grants in use (#713,
 # grants.py) adds 1 or 2, plus one per merged or closed PR the merger called in the last 24 hours.
-PAGE_NEEDS = {"core": 120, "graphql": 60}
+# The trouble panel (#903, trouble.gather without the acts sync) adds about 10 to 15 REST calls
+# (open issues, recent comments, the report issue's comments, other repos' Goals) and 15 to 25
+# GraphQL queries (open and merged PRs, this week's merges, one scope query per 25 issues).
+PAGE_NEEDS = {"core": 140, "graphql": 90}
 DIGEST_NEEDS = {"core": 30, "graphql": 30}
 SPACING = dt.timedelta(minutes=5)       # a nudged rebuild waits this long after a published one
 WORKFLOW = "dashboard.yml"
@@ -932,7 +972,7 @@ def main(argv: list[str]) -> int:
     try:
         data = fetch(repo, now, args.days, with_progress=True, with_actions=True,
                      with_committees=True, with_questions=True, with_precedent=True,
-                     with_activity=True, with_grants=True, with_plan=True,
+                     with_activity=True, with_grants=True, with_plan=True, with_trouble=True,
                      prev=Path(args.prev) if args.prev else None)
         data["records"] = precedent.load_records()
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
