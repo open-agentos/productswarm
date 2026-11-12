@@ -810,7 +810,8 @@ class OtherRepos(unittest.TestCase):
         path = self.dir / "swarm.toml"
         path.write_text('[merger]\nmode = "shadow"\nmax_changed_lines = 100\n' + org)
         out = []
-        fake = lambda repo, *a: self.calls.append(repo) or 0   # noqa: E731
+        self.homes = []
+        fake = lambda repo, *a, home=None: self.calls.append(repo) or self.homes.append(home) or 0  # noqa: E731
         with unittest.mock.patch.object(merger, "plan", fake), \
                 unittest.mock.patch.object(merger, "run", fake), \
                 unittest.mock.patch("builtins.print", out.append):
@@ -825,6 +826,11 @@ class OtherRepos(unittest.TestCase):
         code, out = self.main(f'[org]\nrepos = ["{SCRATCH}"]\n', ("run", "--dry-run"))
         self.assertEqual((code, self.calls), (0, [REPO, SCRATCH]))
         self.assertEqual(out, [f"merger: repo {REPO}", f"merger: repo {SCRATCH}"])
+        self.assertEqual(self.homes, [None, REPO])      # #913: scratch inherits home's shadow
+
+    def test_repo_alone_inherits_no_shadow(self):
+        self.main(f'[org]\nrepos = ["{SCRATCH}"]\n', ("run", "--repo", SCRATCH))
+        self.assertEqual((self.calls, self.homes), ([SCRATCH], [None]))
 
     def test_repo_or_pr_works_one_repo(self):
         org = f'[org]\nrepos = ["{SCRATCH}"]\n'
@@ -856,6 +862,108 @@ class OtherRepos(unittest.TestCase):
         self.assertIn("the issue it closes is in another repo",
                       merger.make_plan([{"number": 70}], ctx, w.reader())[0])
 
+
+class HomeShadow(unittest.TestCase):
+    """#913: an [org] repo inherits the home repo's passed shadow bars."""
+
+    @staticmethod
+    def scratch_world():
+        w = World()                       # a PR in scratch closing a scratch issue under a Goal here
+        w.pr["head"]["repo"]["full_name"] = SCRATCH
+        w.closes = [(SCRATCH, 9)]
+        w.scope["blocked_by"] = []
+        return w
+
+    def run_scratch(self, own=(), home_items=(), protect=False):
+        w, fw = self.scratch_world(), FakeWriter(list(own))
+        if protect:
+            w.protect()
+        out = []
+        def home_history():
+            if isinstance(home_items, Exception):
+                raise home_items
+            return list(home_items)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "swarm.toml"
+            p.write_text('[merger]\nmode = "live"\nmax_changed_lines = 100\n')
+            code = merger.run(SCRATCH, manifest_path=p, reader=w.reader(), writer=fw.writer(w),
+                              owner=lambda: OWNER,
+                              authors=lambda: (AGENTS | {"productswarm-planner[bot]"}, None),
+                              list_prs=lambda: [{"number": 70}], clock=lambda: T0, out=out.append,
+                              home=REPO, home_history=home_history)
+        return code, fw, out
+
+    def test_home_passed_bar_carries_over(self):
+        code, fw, out = self.run_scratch(home_items=[would(T0 - 60 * i, pr=i) for i in range(10)])
+        self.assertEqual((code, fw.merges), (0, [(70, HEAD)]))
+        self.assertIn(f"merger: the shadow bar (GOV-0027) is met by the home repo {REPO}", out)
+        self.assertIn(f"merger: the standing grant's shadow bar (GOV-0034) is met by the home repo "
+                      f"{REPO}", out)
+        self.assertFalse(any("live acts as shadow" in x for x in out), out)
+
+    def test_home_a_day_after_the_first_carries_over(self):
+        _, fw, _ = self.run_scratch(home_items=[would(T0 - merger.SHADOW_SECONDS)])
+        self.assertEqual(fw.merges, [(70, HEAD)])
+
+    def test_home_not_passed_leaves_scratch_in_shadow(self):
+        code, fw, out = self.run_scratch(home_items=[would(T0 - 60 * i, pr=i) for i in range(9)])
+        self.assertEqual((code, fw.merges), (0, []))
+        self.assertEqual(fw.posts, [(70, f"Would merge (standing grant) at {HEAD}.\n\n-- merger")])
+        self.assertTrue(any("live acts as shadow" in x and "0 of 10" in x for x in out), out)
+        self.assertFalse(any("met by the home repo" in x for x in out), out)
+
+    def test_own_comments_still_count(self):
+        _, fw, out = self.run_scratch(own=[would(T0 - 60 * i, pr=i) for i in range(10)])
+        self.assertEqual(fw.merges, [(70, HEAD)])
+        self.assertFalse(any("home repo" in x for x in out), out)     # home isn't needed
+
+    def test_home_grant_bar_unmet_holds_only_grants(self):
+        asks = [would(T0 - 60 * i, pr=i, kind="approved ask") for i in range(10)]
+        _, fw, out = self.run_scratch(home_items=asks)
+        self.assertEqual(fw.merges, [])
+        self.assertIn(f"merger: the shadow bar (GOV-0027) is met by the home repo {REPO}", out)
+        self.assertTrue(any("live acts as shadow for the standing grant" in x for x in out), out)
+        _, fw, _ = self.run_scratch(home_items=asks, protect=True)
+        self.assertEqual(fw.merges, [(70, HEAD)])
+
+    def test_home_unreadable_fails_closed(self):
+        code, fw, out = self.run_scratch(home_items=RuntimeError("gh failed"))
+        self.assertEqual((code, fw.merges), (0, []))
+        self.assertIn(f"merger: can't read the home repo {REPO}'s shadow comments (RuntimeError); "
+                      f"this repo's own count holds", out)
+        self.assertTrue(any("live acts as shadow" in x for x in out), out)
+
+    def test_own_unreadable_still_holds_grants(self):
+        w, fw = self.scratch_world(), FakeWriter()
+        writer = fw.writer(w)
+        def boom():
+            raise RuntimeError("gh failed")
+        fw.writer = lambda w: merger.Writer(history=boom, post=writer.post, merge=writer.merge,
+                                            queue=writer.queue, enqueue=writer.enqueue)
+        asks = [would(T0 - 60 * i, pr=i, kind="approved ask") for i in range(10)]
+        out = []
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "swarm.toml"
+            p.write_text('[merger]\nmode = "live"\nmax_changed_lines = 100\n')
+            merger.run(SCRATCH, manifest_path=p, reader=w.reader(), writer=fw.writer(w),
+                       owner=lambda: OWNER, authors=lambda: (AGENTS | {"productswarm-planner[bot]"}, None),
+                       list_prs=lambda: [{"number": 70}], clock=lambda: T0, out=out.append,
+                       home=REPO, home_history=lambda: asks)
+        self.assertEqual(fw.merges, [])           # a standing grant: GOV-0034's bar isn't met
+        self.assertTrue(any("standing grant" in x and "can't count" in x for x in out), out)
+
+    def test_home_itself_reads_no_other_history(self):
+        def never():
+            raise AssertionError("read")
+        w, fw = World(), FakeWriter()
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "swarm.toml"
+            p.write_text('[merger]\nmode = "live"\nmax_changed_lines = 100\n')
+            merger.run(REPO, manifest_path=p, reader=w.reader(), writer=fw.writer(w),
+                       owner=lambda: OWNER, authors=lambda: (AGENTS | {"productswarm-planner[bot]"}, None),
+                       list_prs=lambda: [{"number": 70}], clock=lambda: T0, out=lambda x: None,
+                       home=REPO, home_history=never)
+        self.assertEqual(fw.merges, [])
 
 
 class Paused(unittest.TestCase):

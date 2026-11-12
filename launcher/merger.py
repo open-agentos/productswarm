@@ -69,10 +69,13 @@ PR is a miss and it exits 1.
 
 Other repos of the org (#772): without --repo, it works this repo and then each repo in
 swarm.toml's [org] repos, one after another, under a `merger: repo <owner/name>` line, with
-the same conditions, its own reads and writes, and its own shadow bars (each repo's comments
-count only there). A PR in another repo must close an issue in that repo; that issue is go
+the same conditions and its own reads and writes. Its shadow bars (#913) are met when its own
+comments meet them or when the home repo's do: the home repo has passed GOV-0027's shadow, and
+an [org] repo inherits that (and GOV-0034's standing-grant bar the same way). The log says
+when a bar was met by the home repo; if the home repo's comments can't be read, the repo's
+own count holds (fail closed) and the log says why. A PR in another repo must close an issue in that repo; that issue is go
 under a Goal or Area in any repo of the org (GOV-0031). With --repo or --pr, only the one
-repo. It exits 1 if any repo did. The token must reach each repo: installing the merger App on one
+repo, which then counts only its own shadow bars. It exits 1 if any repo did. The token must reach each repo: installing the merger App on one
 is the owner's step.
 
 A paused repo (#892, swarm.toml's [org] paused): plan and run say so and stop for that repo
@@ -515,6 +518,27 @@ def shadow_bar(comments: list[dict], now: float, prefix: str = WOULD) -> str | N
             f"comment{since}; or a day since the first)")
 
 
+def inherit(home: str, history: Callable[[], list[dict]], now: float, held: str | None,
+            held_grant: str | None, out: Callable[[str], None]) -> tuple[str | None, str | None]:
+    """(held, held_grant) once the home repo's passed bars carry over to an [org] repo (#913):
+    a bar the home repo's comments meet is met here too. If they can't be read, both stay
+    as they were (fail closed) and the log says why."""
+    try:
+        items = history()
+        bar, grant_bar = shadow_bar(items, now), shadow_bar(items, now, GRANT_WOULD)
+    except UNREADABLE as e:
+        out(f"merger: can't read the home repo {home}'s shadow comments ({e.__class__.__name__}); "
+            f"this repo's own count holds")
+        return held, held_grant
+    if held and bar is None:
+        held = None
+        out(f"merger: the shadow bar (GOV-0027) is met by the home repo {home}")
+    if held_grant and grant_bar is None:
+        held_grant = None
+        out(f"merger: the standing grant's shadow bar (GOV-0034) is met by the home repo {home}")
+    return held, held_grant
+
+
 def worth_telling(d: Decision, reviews: list[dict], owner: str) -> bool:
     """A miss is posted only on a PR the reviewer or the owner approved at head (GOV-0022:
     the owner sees why it's left to them), and not while `tests` is still running."""
@@ -538,6 +562,11 @@ QUEUE_QUERY = ("query($owner: String!, $name: String!, $branch: String!) "
                "{ repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }")
 ENQUEUE_MUTATION = ("mutation($id: ID!, $sha: GitObjectID!) { enqueuePullRequest(input: "
                     "{pullRequestId: $id, expectedHeadOid: $sha}) { mergeQueueEntry { id } } }")
+
+
+def history_of(repo: str) -> Callable[[], list[dict]]:
+    """Every issue and PR comment in repo, as the shadow bar counts them."""
+    return lambda: swarm.dashboard().gh_items(f"repos/{repo}/issues/comments?per_page=100")
 
 
 def gh_writer(repo: str) -> Writer:
@@ -567,7 +596,7 @@ def gh_writer(repo: str) -> Writer:
             raise RuntimeError(f"enqueue failed: {str((d or {}).get('errors'))[:300]}")
 
     return Writer(
-        history=lambda: g.gh_items(f"repos/{repo}/issues/comments?per_page=100"),
+        history=history_of(repo),
         post=lambda n, body: gh(f"repos/{repo}/issues/{n}/comments", "-f", f"body={body}"),
         # sha pins the merge to the head the decision saw: GitHub refuses it if the head moved.
         merge=lambda n, sha: gh("-X", "PUT", f"repos/{repo}/pulls/{n}/merge",
@@ -580,9 +609,11 @@ def run(repo: str, dry_run: bool = False, pr: int | None = None,
         writer: Writer | None = None, owner: Callable[[], str] = swarm.owner_login,
         authors: Callable[[], tuple[frozenset[str], str | None]] = actions_review.trusted_authors,
         list_prs: Callable[[], list[dict]] | None = None, clock: Callable[[], float] = time.time,
-        out: Callable[[str], None] = print) -> int:
+        out: Callable[[str], None] = print, home: str | None = None,
+        home_history: Callable[[], list[dict]] | None = None) -> int:
     """plan, then act on each decision per [merger] mode. 0 done, 1 couldn't decide or a
-    write failed. --dry-run prints each write instead of making it."""
+    write failed. --dry-run prints each write instead of making it. home is the repo an
+    [org] repo inherits its shadow bars from (#913); None for the home repo itself."""
     if (why := paused(repo, manifest_path)):
         out(f"merger: {why}: nothing posted or merged")
         return 0
@@ -608,12 +639,16 @@ def run(repo: str, dry_run: bool = False, pr: int | None = None,
         return 0
     held = held_grant = None
     if mode == "live":
+        now = clock()
         try:
-            history, now = w.history(), clock()
+            history = w.history()
             held = shadow_bar(history, now)
             held_grant = shadow_bar(history, now, GRANT_WOULD)
         except UNREADABLE as e:
-            held = f"can't count the shadow's comments ({e.__class__.__name__})"
+            held = held_grant = f"can't count the shadow's comments ({e.__class__.__name__})"
+        if home and home.lower() != repo.lower() and (held or held_grant):
+            held, held_grant = inherit(home, home_history or history_of(home), now, held,
+                                       held_grant, out)
         held = held or why_unqueued
         if held:
             out(f"merger: live acts as shadow: {held}")
@@ -710,8 +745,9 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> int:
     for r in repos:
         if len(repos) > 1:
             print(f"merger: repo {r}")
-        if args.cmd == "run":
-            rc = max(rc, run(r, args.dry_run, args.pr, args.manifest))
+        if args.cmd == "run":       # an [org] repo inherits the home repo's shadow (#913)
+            rc = max(rc, run(r, args.dry_run, args.pr, args.manifest,
+                             home=repo if r != repo else None))
         else:
             rc = max(rc, plan(r, args.pr, args.manifest))
     return rc
