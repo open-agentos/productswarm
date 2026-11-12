@@ -248,7 +248,6 @@ h2.br-h.owner, .br-kind.owner { color:var(--owner); }
 .br-dot.agent { background:var(--agent); } .br-dot.owner { background:var(--owner); }
 .br-dot.red { background:var(--red); }
 /* The Commissions page (#931): a list and a focus drawer shown by :target, no script. */
-.owner { color:var(--owner); }
 .cm-wrap { flex:999 1 520px; min-width:0; display:flex; flex-wrap:wrap; gap:24px; align-items:flex-start; }
 .cm-main { flex:3 1 400px; min-width:0; }
 .cm-grp { font:11px/1.4 var(--mono); letter-spacing:.06em; color:var(--muted); margin:20px 0 0;
