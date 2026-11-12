@@ -72,6 +72,21 @@ class Fake:
         self.t += s
 
 
+def runtime(home: Path) -> Path:
+    """A stand-in pinned copy (#93) holding what a session in another repo gets from it (#912):
+    CLAUDE.md, the builder's role prompt and ops/."""
+    rt = home / "runtime"
+    (rt / ".git").mkdir(parents=True, exist_ok=True)     # so a refresh checks out, not re-adds
+    (rt / "roles").mkdir(parents=True, exist_ok=True)
+    (rt / "ops" / "shims").mkdir(parents=True, exist_ok=True)
+    (rt / "CLAUDE.md").write_text("# CLAUDE.md\n\nOur rules.\n")
+    for role in ("builder", "docs", "planner", "reviewer", "analyst"):
+        (rt / "roles" / f"{role}.md").write_text(f"# Role: {role}\n")
+    (rt / "ops" / "swarm-session").write_text("#!/bin/bash\n")
+    (rt / "ops" / "shims" / "gh").write_text("#!/bin/bash\n")
+    return rt
+
+
 class FakeGit:
     """A fake git: `worktree add` makes the directory, `worktree remove` deletes it.
     Worktrees in `dirty` have uncommitted work; those in `unpushed` have commits on no remote."""
@@ -915,12 +930,28 @@ class LaunchTest(Base):
                           agents=lambda: AGENTS, get_reader=lambda repo, n: None)
         return rc, read
 
-    def test_another_repo_is_refused_before_reading_it(self):
-        self.assertEqual(self.other(), (1, []))
-        self.assertEqual(self.fake.commands, [])
-        self.assertEqual(self.git.calls, [])
-        self.assertIn("refused: o/scratch#5 is in another repo; starting a session there waits for "
-                      "#820 stage 3", self.lines[-1])
+    def test_another_repos_issue_starts_a_session_there(self):   # #912
+        self.l.hook = str(self.home / "runtime" / "heartbeat" / "hook.py")   # skip the refresh
+        runtime(self.home)
+        self.assertEqual(self.other(), (0, ["o/scratch"]))
+        self.assertEqual(len(self.fake.commands), 1)
+        e = self.l.live()[0]
+        self.assertEqual((e.name, e.issue, e.repo), ("builder-scratch-issue-5", 5, "o/scratch"))
+        self.assertIn("started: builder-scratch-issue-5  m  on o/scratch#5", self.lines[-1])
+        cmd = self.l.command(e)
+        self.assertIn("working in o/scratch", cmd)
+        self.assertIn("--append-system-prompt", cmd)
+
+    def test_another_repos_live_session_is_found_in_that_repos_heartbeat(self):   # #912
+        hb = {"sessions": [{"session_id": "s1", "role": "builder", "status": "working", "issue": 5}]}
+        got = []
+        rc = swarm.launch(self.l, "builder", 5, "m", repo="o/r", issue_repo="o/scratch",
+                          get_issue=lambda repo, n: (issue(n), [labeled("ready", OWNER)]),
+                          get_heartbeat=lambda repo, *a: got.append(repo) or hb, owner=lambda: OWNER,
+                          agents=lambda: AGENTS, get_reader=lambda repo, n: None)
+        self.assertEqual((rc, got), (1, ["o/scratch"]))
+        self.assertIn("refused: o/scratch#5 already has a live session: builder (working, session s1)",
+                      self.lines[-1])
 
     def test_another_repos_dry_run_shows_its_worktree_from_its_clone(self):   # #853
         self.assertEqual(self.other(dry_run=True), (0, ["o/scratch"]))
@@ -1166,6 +1197,8 @@ class RepoCloneTest(Base):
     def setUp(self):
         super().setUp()
         self.l.hook = str(self.home / "runtime" / "heartbeat" / "hook.py")   # skip the refresh
+        self.l.home_name = "o/r"
+        runtime(self.home)
         self.clone = self.home / "repos" / "o" / "scratch"
 
     def entry(self, repo="o/scratch", sid="0b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41", **kw):
@@ -1239,6 +1272,72 @@ class RepoCloneTest(Base):
         self.assertEqual(self.l.tidy([]), [])
         self.assertEqual(self.git.calls[-2:], [["-C", str(self.clone), "worktree", "remove", str(wt)],
                                                ["-C", str(self.clone), "worktree", "prune"]])
+
+    # #912 (#820 stage 3): the session itself.
+    def test_another_repos_worktree_gets_our_ops_and_role_prompt_kept_out_of_git(self):
+        e = self.entry()
+        self.l.prepare(e)
+        wt = self.root / ".worktrees" / e.session_id
+        self.assertEqual((wt / "ops" / "swarm-session").read_text(), "#!/bin/bash\n")
+        self.assertTrue((wt / "ops" / "shims" / "gh").is_file())
+        self.assertEqual((wt / "roles" / "builder.md").read_text(), "# Role: builder\n")
+        exclude = self.clone / ".git" / "info" / "exclude"
+        want = "/ops/\n/roles/builder.md\n/.claude/settings.local.json\n"
+        self.assertEqual(exclude.read_text(), want)
+        self.l.prepare(self.entry(sid="1b6c2f0e-aaaa-4bbb-8ccc-5f1d2b8e9c41"))
+        self.assertEqual(exclude.read_text(), want)    # added once
+
+    def test_another_repos_instructions_are_our_claude_md_and_role_prompt(self):
+        e = self.entry()
+        self.l.prepare(e)
+        text = self.l.instructions_file(e.session_id).read_text()
+        self.assertTrue(text.startswith("# productswarm's rules for this session"))
+        self.assertIn("where it disagrees with these rules, these win (GOV-0039)", text)
+        self.assertIn("are in o/r, not o/scratch", text)
+        self.assertLess(text.index("Our rules."), text.index("# Role: builder"))
+
+    def test_a_repo_with_its_own_ops_is_refused(self):
+        real = self.git.__call__
+
+        def git(args):
+            rc, out = real(args)
+            if args[2:4] == ["worktree", "add"]:
+                (Path(args[-2]) / "ops").mkdir()
+            return rc, out
+        self.l.git = git
+        self.assertFalse(self.l.start(self.entry(), []))
+        self.assertIn("o/scratch has its own ops, where ops/swarm-session needs ours", self.lines[-1])
+        self.assertEqual(self.fake.commands, [])
+
+    def test_this_repos_session_gets_no_copies_or_instructions(self):
+        e = self.entry(repo=None)
+        self.l.prepare(e)
+        self.assertFalse((self.root / ".worktrees" / e.session_id / "ops").exists())
+        self.assertFalse(self.l.instructions_file(e.session_id).exists())
+        self.assertNotIn("--append-system-prompt", self.l.command(e))
+
+    def test_command_names_the_repo_and_appends_our_rules(self):
+        cmd = self.l.command(self.entry(by="watch", budget_usd=15.0, max_turns=200))
+        inner = shlex.split(cmd)[-1]
+        self.assertIn("You are the builder for productswarm, working in o/scratch, another repo", inner)
+        self.assertIn("pass --repo o/scratch to gh", inner)
+        self.assertIn("gov:questions stay in o/r", inner)
+        self.assertIn("Now work on issue #5.", inner)
+        self.assertIn(f'--append-system-prompt "$(cat {self.l.instructions_file(self.entry().session_id)})"',
+                      inner)
+
+    def test_a_recovered_entry_keeps_its_repo(self):
+        e = swarm.recovered("sid", "claude --model m --session-id sid " + swarm.opener(
+            "builder", 5, repo="o/scratch", home="o/r"), 0)
+        self.assertEqual((e.role, e.issue, e.repo), ("builder", 5, "o/scratch"))
+        self.assertIsNone(swarm.recovered("sid", "claude " + swarm.opener("builder", 5), 0).repo)
+
+    def test_holders_reads_another_repos_heartbeat_as_that_repos(self):
+        hb = {"sessions": [{"session_id": "s1", "role": "builder", "status": "working", "issue": 5}]}
+        self.assertEqual(swarm.holders(5, hb, [], repo="o/scratch"), [])
+        self.assertEqual(swarm.holders(5, hb, [], repo="o/scratch", model_repo="o/scratch"),
+                         ["builder (working, session s1)"])
+        self.assertEqual(swarm.holders(5, hb, [], model_repo="o/scratch"), [])
 
     def test_a_worktree_naming_a_checkout_outside_the_clones_goes_through_this_one(self):
         elsewhere = self.home / "elsewhere" / "x"
@@ -1415,19 +1514,27 @@ class RealShellTest(unittest.TestCase):
 
     SLEEPS = '#!/bin/bash\nexec python3 -c "import time; time.sleep(30)" "$@"\n'
 
-    def repo(self, tmp: Path, script: str = SLEEPS, origin: Path | None = None,
+    def repo(self, tmp: Path, script: str | None = SLEEPS, origin: Path | None = None,
              root: Path | None = None) -> Path:
-        """A real checkout whose origin's main has a stand-in ops/swarm-session that sleeps."""
+        """A real checkout whose origin's main has a stand-in ops/swarm-session that sleeps,
+        CLAUDE.md and roles/builder.md. With no script, a repo with only a README: another
+        org repo, which carries none of our files (#912)."""
         origin, root = origin or tmp / "origin.git", root or tmp / "repo"
         seed = root.with_name(root.name + "-seed")
         origin.parent.mkdir(parents=True, exist_ok=True)
         self.git("init", "-q", "--bare", "-b", "main", str(origin))
         self.git("clone", "-q", str(origin), str(seed))
-        (seed / "ops").mkdir()
-        fake = seed / "ops" / "swarm-session"
-        fake.write_text(script)
-        fake.chmod(0o755)
-        (seed / ".gitignore").write_text(".worktrees/\n.claude/settings.local.json\n")
+        if script is None:
+            (seed / "README.md").write_text("# scratch\n")     # no .gitignore either
+        else:
+            (seed / ".gitignore").write_text(".worktrees/\n.claude/settings.local.json\n")
+            (seed / "ops").mkdir()
+            fake = seed / "ops" / "swarm-session"
+            fake.write_text(script)
+            fake.chmod(0o755)
+            (seed / "roles").mkdir()
+            (seed / "roles" / "builder.md").write_text("# Role: builder\n")
+            (seed / "CLAUDE.md").write_text("# CLAUDE.md\n\nOur rules.\n")
         self.git("add", "-A", cwd=seed)
         self.git("commit", "-q", "-m", "seed", cwd=seed)
         self.git("push", "-q", "origin", "HEAD:main", cwd=seed)
@@ -1497,8 +1604,7 @@ class RealShellTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp).resolve()
             root = self.repo(tmp, origin=tmp / "gh" / "o" / "r.git", root=tmp / "repo")
-            self.repo(tmp, self.SLEEPS + "# scratch\n", origin=tmp / "gh" / "o" / "scratch.git",
-                      root=tmp / "scratch")
+            self.repo(tmp, None, origin=tmp / "gh" / "o" / "scratch.git", root=tmp / "scratch")
             home, procs = tmp / "home", []
             l = swarm.Launcher(home, root=root, out=lambda s: None,
                                run=lambda cmd: procs.append(subprocess.Popen(["/bin/sh", "-c", cmd])))
@@ -1517,6 +1623,17 @@ class RealShellTest(unittest.TestCase):
                 self.assertEqual(rev(wt, "--git-common-dir").strip(), str(clone / ".git"))
                 self.assertNotIn(str(wt), wts(root))
                 self.assertIn(str(wt), wts(clone))
+                # #912: ops/swarm-session ran from the worktree's copy, with our rules appended,
+                # and the copies are kept out of git.
+                self.assertTrue((wt / "README.md").is_file())
+                self.assertTrue((wt / "ops" / "swarm-session").is_file())
+                self.assertTrue((wt / "roles" / "builder.md").is_file())
+                cmd = l.proc(l.pid(e)) or ""
+                self.assertIn("working in o/scratch", cmd)
+                self.assertIn("--append-system-prompt", cmd)
+                self.assertIn("Our rules.", cmd)
+                self.assertEqual(subprocess.run(["git", "-C", str(wt), "status", "--porcelain"],
+                                                capture_output=True, text=True).stdout, "")
                 self.assertEqual(l.stop("builder-scratch-issue-5"), 0)
                 procs[0].wait(timeout=5)
                 self.assertFalse(wt.exists())                  # clean and on origin: removed

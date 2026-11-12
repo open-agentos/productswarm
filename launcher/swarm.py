@@ -54,7 +54,9 @@ Once a session has exited, its worktree is removed if it is clean and its HEAD i
 origin; otherwise it is kept and `swarm ls` lists it. Work is never deleted.
 A session on another org repo's issue gets its worktree from that repo's own clone,
 ~/.productswarm/repos/<owner>/<name>, made on first use and fetched as this checkout is
-(#853, #820 stage 2).
+(#853, #820 stage 2). Its opener names the repo, our CLAUDE.md and role prompt go in as
+--append-system-prompt, and the worktree gets git-excluded copies of ops/ and the role
+prompt, which ops/swarm-session needs (#912, #820 stage 3, GOV-0039).
 
 What the launcher started is recorded locally, never on GitHub:
     ~/.productswarm/launcher/sessions.json   name, role, model, session id, start time;
@@ -136,7 +138,8 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
            daily: str | None = None, ask: str | None = None,
            ask_comment: int | None = None, research: str | None = None,
            research_comment: int | None = None, ruling: str | None = None,
-           ruling_comment: int | None = None, conflict: bool = False) -> str:
+           ruling_comment: int | None = None, conflict: bool = False,
+           repo: str | None = None, home: str | None = None) -> str:
     """The prompt ops/swarm-session uses when given no args (it passes args on unchanged).
 
     With an issue, it names it: the heartbeat's `working_on` detection matches
@@ -153,7 +156,9 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     question from comment research_comment in research/, as a PR that closes the issue. With
     ruling and a PR, a [ruling] run (#739, the owner's answer on #781): the PR's author role
     applies the owner's comment ruling_comment on an overstep on the PR (#738). With conflict
-    and a PR, a [conflict] run (#893): the PR's author role brings the base into its branch."""
+    and a PR, a [conflict] run (#893): the PR's author role brings the base into its branch.
+    With repo, the session works in that other org repo (#912): other_repo_opener(), with
+    home, this repo's owner/name, for where governance is."""
     if issue and research:
         # As for an ask: "issue #M" in the question would give the heartbeat two issues.
         safe = ISSUE_WORD_RE.sub(r"#\1", research)
@@ -201,7 +206,38 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
         then = f"review PR #{pr} only, in one pass, and stop"
     else:
         then = f"work on issue #{issue}" if issue else "begin"
+    if repo:
+        return other_repo_opener(role, repo, then, home)
     return f"You are the {role} for productswarm. Read CLAUDE.md, PRODUCT.md and roles/{role}.md, then {then}."
+
+
+def other_repo_instructions(role: str, repo: str, home: str | None = None) -> str:
+    """The header of a session's instructions file in another org repo (#912, GOV-0039)."""
+    there = home or "productswarm's repo"
+    return (f"# productswarm's rules for this session\n\nYou are productswarm's {role}, working in "
+            f"{repo}. Below are productswarm's CLAUDE.md and roles/{role}.md, from {there}'s "
+            f"origin/main. They are your working rules. {repo}'s own CLAUDE.md, if it has one, "
+            f"still applies to its code conventions; where it disagrees with these rules, these "
+            f"win (GOV-0039). Paths they name (GOVERNANCE.md, governance/, PRODUCT.md, roles/, "
+            f"launcher/) are in {there}, not {repo}: read them there with gh. The ops/ and "
+            f"roles/{role}.md in your worktree are the launcher's copies for ops/swarm-session, "
+            f"kept out of git: never commit or edit them.")
+
+
+def other_repo_opener(role: str, repo: str, then: str, home: str | None = None) -> str:
+    """The opener for a session in another org repo's worktree (#912, GOV-0036 stage 3). It
+    names the repo the session works in, and home, this repo's owner/name. Our CLAUDE.md and
+    roles/<role>.md come in the appended system prompt (other_repo_instructions(), GOV-0039),
+    so it doesn't tell the session to read files that aren't in its repo. A bare #N in
+    `then` stays bare: in this run it means an issue or PR in repo, and the heartbeat, which
+    tracks the repo its worktree is cut from, reads "issue #N" from the prompt as it does here."""
+    there = home or "productswarm's repo"
+    return (f"You are the {role} for productswarm, working in {repo}, another repo of the org, not "
+            f"productswarm's own. Your working rules and role prompt, productswarm's CLAUDE.md and "
+            f"roles/{role}.md, are in your system prompt; where {repo}'s own CLAUDE.md disagrees, "
+            f"they win (GOV-0039). In this run a bare #N means an issue or PR in {repo}: pass "
+            f"--repo {repo} to gh for it. GOVERNANCE.md, governance/ and gov:questions stay in "
+            f"{there}, which you reach with gh. Now {then}.")
 
 
 def headless_flags(budget_usd: float, max_turns: int, extra_deny: tuple[str, ...] = ()) -> list[str]:
@@ -327,10 +363,12 @@ def recovered(sid: str, cmd: str, started: float) -> Started:
     role = re.search(r"You are the (\w+) for productswarm", cmd)
     issue = re.search(r"issue #(\d+)", cmd)
     pr = re.search(r"PR #(\d+)", cmd)
+    repo = re.search(r"for productswarm, working in ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+),", cmd)   # #912
     r = role.group(1) if role else "unknown"
     return Started(name=f"{r}-recovered-{sid[:8]}", role=r, model=model.group(1) if model else "unknown",
                    session_id=sid, started=started, issue=int(issue.group(1)) if issue else None,
-                   pr=int(pr.group(1)) if pr else None, by="watch" if " -p " in cmd else None)
+                   pr=int(pr.group(1)) if pr else None, by="watch" if " -p " in cmd else None,
+                   repo=repo.group(1) if repo else None)
 
 
 @dataclass
@@ -348,6 +386,7 @@ class Launcher:
     kept: list[Path] = field(default_factory=list)   # exited sessions' worktrees with work in them
     fetched: bool = False
     fetched_repos: set[str] = field(default_factory=set)   # other repos' clones fetched (#853)
+    home_name: str | None = None      # this repo's owner/name, for other repos' sessions (#912)
     hook: str | None = None         # the pinned hook path, once refreshed in this run
     claude_dir: Path = field(default_factory=lambda: Path(
         os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser())   # transcripts (#550)
@@ -393,6 +432,11 @@ class Launcher:
     def result_file(self, sid: str) -> Path:
         """Where a headless run's stdout goes: the banner, then its JSON result (#147)."""
         return self.dir / f"{sid}.result.json"
+
+    def instructions_file(self, sid: str) -> Path:
+        """A session in another org repo: our CLAUDE.md and its role prompt, from origin/main,
+        which its command passes as --append-system-prompt (#912, GOV-0039)."""
+        return self.dir / f"{sid}.instructions.md"
 
     def window_file(self, sid: str) -> Path:
         """The script a session's window runs: command(), kept out of the typed line (#550)."""
@@ -572,6 +616,15 @@ class Launcher:
             raise ValueError(f"'{repo}' isn't an owner/name repo")
         return self.home / REPOS / parts[0].lower() / parts[1].lower()
 
+    def home_repo(self) -> str | None:
+        """This checkout's owner/name (#912): home_name, which `swarm launch` and `swarm watch`
+        set from their --repo, else from its origin, or None if git can't say."""
+        if self.home_name:
+            return self.home_name
+        rc, url = self.git(["-C", str(self.root), "remote", "get-url", "origin"])
+        m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?/?$", url.strip()) if rc == 0 else None
+        return m[1] if m else None
+
     def repo_url(self, repo: str) -> str:
         """repo's URL on the same host and scheme as this checkout's origin: its owner/name
         swapped for repo's, so the clone fetches with the credentials this one does."""
@@ -626,12 +679,58 @@ class Launcher:
             self.prepare_run_home(s)
         else:
             self.git_ok("-C", str(src), "worktree", "add", "-q", "--detach", str(wt), "origin/main")
+            if s.repo:
+                self.add_session_files(s, wt, src)
+        if s.repo:
+            self.write_instructions(s)
         base = install.read_settings(self.root / ".claude" / "settings.local.json")
         settings = install.with_hooks(base, hook=hook)
         if s.by == "watch":      # loop-started runs keep going until they're done (#148)
             import stophook      # here, not at the top: stophook imports this module
             settings = stophook.with_stop_hook(settings, stophook.script_for(hook))
         install.write_settings(wt / ".claude" / "settings.local.json", settings)
+
+    def runtime(self) -> Path:
+        """The pinned copy of this repo at origin/main that hook_path() refreshes (#93)."""
+        return self.home / "runtime"
+
+    def write_instructions(self, s: Started) -> None:
+        """instructions_file() for a session in another org repo (#912): our CLAUDE.md and
+        roles/<role>.md from the pinned copy, which hook_path() has just refreshed to this
+        repo's origin/main (GOV-0039), under a header saying they win where that repo's own
+        CLAUDE.md disagrees."""
+        rt = self.runtime()
+        parts = [other_repo_instructions(s.role, s.repo or "", self.home_repo()),
+                 (rt / "CLAUDE.md").read_text(), (rt / "roles" / f"{s.role}.md").read_text()]
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.instructions_file(s.session_id).write_text("\n\n".join(p.strip() for p in parts) + "\n")
+
+    def add_session_files(self, s: Started, wt: Path, src: Path) -> None:
+        """What ops/swarm-session needs in a worktree of another org repo (#912), which it
+        doesn't change: it runs from <root>/ops, cd's to <root> and checks <root>/roles/<role>.md
+        is there. So the worktree gets a copy of ops/ and of roles/<role>.md from the pinned
+        copy (origin/main, as this repo's own sessions run them), listed in the clone's
+        info/exclude with the hook settings prepare() writes (this repo's .gitignore covers
+        those; that repo's needn't), so `git status` stays clean, tidy() can remove the
+        worktree and a `git add -A` leaves them out. A repo that tracks either path is refused: copying
+        over its files would change its work."""
+        rt = self.runtime()
+        mine = ["ops", f"roles/{s.role}.md"]
+        clash = [p for p in mine if (wt / p).exists()]
+        if clash:
+            raise RuntimeError(f"{s.repo} has its own {' and '.join(clash)}, where ops/swarm-session "
+                               f"needs ours; a session can't start there (#912)")
+        shutil.copytree(rt / "ops", wt / "ops", symlinks=True)
+        (wt / "roles").mkdir(exist_ok=True)
+        shutil.copy2(rt / "roles" / f"{s.role}.md", wt / "roles" / f"{s.role}.md")
+        exclude = src / ".git" / "info" / "exclude"
+        have = exclude.read_text().splitlines() if exclude.is_file() else []
+        want = [x for x in ("/ops/", f"/roles/{s.role}.md", "/.claude/settings.local.json")
+                if x not in have]
+        if want:
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            with open(exclude, "a") as f:
+                f.write("".join(f"{x}\n" for x in want))
 
     def prepare_line(self, s: Started) -> str:
         """What prepare() will do for s, for --dry-run."""
@@ -642,7 +741,8 @@ class Launcher:
         if self.in_container(s):
             return f"git clone --no-hardlinks {src} {wt} (at origin/main; origin set to GitHub){made}"
         if s.repo:
-            return f"git -C {src} worktree add --detach {wt} origin/main{made}"
+            return (f"git -C {src} worktree add --detach {wt} origin/main{made}; then copy ops/ and "
+                    f"roles/{s.role}.md into it from {self.runtime()} (#912)")
         return f"git worktree add --detach {wt} origin/main"
 
     def clone(self, wt: Path, src: Path | None = None) -> None:
@@ -748,7 +848,11 @@ class Launcher:
                    "--model", shlex.quote(s.model), "--session-id", s.session_id]
         prompt = shlex.quote(opener(s.role, s.issue, s.pr, s.called_by, s.call_why, s.daily,
                                     s.ask, s.ask_comment, s.research, s.research_comment,
-                                    s.ruling, s.ruling_comment, s.conflict))
+                                    s.ruling, s.ruling_comment, s.conflict, s.repo,
+                                    self.home_repo() if s.repo else None))
+        if s.repo:   # #912, GOV-0039: our CLAUDE.md and role prompt, read when the window runs
+            prompt += (" --append-system-prompt \"$(cat "
+                       + shlex.quote(str(self.instructions_file(s.session_id))) + ')"')
         if s.by == "watch":
             result = shlex.quote(str(self.result_file(s.session_id)))
             where = f" in container swarm-{s.session_id}" if self.container else ""
@@ -851,8 +955,9 @@ class Launcher:
 
     def start(self, entry: Started, live: list[Started], dry_run: bool = False) -> bool:
         """Open one session's window and record it. Returns False if it couldn't start."""
-        on = f"  on #{entry.issue}" if entry.issue else ""
-        on += f", PR #{entry.pr}" if entry.pr else ""
+        on = f"  on {ref_text(entry.issue, entry.repo)}" if entry.issue else ""
+        on += (f", PR {ref_text(entry.pr, entry.repo)}" if entry.issue else
+               f"  on PR {ref_text(entry.pr, entry.repo)}") if entry.pr else ""
         if dry_run:
             self.out(f"would start: {entry.name}  {entry.model}{on}\n"
                      f"  {self.prepare_line(entry)}\n"
@@ -863,6 +968,8 @@ class Launcher:
             self.prepare(entry)
         except (RuntimeError, OSError) as e:
             self.out(f"failed to start {entry.name}: {e}")
+            if self.worktree(entry.session_id).exists():
+                self.discard(self.worktree(entry.session_id))   # new and unused: nothing to lose
             return False
         self.add(entry)   # before the window opens, so its pid file never has no entry (#272)
         try:
@@ -1831,21 +1938,22 @@ def gh_go_reader(repo: str, n: int) -> GoReader:
 
 
 def holders(n: int, model: dict, started: list[Started], role: str | None = None,
-            repo: str | None = None) -> list[str]:
+            repo: str | None = None, model_repo: str | None = None) -> list[str]:
     """Live sessions already on issue n of repo (None: this repo): heartbeat sessions whose
     current issue is n, plus launcher sessions started on n that have no heartbeat yet. With
     role, only that role's (a call-in waits only for its own role, #520).
 
     A session holds repo plus number (#829): one on open-agentos/scratch#5 doesn't hold this
     repo's #5, nor the reverse. A heartbeat session's repo is its launcher entry's; one the
-    launcher didn't start is on this repo, the repo the heartbeat model reads."""
+    launcher didn't start is on the repo the heartbeat model reads: model_repo (None: this
+    repo), so swarm watch can pass another repo's heartbeat model (#912)."""
     names = {e.session_id: e.name for e in started}
     repos = {e.session_id: e.repo for e in started}
     seen = {s["session_id"] for s in model["sessions"]}
     want = same_repo_key(repo)
     out = [f"{names.get(s['session_id'], s['role'])} ({s['status']}, session {s['session_id']})"
            for s in model["sessions"] if s["status"] != "stopped" and s["issue"] == n
-           and same_repo_key(repos.get(s["session_id"])) == want and role in (None, s["role"])]
+           and same_repo_key(repos.get(s["session_id"], model_repo)) == want and role in (None, s["role"])]
     out += [f"{e.name} (starting, session {e.session_id})"
             for e in started if e.issue == n and same_repo_key(e.repo) == want
             and e.session_id not in seen and role in (None, e.role)]
@@ -1906,15 +2014,11 @@ def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, forc
            owner: Callable[[], str] = owner_login, agents: Callable[[], set[str]] = agent_logins,
            get_reader: Callable[[str, int], GoReader] = gh_go_reader,
            issue_repo: str | None = None) -> int:
-    """Start a session on issue n of issue_repo (None: this repo, `repo`)."""
-    if issue_repo and not dry_run:
-        # #820 stage 2 (#853) cuts the worktree from issue_repo's clone, but the session would
-        # still open with this repo's swarm-session, role prompt and stop hook. Starting one
-        # waits for stage 3; --dry-run shows what it would run.
-        launcher.out(f"swarm launch: refused: {issue_repo}#{n} is in another repo; starting a "
-                     f"session there waits for #820 stage 3 (--dry-run shows its worktree)")
-        return 1
+    """Start a session on issue n of issue_repo (None: this repo, `repo`). A session on
+    another org repo's issue works in a worktree of that repo's clone, with its opener and
+    our CLAUDE.md and role prompt naming the repo (#912, GOV-0036, GOV-0039)."""
     where = issue_repo or repo
+    launcher.home_name = launcher.home_name or repo
     issue, events = get_issue(where, n)
     refused = go_refusals(n, issue, events, owner(), agents(), get_reader(where, n),
                           now=dt.datetime.fromtimestamp(launcher.clock(), dt.timezone.utc), repo=where)
@@ -1924,7 +2028,9 @@ def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, forc
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     live = launcher.live()
     ref = ref_text(n, issue_repo)
-    taken = holders(n, get_heartbeat(repo, idle_minutes, now), live, repo=issue_repo)
+    # The heartbeat of the issue's repo: a session there tracks it in that repo (#912).
+    taken = holders(n, get_heartbeat(where, idle_minutes, now), live, repo=issue_repo,
+                    model_repo=issue_repo)
     if taken and not force:
         launcher.out(f"swarm launch: refused: {ref} already has a live session: {'; '.join(taken)}. "
                      f"Stop it (swarm stop <name>) or pass --force")
