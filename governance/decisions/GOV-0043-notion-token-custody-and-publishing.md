@@ -1,5 +1,5 @@
 ---
-id: GOV-0042
+id: GOV-0043
 title: The Notion token is a 0600 file only `swarm specs` reads, and Ready means a feature's spec may be published
 status: in-force
 kind: ruling
