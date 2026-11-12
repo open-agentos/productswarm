@@ -9,14 +9,15 @@ For each Goal and Area (GOV-0031):
 
 - **Progress**, one entry per done-test criterion: a Goal's checkbox lines, an Area's
   `**Target:**` bullets. A ticked box is `met`. An unticked one is whatever its measure says
-  (`met`, `progress` or `failing`), or `unmeasured` when no measure covers it: an
+  (`met`, `progress`, `failing`, or `counted` for M4's acts), or `unmeasured` when no measure covers it: an
   unmeasured criterion is never reported as on track, and an Area is never "delivered".
   A `**Date:**` that has passed with the Goal still open is `date_missed`. The measures
   reuse the commands that count the same thing: M1's report streak from `swarm daily`,
   M2's merge share and unreviewed reverts this UTC week from `swarm merges`, and M4's
   acts from `swarm acts` (which first reads the owner's acts back from GitHub into
-  swarm.db). A day `swarm acts` hasn't counted breaks M4's run like a failing one, and
-  with no counted day M4's acts criterion is `unmeasured` (#844).
+  swarm.db). M4's acts are reported as `counted`, with each counted day's acts and how
+  many weren't C-team, never as met or failing: owner acts are counted, never a gate
+  (per GOV-0040). With no counted day M4's acts criterion is `unmeasured` (#844).
 - **Stuck**: work nothing will start, with the reason and since when. Three rules, each from
   a real stall in #760's replays:
     1. `changes-no-restart`: the reviewer requested changes or found an overstep at a PR's
@@ -172,26 +173,23 @@ def reviewed_reverts(m: re.Match, d: Data) -> tuple[str, str] | None:
 
 
 def owner_acts(m: re.Match, d: Data) -> tuple[str, str] | None:
-    """M4: working days in a row, newest first, that `swarm acts` counted with under
-    acts.LIMIT owner acts and none 'other' (checks 1 and 2). Today, while in progress, is
-    skipped; a day not counted breaks the run as a failing day does, and with no counted day
-    the criterion is unmeasured (#844)."""
+    """M4: the owner's acts as `swarm acts` counted them on the recent working days, reported as
+    `counted`, never met or failing: owner acts are counted, never a gate (per GOV-0040).
+    Today, while in progress, is left out; with no counted day the criterion is unmeasured
+    (#844)."""
     import acts
     if d.owner_days is None:
         return None
     days = d.owner_days[1:] if d.owner_days and d.owner_days[0]["status"] == acts.IN_PROGRESS \
         else d.owner_days
-    if not any(day["status"] == acts.COUNTED for day in days):
+    counted = [day for day in days if day["status"] == acts.COUNTED]
+    if not counted:
         return "unmeasured", "no working day counted yet (swarm acts)"
-    need, run = int(m.group(1)), 0
-    for day in days:
-        if not (day["status"] == acts.COUNTED and day["under_limit"] and day["c_team"]):
-            break
-        run += 1
-    missing = sum(day["status"] != acts.COUNTED for day in days[:need])
-    return ("met" if run >= need else "progress",
-            f"{run} of {need} working days in a row under {acts.LIMIT} acts, all C-team"
-            + (f"; {missing} of the last {need} not counted" if missing else "") + " (swarm acts)")
+    n, other = sum(day["count"] for day in counted), sum(day["other"] for day in counted)
+    missing = len(days) - len(counted)
+    return "counted", (f"{n} owner act{'' if n == 1 else 's'} on {len(counted)} counted working "
+                       f"day{'' if len(counted) == 1 else 's'}, {other} not C-team"
+                       + (f"; {missing} not counted" if missing else "") + " (swarm acts)")
 
 
 # (pattern on the criterion's text, measure(match, data) -> (status, detail) or None if unread)
@@ -201,8 +199,7 @@ DAILY_STREAK: Measure = (re.compile(r"\b(\d+) working days in a row with a daily
 MERGE_SHARE: Measure = (re.compile(r"\bover half of a week's merges\b.*\bwithout the owner's click\b",
                                    re.I), merge_share)
 REVERTS: Measure = (re.compile(r"\bno unreviewed revert\b", re.I), reviewed_reverts)
-OWNER_ACTS: Measure = (re.compile(r"\bacts are counted for each of the (\d+) working days\b", re.I),
-                       owner_acts)
+OWNER_ACTS: Measure = (re.compile(r"\bacts\b[^.]*\bcounted\b", re.I), owner_acts)
 MEASURES: list[Measure] = [DAILY_STREAK, MERGE_SHARE, REVERTS, OWNER_ACTS]
 
 
@@ -646,7 +643,7 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
     def owner_acts():
         return acts.refresh(launcher.dir, owner, (repo, report_issue) if report_issue else None, repo,
                             g.gh_json, g.gh_items, merger.is_protected,
-                            swarm.working_days(today, swarm.DAILY_DAYS + 1), now, deadline=deadline)
+                            swarm.working_days(today, swarm.ACTS_DAYS + 1), now, deadline=deadline)
 
     day = (now - dt.timedelta(days=MERGED_DAYS)).date()
     with ThreadPoolExecutor(8) as pool:

@@ -17,9 +17,10 @@
     launcher/swarm daily            the last 10 working days' daily reports and who started
                                     each, and M1's streak (#707)
     launcher/swarm acts [--day D] [--json]
-                                    the owner's acts on each of the last 10 working days, or
-                                    on day D, with count and kind, or "not counted" for a day
-                                    not yet read back from GitHub (#771, #844; acts.py)
+                                    the owner's acts on each working day of the last two
+                                    weeks, or on day D, with count and kind, or "not counted"
+                                    for a day not yet read back from GitHub; counted, with no
+                                    limit (#771, #844, GOV-0040; acts.py)
     launcher/swarm watch [--dry-run] [--serve] [--container IMAGE]
                                     the v2 wake-up loop: start sessions on triggers, within
                                     the [watch] limits in swarm.toml (#90, GOV-0010; watch.py)
@@ -1490,13 +1491,17 @@ def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DE
 
 # ---------------------------------------------------------------- acts (#771)
 
+ACTS_DAYS = 10                 # `swarm acts`' default window, two weeks of working days: what
+                               # it shows, not a run to pass (per GOV-0040)
+
 def owner_acts(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DEFAULT_PATH,
                day: dt.date | None = None, as_json: bool = False, now: dt.datetime | None = None,
                tz: dt.tzinfo | None = None, owner: str | None = None, gh_json: Callable | None = None,
                gh_items: Callable | None = None) -> int:
     """`swarm acts`: read the owner's acts back from GitHub (the webhook leads, and a backfill of
-    each finished day not yet counted, acts.refresh), then print them for each of the last 10
-    working days, or for `day`, from swarm.db. A day not backfilled reads `not counted` (#844)."""
+    each finished day not yet counted, acts.refresh), then print them for each working day in
+    the last ACTS_DAYS, or for `day`, from swarm.db. A day not backfilled reads `not counted`
+    (#844). Acts are counted with no limit (per GOV-0040)."""
     import acts
     import merger
     try:
@@ -1508,7 +1513,8 @@ def owner_acts(launcher: Launcher, repo: str, manifest_path: Path | str = manife
     owner = owner or owner_login()
     g = None if gh_json and gh_items else dashboard()
     now = now or dt.datetime.now(dt.timezone.utc)
-    days = [day] if day else working_days((now.astimezone(tz) if tz else now.astimezone()).date())
+    days = [day] if day else working_days((now.astimezone(tz) if tz else now.astimezone()).date(),
+                                            ACTS_DAYS)
     rows, errors = acts.refresh(launcher.dir, owner, report, repo, gh_json or g.gh_json,
                                 gh_items or g.gh_items, merger.is_protected, days, now, tz)
     if as_json:
@@ -1974,8 +1980,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_daily = sub.add_parser("daily", help="the last 10 working days' daily reports and the streak")
     p_daily.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_daily.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
-    p_acts = sub.add_parser("acts", help="the owner's acts per working day, with count and kind (M4 checks 1-2)")
-    p_acts.add_argument("--day", type=dt.date.fromisoformat, help="YYYY-MM-DD (default: last 10 working days)")
+    p_acts = sub.add_parser("acts", help="the owner's acts per working day, with count and kind (no limit)")
+    p_acts.add_argument("--day", type=dt.date.fromisoformat, help="YYYY-MM-DD (default: the last two weeks' working days)")
     p_acts.add_argument("--json", action="store_true", dest="as_json", help="the same per-day list as JSON")
     p_acts.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_acts.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")

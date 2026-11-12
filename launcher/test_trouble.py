@@ -158,33 +158,35 @@ class Progress(unittest.TestCase):
         p = scope(trouble.report(data(issues=[g], week_merges=week)), 2)["progress"]
         self.assertEqual(p[1]["status"], "met")
 
-    def test_m4_acts_from_swarm_acts(self):
-        g = goal(4, "**Criteria**\n- [ ] my acts are counted for each of the 10 working days "
-                    "(checklist gates 1 and 2)\n")
-        day = {"status": "counted", "under_limit": True, "c_team": True}
-        today = {"status": "in progress", "under_limit": None, "c_team": None}
-        days = [day] * 3 + [{"status": "counted", "under_limit": False, "c_team": True}] + [day] * 6
-        p = scope(trouble.report(data(issues=[g], owner_days=days)), 4)["progress"]
-        self.assertEqual((p[0]["status"], p[0]["detail"][:8]), ("progress", "3 of 10 "))
-        p = scope(trouble.report(data(issues=[g], owner_days=[today] + [day] * 10)), 4)["progress"]
-        self.assertEqual(p[0]["status"], "met")                  # today, unfinished, is skipped
+    def test_m4_acts_are_counted_never_met_or_failing(self):
+        g = goal(4, "**Criteria**\n- [ ] my acts in the drill are counted and reported by "
+                    "`swarm acts`, with no budget\n")
+        day = {"status": "counted", "count": 2, "other": 0, "c_team": True}
+        busy = {"status": "counted", "count": 40, "other": 12, "c_team": False}
+        today = {"status": "in progress", "count": 7, "other": 1, "c_team": None}
+        p = scope(trouble.report(data(issues=[g], owner_days=[today, busy] + [day] * 9)), 4)["progress"]
+        self.assertEqual(p[0]["status"], "counted")              # 40 in a day still isn't failing
+        self.assertEqual(p[0]["detail"], "58 owner acts on 10 counted working days, 12 not C-team "
+                                         "(swarm acts)")         # today, unfinished, is left out
+        p = scope(trouble.report(data(issues=[g], owner_days=[day] * 11)), 4)["progress"]
+        self.assertEqual(p[0]["status"], "counted")              # 11 quiet days still aren't met
         self.assertEqual(scope(trouble.report(data(issues=[g])), 4)["progress"][0]["status"], "unmeasured")
 
-    def test_m4_a_day_not_counted_breaks_the_run(self):
+    def test_m4_reports_days_not_counted(self):
         g = goal(4, "- [ ] my acts are counted for each of the 10 working days\n")
-        day = {"status": "counted", "under_limit": True, "c_team": True}
-        gap = {"status": "not counted", "under_limit": None, "c_team": None}
+        day = {"status": "counted", "count": 1, "other": 1, "c_team": False}
+        gap = {"status": "not counted", "count": None, "other": None, "c_team": None}
         p = scope(trouble.report(data(issues=[g], owner_days=[day] * 2 + [gap] + [day] * 7)), 4)["progress"]
-        self.assertEqual(p[0]["status"], "progress")
-        self.assertIn("2 of 10 working days in a row", p[0]["detail"])
-        self.assertIn("1 of the last 10 not counted", p[0]["detail"])
+        self.assertEqual((p[0]["status"], p[0]["detail"]),
+                         ("counted", "9 owner acts on 9 counted working days, 9 not C-team; "
+                                     "1 not counted (swarm acts)"))
 
     def test_m4_unmeasured_on_an_empty_swarm_db(self):
         import acts
-        g = goal(4, "- [ ] my acts are counted for each of the 10 working days\n")
+        g = goal(4, "- [ ] my acts in the drill are counted and reported by `swarm acts`\n")
         with tempfile.TemporaryDirectory() as tmp:
             days = acts.per_day(acts.stored(Path(tmp)),
-                                swarm.working_days(NOW.date(), swarm.DAILY_DAYS + 1),
+                                swarm.working_days(NOW.date(), swarm.ACTS_DAYS + 1),
                                 dt.timezone.utc, NOW, acts.backfilled(Path(tmp)))
         self.assertEqual({d["status"] for d in days[1:]}, {"not counted"})
         p = scope(trouble.report(data(issues=[g], owner_days=days)), 4)["progress"]

@@ -1,7 +1,8 @@
-"""The owner's acts per working day (#771): readiness checks 1 and 2 (M4, #686).
+"""The owner's acts per working day (#771), counted and reported for M4 (#686).
 
-Check 1 is under 5 owner acts on each of 10 working days in a row; check 2 is that every one
-of them is C-team work. GitHub's events API keeps 300 events, so one busy day pushes earlier
+Owner acts are counted and reported, never a gate (per GOV-0040): there is no limit a day and
+no run of working days to pass. Each day gives its count and each act's kind, including how
+many weren't C-team work ('other'). GitHub's events API keeps 300 events, so one busy day pushes earlier
 ones out (dashboard/activity.py). This keeps its own record in swarm.db instead, in two steps:
 
 1. **Leads, from webhooks.** For each delivery that could be an owner act, the receiver
@@ -18,7 +19,7 @@ Each role App delivers the same event, so one act has several leads; an act's ke
 GitHub object (a comment id, review id, issue event id, or a merge or open of repo#n), so it
 is stored once.
 
-What counts (check 1):
+What counts:
     label    the owner added or removed a label on an issue or PR (issue events, by id)
     comment  an issue or PR conversation comment
     review   a PR review, including an approval that is an approved ask (GOV-0027); an
@@ -28,10 +29,10 @@ What counts (check 1):
 What doesn't: opening or editing a Goal or Area (labels on one are edits to it), closing an
 issue (a merge closes its issue as the owner), reading the report or the Desk.
 
-Kind (check 2): `plan` (on a Mission, Goal or Area, or a `hold` veto, GOV-0031), `report`
+Kind: `plan` (on a Mission, Goal or Area, or a `hold` veto, GOV-0031), `report`
 (on the report issue: replies, asks and `Ask:` one-on-ones), `ask` (on a `gov:question`, or
 approving a protected-path PR at head, GOV-0027), `protected-merge` (merging a PR that touches
-a protected path) and `other`, which fails check 2: a `ready` on a Task, a dispatching
+a protected path) and `other`, work that isn't the C-team's: a `ready` on a Task, a dispatching
 comment, a merge of an ordinary PR.
 
 **A day is counted only once it is backfilled (#844).** Leads only exist where the receiver
@@ -68,7 +69,6 @@ from typing import Callable
 
 import statedb
 
-LIMIT = 5                       # check 1: under 5 acts a day
 SCOPE_TYPES = ("Mission", "Goal", "Area")
 EXEMPT_TYPES = ("Goal", "Area")  # opening or editing one is plan approval, not an act
 KINDS = ("plan", "report", "ask", "protected-merge", "other")
@@ -512,10 +512,11 @@ def stored(state_dir: Path) -> list[dict]:
 
 def per_day(acts: list[dict], days: list[dt.date], tz: dt.tzinfo | None = None,
             now: dt.datetime | None = None, backfills: list | None = None) -> list[dict]:
-    """One entry per day, in the order given: {day, status, why, count, other, under_limit,
-    c_team, acts}, each act with its local time. Days are local (tz, or this machine's).
-    Only a `counted` day (backfilled, day_state) has a count and the two checks; a `not
-    counted` one has None for all three, never 0; an `in progress` one counts so far, unchecked."""
+    """One entry per day, in the order given: {day, status, why, count, other, c_team, acts},
+    each act with its local time. Days are local (tz, or this machine's). Only a `counted` day
+    (backfilled, day_state) has a count, its 'other' acts and c_team (none 'other'); a `not
+    counted` one has None for all three, never 0; an `in progress` one counts so far. There is
+    no limit to check a count against (per GOV-0040)."""
     now = now or dt.datetime.now(dt.timezone.utc)
     by: dict[dt.date, list[dict]] = {d: [] for d in days}
     for a in acts:
@@ -531,9 +532,9 @@ def per_day(acts: list[dict], days: list[dt.date], tz: dt.tzinfo | None = None,
         status, why, _ = day_state(d, now, backfills or [], tz)
         other = sum(a["kind"] == "other" for a in items)
         row = {"day": d.isoformat(), "status": status, "why": why, "count": None, "other": None,
-               "under_limit": None, "c_team": None, "acts": items}
+               "c_team": None, "acts": items}
         if status == COUNTED:
-            row.update(count=len(items), other=other, under_limit=len(items) < LIMIT, c_team=other == 0)
+            row.update(count=len(items), other=other, c_team=other == 0)
         elif status == IN_PROGRESS:
             row.update(count=len(items), other=other)
         out.append(row)
@@ -542,7 +543,7 @@ def per_day(acts: list[dict], days: list[dt.date], tz: dt.tzinfo | None = None,
 
 def text(rows: list[dict], owner: str, repo: str | None = None) -> str:
     """`swarm acts`'s output: each day newest first, its count (or why it isn't counted) and each act."""
-    out = [f"Owner acts by @{owner} (local time; check 1: under {LIMIT} a day, check 2: none 'other'):"]
+    out = [f"Owner acts by @{owner} (local time; counted, with no limit, per GOV-0040):"]
     for r in rows:
         d = dt.date.fromisoformat(r["day"])
         n = r["count"]
@@ -552,12 +553,8 @@ def text(rows: list[dict], owner: str, repo: str | None = None) -> str:
             head = f"{n} act{'' if n == 1 else 's'}"
             if r["status"] == IN_PROGRESS:
                 head += " so far (the day isn't over)"
-            verdict = []
-            if r["under_limit"] is False:
-                verdict.append(f"{LIMIT} or more")
-            if r["c_team"] is False:
-                verdict.append(f"{r['other']} not C-team")
-            head += f"  ({', '.join(verdict)})" if verdict else ""
+            if r["other"]:
+                head += f"  ({r['other']} not C-team)"
         out.append(f"  {d:%a %Y-%m-%d}  {head}")
         for a in r["acts"]:
             ref = f"#{a['number']}" if a["repo"] == repo else f"{a['repo']}#{a['number']}"
