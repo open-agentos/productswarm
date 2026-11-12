@@ -178,6 +178,27 @@ def _later(ts: Optional[str]) -> str:
     return now.strftime(_TS)
 
 
+def _check_spec_values(spec: dict, where: str) -> None:
+    """Each section is a string or null; Acceptance criteria is null or a list of
+    `{"text": str, "checked": bool}`. Anything else is refused, not stringified."""
+    for heading, value in spec.items():
+        w = f"{where}[{heading!r}]"
+        if heading != "Acceptance criteria":
+            if value is not None and not isinstance(value, str):
+                raise SchemaError(f"{w} must be a string or null, not {type(value).__name__}")
+            continue
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            raise SchemaError(f"{w} must be a list or null, not {type(value).__name__}")
+        for i, item in enumerate(value):
+            if (not isinstance(item, dict) or set(item) != {"text", "checked"}
+                    or not isinstance(item["text"], str)
+                    or not isinstance(item["checked"], bool)):
+                raise SchemaError(
+                    f"{w}[{i}] must be {{\"text\": string, \"checked\": bool}}: {item!r}")
+
+
 def _parse_ts(ts: str, where: str) -> datetime:
     try:
         d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -231,6 +252,7 @@ def _parse(data) -> tuple[dict, dict, dict, dict]:
             _parse_ts(edited, f"{where}.last_edited_time")
         if not isinstance(raw["spec"], dict):
             raise SchemaError(f"{where}.spec must be an object of heading → content")
+        _check_spec_values(raw["spec"], f"{where}.spec")
         try:
             spec = Spec.from_sections(raw["spec"])
         except SchemaError as e:

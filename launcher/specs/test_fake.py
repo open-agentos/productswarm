@@ -209,6 +209,16 @@ class SchemaErrorTest(FixtureCase):
         self.broken(lambda d: d["features"][0]["spec"].update(Requirements="x"))
         self.broken(lambda d: d["features"][0]["spec"].update(
             {"Acceptance criteria": ["not a checklist item"]}))
+        self.broken(lambda d: d["features"][0]["spec"].update({"Acceptance criteria": 5}))
+        self.broken(lambda d: d["features"][0]["spec"].update({"Acceptance criteria": "abc"}))
+        self.broken(lambda d: d["features"][0]["spec"].update(
+            {"Acceptance criteria": [{"text": None, "checked": False}]}))
+        self.broken(lambda d: d["features"][0]["spec"].update(
+            {"Acceptance criteria": [{"text": "x", "checked": "yes"}]}))
+        self.broken(lambda d: d["features"][0]["spec"].update(
+            {"Acceptance criteria": [{"text": "x"}]}))
+        self.broken(lambda d: d["features"][0]["spec"].update(Problem={"x": 1}))
+        self.broken(lambda d: d["features"][0]["spec"].update(Notes=3))
         self.broken(lambda d: d["features"][0].update(last_edited_time="yesterday"))
         self.broken(lambda d: d["features"][0].pop("comments"))
         self.broken(lambda d: d.pop("initiatives"))
