@@ -1,0 +1,131 @@
+{
+  "initiatives": [
+    {
+      "id": "init-0001-recipe-box",
+      "url": "https://example.invalid/fake/init-0001-recipe-box",
+      "properties": {
+        "Name": "Recipe box: a shared family cookbook",
+        "Goal": "https://github.com/example/recipe-box/issues/1",
+        "Status": "Active"
+      }
+    }
+  ],
+  "features": [
+    {
+      "url": "https://example.invalid/fake/feat-1",
+      "last_edited_time": "2026-11-01T09:00:00Z",
+      "properties": {
+        "Name": "Save a recipe from a link",
+        "ID": "FEAT-1",
+        "Initiative": "init-0001-recipe-box",
+        "Status": "Ready",
+        "Issue": null,
+        "PR": null,
+        "Last synced": null
+      },
+      "spec": {
+        "Problem": "Family members find recipes online but copy them by hand.",
+        "Scope": "Paste a recipe URL; the box stores its title, ingredients and steps.",
+        "Out of scope": "Sites that need a login.",
+        "Acceptance criteria": [
+          {"text": "Pasting a recipe URL saves title, ingredients and steps", "checked": false},
+          {"text": "A URL with no recipe shows a clear error and saves nothing", "checked": false}
+        ],
+        "Notes": "Start with pages that carry schema.org Recipe markup."
+      },
+      "comments": []
+    },
+    {
+      "url": "https://example.invalid/fake/feat-2",
+      "last_edited_time": "2026-11-02T10:30:00Z",
+      "properties": {
+        "Name": "Scale a recipe's servings",
+        "ID": "FEAT-2",
+        "Initiative": "init-0001-recipe-box",
+        "Status": "Ready",
+        "Issue": null,
+        "PR": null,
+        "Last synced": null
+      },
+      "spec": {
+        "Problem": "Recipes are written for four; the family cooks for six.",
+        "Scope": "A servings control that rescales ingredient amounts.",
+        "Out of scope": "Unit conversion.",
+        "Notes": "Acceptance criteria still to write."
+      },
+      "comments": []
+    },
+    {
+      "url": "https://example.invalid/fake/feat-3",
+      "last_edited_time": "2026-11-03T08:15:00Z",
+      "properties": {
+        "Name": "Weekly meal plan",
+        "ID": "FEAT-3",
+        "Initiative": "init-0001-recipe-box",
+        "Status": "Draft",
+        "Issue": null,
+        "PR": null,
+        "Last synced": null
+      },
+      "spec": {
+        "Problem": "Deciding what to cook each night takes too long.",
+        "Scope": "Drag recipes onto a seven-day grid.",
+        "Out of scope": "Shopping lists.",
+        "Acceptance criteria": [
+          {"text": "A recipe dragged onto a day stays there after reload", "checked": false}
+        ],
+        "Notes": ""
+      },
+      "comments": []
+    },
+    {
+      "url": "https://example.invalid/fake/feat-4",
+      "last_edited_time": "2026-10-28T14:00:00Z",
+      "properties": {
+        "Name": "Search recipes by ingredient",
+        "ID": "FEAT-4",
+        "Initiative": "init-0001-recipe-box",
+        "Status": "Ready",
+        "Issue": "https://github.com/example/recipe-box/issues/7",
+        "PR": null,
+        "Last synced": "2026-10-29T09:00:00Z"
+      },
+      "spec": {
+        "Problem": "Nobody remembers which recipe used the leftover leeks.",
+        "Scope": "Search box matching ingredient names across saved recipes.",
+        "Out of scope": "Fuzzy or misspelt matches.",
+        "Acceptance criteria": [
+          {"text": "Searching 'leek' lists every recipe with leeks", "checked": false},
+          {"text": "No match shows an empty state, not an error", "checked": false}
+        ],
+        "Notes": ""
+      },
+      "comments": []
+    },
+    {
+      "url": "https://example.invalid/fake/feat-5",
+      "last_edited_time": "2026-10-20T11:45:00Z",
+      "properties": {
+        "Name": "Print a recipe card",
+        "ID": "FEAT-5",
+        "Initiative": "init-0001-recipe-box",
+        "Status": "In review",
+        "Issue": "https://github.com/example/recipe-box/issues/5",
+        "PR": "https://github.com/example/recipe-box/pull/9",
+        "Last synced": "2026-11-04T16:20:00Z"
+      },
+      "spec": {
+        "Problem": "Grandparents want paper copies for the kitchen.",
+        "Scope": "A print view that fits one recipe on an index card.",
+        "Out of scope": "Custom card templates.",
+        "Acceptance criteria": [
+          {"text": "Printing fits title, ingredients and steps on one 5x8 card", "checked": true}
+        ],
+        "Notes": ""
+      },
+      "comments": [
+        {"body": "Index cards in our drawer are 5x8, not 4x6.", "marker": null}
+      ]
+    }
+  ]
+}
