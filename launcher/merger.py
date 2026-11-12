@@ -74,6 +74,10 @@ count only there). A PR in another repo must close an issue in that repo; that i
 under a Goal or Area in any repo of the org (GOV-0031). With --repo or --pr, only the one
 repo. It exits 1 if any repo did. The token must reach each repo: installing the merger App on one
 is the owner's step.
+
+A paused repo (#892, swarm.toml's [org] paused): plan and run say so and stop for that repo
+before reading any PR. Nothing there is merged, enqueued or commented on, and the other repos
+carry on. That holds with --repo and --pr too.
 """
 from __future__ import annotations
 
@@ -439,6 +443,9 @@ def plan(repo: str, pr: int | None = None, manifest_path: Path | str | None = No
          list_prs: Callable[[], list[dict]] | None = None,
          out: Callable[[str], None] = print) -> int:
     """Print merge or miss for each open PR (or only PR pr). 0 decided, 1 couldn't."""
+    if (why := paused(repo, manifest_path)):
+        out(f"merger: {why}: no PR is considered")
+        return 0
     r = reader or live(repo)
     try:
         ctx, decisions = decide_all(repo, pr, manifest_path, r, owner, authors,
@@ -576,6 +583,9 @@ def run(repo: str, dry_run: bool = False, pr: int | None = None,
         out: Callable[[str], None] = print) -> int:
     """plan, then act on each decision per [merger] mode. 0 done, 1 couldn't decide or a
     write failed. --dry-run prints each write instead of making it."""
+    if (why := paused(repo, manifest_path)):
+        out(f"merger: {why}: nothing posted or merged")
+        return 0
     r = reader or live(repo)
     w = writer or gh_writer(repo)
     try:
@@ -705,6 +715,12 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> int:
         else:
             rc = max(rc, plan(r, args.pr, args.manifest))
     return rc
+
+
+def paused(repo: str, manifest_path: Path | str | None) -> str | None:
+    """Why repo is paused in swarm.toml's [org] paused (#892), or None if it isn't."""
+    p = manifest.load_paused(manifest_path or swarm.ROOT / "swarm.toml")[0]
+    return manifest.paused_text(repo, p) if manifest.is_paused(repo, p) else None
 
 
 def other_repos(home: str, manifest_path: Path | str | None,

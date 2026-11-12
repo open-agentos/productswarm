@@ -857,5 +857,51 @@ class OtherRepos(unittest.TestCase):
                       merger.make_plan([{"number": 70}], ctx, w.reader())[0])
 
 
+
+class Paused(unittest.TestCase):
+    """#892: a repo in swarm.toml's [org] paused gets no merge and no comment; the rest go on."""
+
+    def run_live(self, repo, paused, w, fw, cmd="run"):
+        out = []
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "swarm.toml"
+            p.write_text('[merger]\nmode = "live"\nmax_changed_lines = 100\n'
+                         f'[org]\nrepos = ["{SCRATCH}"]\npaused = {paused}\n')
+            kw = dict(manifest_path=p, reader=w.reader(), owner=lambda: OWNER,
+                      authors=lambda: (AGENTS | {"productswarm-planner[bot]"}, None),
+                      list_prs=lambda: [{"number": 70}], out=out.append)
+            if cmd == "plan":
+                return merger.plan(repo, **kw), out
+            code = merger.run(repo, writer=fw.writer(w), clock=lambda: T0, **kw)
+        return code, out
+
+    def test_a_paused_repo_gets_no_merge_and_an_unpaused_one_does(self):
+        history = [would(T0 - 60 * i, pr=i) for i in range(10)]
+        w, fw = World(), FakeWriter(history)
+        code, out = self.run_live(REPO, f'["{REPO}"]', w, fw)
+        self.assertEqual((code, fw.merges, fw.posts), (0, [], []))
+        self.assertEqual(out, [f"merger: {REPO} is paused in swarm.toml's [org] paused (#892): "
+                               f"nothing posted or merged"])
+        w, fw = World(), FakeWriter(history)            # the same run with only scratch paused
+        code, out = self.run_live(REPO, f'["{SCRATCH}"]', w, fw)
+        self.assertEqual((code, fw.merges), (0, [(70, HEAD)]))
+        code, out = self.run_live(SCRATCH, f'["{SCRATCH}"]', World(), fw)
+        self.assertEqual((code, fw.merges), (0, [(70, HEAD)]))     # nothing more
+        self.assertIn("paused", out[0])
+
+    def test_plan_says_paused_and_considers_no_pr(self):
+        code, out = self.run_live(REPO, f'["{REPO.upper()}"]', World(), None, cmd="plan")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, [f"merger: {REPO} is paused in swarm.toml's [org] paused (#892): "
+                               f"no PR is considered"])
+
+    def test_a_bad_paused_list_pauses_every_repo(self):
+        history = [would(T0 - 60 * i, pr=i) for i in range(10)]
+        w, fw = World(), FakeWriter(history)
+        code, out = self.run_live(REPO, '"scratch"', w, fw)
+        self.assertEqual((code, fw.merges, fw.posts), (0, [], []))
+        self.assertIn("every repo is until it is fixed", out[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -259,6 +259,11 @@ lists each once as not started (OTHER_REPO) and never records it, so once starti
 in another repo is built, every one still open fires. A repo it can't read is said once.
 With no [org] table nothing else is read and nothing changes.
 
+A paused repo (#892, swarm.toml's [org] paused): watch says so once and starts nothing
+there. Another repo that is paused isn't read at all. This repo's triggers are held with the
+code "paused", so `swarm inbox` and the Desk list them as held. They are never recorded, so each
+fires on the first check after the owner unpauses the repo. Every other repo carries on.
+
 GitHub reads go through gather(); triggers() is pure, so tests feed it canned data.
 """
 from __future__ import annotations
@@ -351,6 +356,7 @@ REASONS = {
     "usage_limit": "held: usage limit",
     "halted": "held: the owner put swarm:halt on the report issue",
     "record_first": "held: docs records the ruling first",
+    "paused": "held: its repo is paused in swarm.toml",
     "error": "held: failed to start; trying again next check",
     "raised_by": "skipped: \"Raised by\" names no role",
     "no_role": "skipped: the role isn't in swarm.toml",
@@ -1842,6 +1848,9 @@ class Watch:
         ask_n, since = self.asks(w, limits, st["asks_since"], now)
         r_since = self.research(w, limits, st["research_since"], now)
         one_way, apps = self.one_way(), self.apps()
+        paused = manifest.load_paused(self.manifest_path)[0]
+        if manifest.is_paused(self.repo, paused):
+            self.once(f"swarm watch: {manifest.paused_text(self.repo, paused)}; nothing starts there")
         new = []
         here = triggers(w, self.owner, self.launcher.running(), self.roles, g.needs_you,
                         g.is_tracking, bool(limits and limits.review_in_actions), now,
@@ -1849,7 +1858,7 @@ class Watch:
                         apps, bool(limits and limits.call_ins), *self.daily(limits),
                         ask_issue=ask_n, asks_since=since, research_since=r_since,
                         research_report=limits.report_issue if limits else None)
-        for t in here + self.other_triggers(limits, now, one_way, apps):
+        for t in here + self.other_triggers(limits, now, one_way, apps, paused):
             key = f"{t.key}|held|{t.once}" if t.held else t.key
             if key in self.seen:
                 continue
@@ -1864,10 +1873,12 @@ class Watch:
         return new
 
     def other_triggers(self, limits: "manifest.WatchLimits | None", now: dt.datetime,
-                       one_way: frozenset[str], apps: dict[str, str]) -> list[Trigger]:
+                       one_way: frozenset[str], apps: dict[str, str],
+                       paused: frozenset[str] | None = frozenset()) -> list[Trigger]:
         """The triggers in each of swarm.toml's [org] repos (#772), named by repo, without
         [daily], [ask] or [research]. A bad [org] table is reported by tick() and works none;
-        a repo outside this one's org, or one that can't be read, is said once and skipped."""
+        a repo outside this one's org, or one that can't be read, is said once and skipped.
+        A paused repo (#892) is said once and not read, so nothing there can start."""
         try:
             repos = manifest.load_repos(self.manifest_path)[0]
         except manifest.ManifestError:
@@ -1877,6 +1888,9 @@ class Watch:
             self.once(f"swarm watch: {why}")
         g, out = swarm.dashboard(), []
         for repo in keep:
+            if manifest.is_paused(repo, paused):
+                self.once(f"swarm watch: {manifest.paused_text(repo, paused)}; nothing starts there")
+                continue
             try:
                 w = self.read(repo, self.idle_minutes, now)
             except RuntimeError as e:
@@ -1994,6 +2008,10 @@ class Watch:
         # #591: likewise, kept while research is on, dropped as soon as it is off.
         research_since = iso(r_since) if r_since else None
         one_way, apps = self.one_way(), self.apps()
+        paused = manifest.load_paused(self.manifest_path)[0]
+        home_paused = manifest.is_paused(self.repo, paused) and manifest.paused_text(self.repo, paused)
+        if home_paused:
+            self.once(f"swarm watch: {home_paused}; nothing starts there")
         todo = [t for t in triggers(w, self.owner, live, self.roles, g.needs_you, g.is_tracking,
                                     limits.review_in_actions, now, limits.stale_minutes,
                                     one_way, apps, limits.call_ins,
@@ -2037,6 +2055,10 @@ class Watch:
                 if t.key not in self.seen:
                     self.seen.add(t.key)
                     out(t.line())
+                continue
+            if home_paused:
+                # #892: the owner paused this repo. Not recorded, so each fires once it's unpaused.
+                hold(t, f"held: {home_paused}", code="paused")
                 continue
             if t.held:
                 # #488: a live session is on the issue, or #490: a [build]'s Waits-on issues are
@@ -2119,7 +2141,7 @@ class Watch:
                 finish(t, f"started {entry.name}")
             else:
                 hold(t, "failed to start (see above); trying again next check", code="error")
-        for t in self.other_triggers(limits, now, one_way, apps):
+        for t in self.other_triggers(limits, now, one_way, apps, paused):
             # #772: listed once, never recorded, so each fires once starting there is built.
             self.once(t.line() if t.held or t.skipped else f"[{t.kind}] {t.ref} {t.why} -> {OTHER_REPO}")
         st = {"checked": iso(now), "acted": acted, "waiting": held, "runs": runs,
