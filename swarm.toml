@@ -50,7 +50,7 @@
 # report_issue = <the pinned report issue>
 [watch]
 interval_minutes = 5
-max_live = 2
+max_live = 4
 max_turns = 200
 review_in_actions = true
 actions_max_reviews = 2
@@ -88,7 +88,7 @@ spend_cap_usd = 5
 [[session]]
 role = "docs"
 count = 1
-model = "claude-opus-5-5"
+model = "claude-sonnet-5-5"
 spend_cap_usd = 5
 
 [[session]]
@@ -100,5 +100,5 @@ spend_cap_usd = 5
 [[session]]
 role = "analyst"
 count = 1
-model = "claude-opus-5-5"
+model = "claude-sonnet-5-5"
 spend_cap_usd = 5
