@@ -35,7 +35,7 @@ else
     || { echo "swarm-token: productswarm-$role is not installed on $repo" >&2; exit 1; }
   umask 077
   api -X POST "https://api.github.com/app/installations/$inst/access_tokens" \
-        -d "{\"repositories\":[\"${repo#*/}\"]}" | jq '{token, expires_at}' > "$cache.tmp"
+    -d '{"repositories":["productswarm","productswarm-scratch"]}' | jq '{token, expires_at}' > "$cache.tmp"
   mv "$cache.tmp" "$cache"
   token=$(jq -r .token "$cache")
 fi
