@@ -102,3 +102,6 @@ role = "analyst"
 count = 1
 model = "claude-sonnet-5-5"
 spend_cap_usd = 5
+
+[org]
+repos = ["open-agentos/productswarm-scratch"]
