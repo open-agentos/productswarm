@@ -1,0 +1,52 @@
+{
+  "generated_at": "2026-11-12T12:00:00+00:00",
+  "repo": "o/r",
+  "owner": "mattmcalister",
+  "authority_hours": 24,
+  "scopes": [
+    {
+      "ref": "o/r#100", "type": "Area", "title": "Reviews stay fast",
+      "url": "https://github.com/o/r/issues/100", "date": null, "date_missed": false,
+      "progress": [
+        {"criterion": "no unreviewed revert this week", "status": "failing",
+         "detail": "1 unreviewed revert(s) this week: PR #140 (swarm merges)"},
+        {"criterion": "every PR reviewed within a day", "status": "unmeasured", "detail": "no measure yet"}
+      ],
+      "stuck": [], "waiting": [], "authority": [], "spend_usd": null
+    },
+    {
+      "ref": "o/r#200", "type": "Goal", "title": "M3: The Desk shows <the plan>",
+      "url": "https://github.com/o/r/issues/200", "date": "2026-11-10", "date_missed": true,
+      "progress": [
+        {"criterion": "a daily report 5 working days running", "status": "met", "detail": "ticked"},
+        {"criterion": "over half the merges without the owner's click", "status": "progress",
+         "detail": "3 of 8 merges this week without the owner's click (swarm merges)"},
+        {"criterion": "the Desk shows the plan", "status": "unmeasured", "detail": "no measure yet"}
+      ],
+      "stuck": [
+        {"kind": "changes-no-restart", "ref": "PR #210", "url": "https://github.com/o/r/pull/210",
+         "reason": "changes requested at aaaaaaa, no push since, and no trigger restarts the planner",
+         "since": "2026-11-10T09:00:00+00:00", "age_hours": 51.0}
+      ],
+      "waiting": [
+        {"kind": "question", "ref": "#220", "url": "https://github.com/o/r/issues/220",
+         "reason": "gov:question not answered", "since": "2026-11-05T12:00:00+00:00", "age_hours": 168.0}
+      ],
+      "authority": [
+        {"kind": "grant", "ref": "PR #230", "url": "https://github.com/o/r/pull/230",
+         "reason": "merged by the merger under GOV-0027", "since": "2026-11-12T08:00:00+00:00", "age_hours": 4.0}
+      ],
+      "spend_usd": 12.5
+    }
+  ],
+  "outside": {
+    "stuck": [],
+    "waiting": [
+      {"kind": "untriaged", "ref": "#240", "url": "javascript:alert(1)",
+       "reason": "no label, and under no Goal or Area", "since": "2026-11-12T10:00:00+00:00", "age_hours": 2.0}
+    ],
+    "authority": []
+  },
+  "spend": null,
+  "errors": ["swarm daily's streak"]
+}
