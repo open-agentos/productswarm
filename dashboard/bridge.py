@@ -380,8 +380,8 @@ def orders_html(b: dict) -> str:
     return f'<section class="br-orders">{head}{"".join(rows)}</section>'
 
 
-# The Bridge's left column, shared by its pages: (file, name). Agents is Operations until #932.
-NAV = (("bridge.html", "Bridge"), ("commissions.html", "Commissions"), ("operations.html", "Agents"))
+# The Bridge's left column, shared by its pages: (file, name).
+NAV = (("bridge.html", "Bridge"), ("commissions.html", "Commissions"), ("agents.html", "Agents"))
 
 
 def nav_html(current: str, counts: dict[str, int]) -> str:
