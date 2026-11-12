@@ -2,4 +2,6 @@
 
 `source.py` holds the `SpecSource` adapter boundary every backend implements (#937 §7).
 `fake.py` is the `fake` backend over JSON fixtures (#941), for tests and simulated runs.
+`snapshot.py` renders and reads the spec snapshot block in a feature's issue body (#953).
+`events.py` is the append-only `events.jsonl` log of pulls, writes and decisions (#954).
 """
