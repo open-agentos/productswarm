@@ -1,4 +1,5 @@
 """Tests for launcher/desk.py: the live Desk is read-only and rebuilt from GitHub on a nudge."""
+import json
 import os
 import subprocess
 import sys
@@ -208,6 +209,82 @@ class ServerTest(unittest.TestCase):
             finally:
                 srv.shutdown()
                 srv.server_close()
+
+
+FIXTURE = Path(__file__).resolve().parent / "testdata" / "trouble.json"
+
+
+class TroublePanelTest(unittest.TestCase):
+    """#889: the panel renders `swarm trouble --json` per Goal and Area."""
+
+    def setUp(self):
+        self.report = json.loads(FIXTURE.read_text())
+        self.html = desk.trouble_panel(self.report)
+
+    def scope(self, ref: str) -> str:
+        """The rendered <article> for one Goal or Area."""
+        start = self.html.index(f">{ref}</a>")
+        return self.html[start:self.html.index("</article>", start)]
+
+    def test_a_stalled_pr_shows_as_stuck_with_since(self):
+        goal = self.scope("o/r#200")
+        stuck = goal[goal.index("<h4>Stuck</h4>"):goal.index("<h4>Waiting on the owner</h4>")]
+        self.assertIn('<a href="https://github.com/o/r/pull/210">PR #210</a>', stuck)
+        self.assertIn("no trigger restarts the planner", stuck)
+        self.assertIn("since 2026-11-10, 2d", stuck)
+
+    def test_a_question_waiting_a_week_shows_with_its_age(self):
+        goal = self.scope("o/r#200")
+        waiting = goal[goal.index("<h4>Waiting on the owner</h4>"):goal.index("<h4>On the owner")]
+        self.assertIn('<a href="https://github.com/o/r/issues/220">#220</a>', waiting)
+        self.assertIn("gov:question not answered", waiting)
+        self.assertIn("waiting since 2026-11-05, 7d", waiting)
+
+    def test_a_failed_area_target_shows_as_failing(self):
+        area = self.scope("o/r#100")
+        self.assertIn('<li class="status-failing"><strong>failing</strong> no unreviewed revert '
+                      'this week', area)
+        self.assertIn("PR #140", area)
+
+    def test_unmeasured_is_never_shown_as_on_track(self):
+        area = self.scope("o/r#100")
+        self.assertIn("<strong>unmeasured: not known to be on track</strong> every PR reviewed", area)
+        self.assertNotIn("on track</strong>", self.html.replace("not known to be on track", ""))
+
+    def test_authority_date_and_outside(self):
+        goal = self.scope("o/r#200")
+        self.assertIn("On the owner&#x27;s authority, last 24h", goal)
+        self.assertIn("merged by the merger under GOV-0027", goal)
+        self.assertIn('date 2026-11-10 <strong class="missed">MISSED</strong>', goal)
+        self.assertIn("Under no Goal or Area", self.html)
+        self.assertIn("not read: swarm daily&#x27;s streak", self.html)
+
+    def test_titles_are_escaped_and_only_github_links_are_links(self):
+        self.assertIn("M3: The Desk shows &lt;the plan&gt;", self.html)
+        self.assertNotIn("javascript:", self.html)
+        self.assertIn("#240 no label", self.html)
+
+    def test_empty_report(self):
+        out = desk.trouble_panel({"scopes": [], "outside": {"stuck": [], "waiting": [], "authority": []}})
+        self.assertIn("No open Goal or Area.", out)
+        self.assertNotIn("Under no Goal or Area", out)
+
+    def test_renders_what_trouble_report_emits(self):
+        """The fixture has trouble.report()'s shape, and the panel renders a real report."""
+        import datetime as dt
+        swarm.dashboard()   # puts generate on the path, as gather() does
+        import trouble
+        g = {"number": 7, "title": "G", "html_url": "https://github.com/o/r/issues/7",
+             "user": {"login": "own"}, "labels": [], "body": "- [ ] something unmeasured",
+             "created_at": "2026-11-01T00:00:00Z", "type": {"name": "Goal"}, "state": "open"}
+        d = trouble.Data(repo="o/r", owner="own", now=dt.datetime(2026, 11, 12, tzinfo=dt.timezone.utc),
+                         issues=[g], scopes={7: None})
+        r = trouble.report(d)
+        self.assertEqual(set(r), set(self.report))
+        self.assertEqual(set(r["scopes"][0]), set(self.report["scopes"][0]))
+        out = desk.trouble_panel(r)
+        self.assertIn('<a href="https://github.com/o/r/issues/7">o/r#7</a> G', out)
+        self.assertIn("unmeasured: not known to be on track", out)
 
 
 class CliTest(unittest.TestCase):

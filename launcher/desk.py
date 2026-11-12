@@ -18,12 +18,15 @@ replayed event can at most cause one extra build (the reconciler's rule, GOV-002
     serves   GET and HEAD only, on 127.0.0.1:8080 by default: /, the four pages, state.json
              and fonts/. Any other method is 405 and any other path 404. There is no form
              and no POST route until Google login.
+    trouble  trouble_panel(report) renders `swarm trouble --json` per Goal and Area as a
+             read-only HTML section (#889). It is not served yet.
 
 Usage: swarm desk [--host 127.0.0.1] [--port 8080] [--repo owner/name]. generate.py reads
 GitHub with `gh`, so it uses GH_TOKEN from the environment: on the host, a read-only token.
 """
 from __future__ import annotations
 
+import html
 import http.server
 import os
 import re
@@ -182,6 +185,87 @@ def handle(live: Path | None, method: str, path: str) -> tuple[int, dict[str, st
         return 404, headers | {"Content-Type": "text/plain; charset=utf-8"}, b"not found\n"
     cache = "public, max-age=86400" if path.startswith("/fonts/") else "no-cache"
     return 200, headers | {"Content-Type": ctype, "Cache-Control": cache}, body
+
+
+# ---------------------------------------------------------------- trouble panel (#889)
+#
+# A read-only panel per open Goal and Area from `swarm trouble --json` (trouble.report()):
+# #760's four questions. How does each done-test criterion stand? What is stuck, and since
+# when? What waits on the owner, and for how long? What was done on the owner's authority?
+# An `unmeasured` criterion is shown as unmeasured, never as on track. Pure: dict in, HTML out.
+
+STATUS = {"met": "met", "progress": "in progress", "failing": "failing", "counted": "counted",
+          "unmeasured": "unmeasured: not known to be on track"}
+LINK_RE = re.compile(r"https://github\.com/[^\s\"'<>]*")
+
+
+def _esc(x) -> str:
+    return html.escape("" if x is None else str(x))
+
+
+def _link(url: str | None, text: str) -> str:
+    """A link only to github.com: the report's URLs come from GitHub, but don't trust them."""
+    if url and LINK_RE.fullmatch(url):
+        return f'<a href="{_esc(url)}">{_esc(text)}</a>'
+    return _esc(text)
+
+
+def _age(hours) -> str:
+    if hours is None:
+        return "age unknown"
+    return f"{hours / 24:.0f}d" if hours >= 48 else f"{hours:.0f}h"
+
+
+def _items(head: str, xs: list[dict], since_word: str) -> str:
+    if not xs:
+        return f'<h4>{_esc(head)}</h4><p class="none">none</p>'
+    rows = "".join(
+        f'<li class="{_esc(x.get("kind"))}">{_link(x.get("url"), x.get("ref") or "")} '
+        f'{_esc(x.get("reason"))} <span class="age">({since_word} '
+        f'{_esc((x.get("since") or "")[:10] or "?")}, {_age(x.get("age_hours"))})</span></li>'
+        for x in xs)
+    return f"<h4>{_esc(head)}</h4><ul>{rows}</ul>"
+
+
+def _sections(s: dict, hours) -> str:
+    return (_items("Stuck", s.get("stuck") or [], "since")
+            + _items("Waiting on the owner", s.get("waiting") or [], "waiting since")
+            + _items(f"On the owner's authority, last {hours}h", s.get("authority") or [], "at"))
+
+
+def trouble_panel(report: dict) -> str:
+    """The trouble panel as an HTML <section>, from `swarm trouble --json`."""
+    hours = report.get("authority_hours", 24)
+    out = [f'<section class="trouble"><h2>Trouble</h2><p class="muted">{_esc(report.get("repo"))}, '
+           f'from swarm trouble at {_esc(report.get("generated_at"))}</p>']
+    scopes = report.get("scopes") or []
+    if not scopes:
+        out.append('<p class="none">No open Goal or Area.</p>')
+    for s in scopes:
+        date = ""
+        if s.get("date"):
+            date = f' <span class="date">date {_esc(s["date"])}'
+            date += ' <strong class="missed">MISSED</strong></span>' if s.get("date_missed") else "</span>"
+        out.append(f'<article class="scope"><h3>{_esc(s.get("type"))} '
+                   f'{_link(s.get("url"), s.get("ref") or "")} {_esc(s.get("title"))}{date}</h3>')
+        crit = s.get("progress") or []
+        if crit:
+            out.append("<h4>Progress</h4><ul>" + "".join(
+                f'<li class="status-{_esc(c.get("status"))}"><strong>'
+                f'{_esc(STATUS.get(c.get("status"), c.get("status")))}</strong> '
+                f'{_esc(c.get("criterion"))} <span class="muted">({_esc(c.get("detail"))})</span></li>'
+                for c in crit) + "</ul>")
+        else:
+            out.append('<h4>Progress</h4><p class="none">no done-test criteria found</p>')
+        out.append(_sections(s, hours) + "</article>")
+    outside = report.get("outside") or {}
+    if any(outside.values()):
+        out.append('<article class="scope outside"><h3>Under no Goal or Area</h3>'
+                   + _sections(outside, hours) + "</article>")
+    for e in report.get("errors") or []:
+        out.append(f'<p class="error">not read: {_esc(e)}</p>')
+    out.append("</section>")
+    return "\n".join(out)
 
 
 def make_handler(builds: Builds):
