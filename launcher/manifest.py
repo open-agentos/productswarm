@@ -36,6 +36,9 @@ the manifest has no [watch] table.
 An optional [merger] table (#589, GOV-0027) is allowed here but read only by merger.py,
 which treats a missing or bad one as `off`; this module doesn't check it.
 
+An optional [specs] table (#952, #942) picks the specs bridge's backend. This module checks
+only that it is a table; launcher/specs/config.py validates what is in it.
+
 An optional [org] table (#772) lists in `repos` the org's other repos ("owner/name") that
 `swarm watch` and the merger work beside this one. Left out, they work this repo only. A
 bad table is a problem like a bad [[session]] entry: it is reported, and the other repos
@@ -227,8 +230,11 @@ def parse_valid(text: str, path: Path = DEFAULT_PATH, roles_dir: Path = ROOT / "
     except tomllib.TOMLDecodeError as e:
         raise ManifestError(path, [f"not valid TOML: {e}"]) from None
 
-    problems = [f"unknown top-level key '{k}' (only [[session]] tables, [watch], [merger] and "
-                "[org] are allowed)" for k in sorted(set(data) - {"session", "watch", "merger", "org"})]
+    problems = [f"unknown top-level key '{k}' (only [[session]] tables, [watch], [merger], "
+                "[org] and [specs] are allowed)"
+                for k in sorted(set(data) - {"session", "watch", "merger", "org", "specs"})]
+    if "specs" in data and not isinstance(data["specs"], dict):
+        problems.append("specs: must be a [specs] table")
     problems += repos_of(data)[1]
     watch_problems = _check_watch(data["watch"]) if "watch" in data else []
     problems += watch_problems
