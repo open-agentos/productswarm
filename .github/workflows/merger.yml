@@ -94,7 +94,7 @@ jobs:
           api() { curl -fsS -H "Authorization: Bearer $jwt" -H "Accept: application/vnd.github+json" "$@"; }
           inst=$(api "https://api.github.com/repos/$GITHUB_REPOSITORY/installation" | jq -r .id)
           resp=$(api -X POST "https://api.github.com/app/installations/$inst/access_tokens" \
-            -d "{\"repositories\":[\"${GITHUB_REPOSITORY#*/}\"],\"permissions\":{\"contents\":\"write\",\"pull_requests\":\"write\",\"checks\":\"read\",\"issues\":\"read\",\"metadata\":\"read\"}}")
+            -d "{\"repositories\":[\"productswarm\",\"productswarm-scratch\"],\"permissions\":{\"contents\":\"write\",\"pull_requests\":\"write\",\"checks\":\"read\",\"issues\":\"read\",\"metadata\":\"read\"}}")
           GH_TOKEN=$(jq -r .token <<<"$resp")
           echo "::add-mask::$GH_TOKEN"
           unset jwt
