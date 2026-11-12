@@ -279,6 +279,7 @@ ul.cm-list .st { font:600 13px/1.3 var(--cond); } ul.cm-list .st.go { color:var(
 ul.cm-list .st.not_go { color:var(--owner); }
 /* The Agents page (#932): Commissions' list and drawer, with a badge per role. */
 .br-av.idle { background:#EDEBE3; color:var(--muted); }
+ul.cm-list .owner { color:var(--owner); }
 a.cm-row .br-av { align-self:flex-start; }
 .ag-n { font-size:13px; min-width:80px; }
 .ag-head { display:flex; gap:10px; align-items:center; margin:6px 0; } .ag-head .cm-dtitle { margin:0; }

@@ -45,7 +45,7 @@ The fonts are **self-hosted**, so the public page loads nothing from a third par
 - **In flight:** each open Goal and Area with its criteria met of total and a dot: red if flagged, amber if it waits on the owner, blue otherwise. If the trouble report wasn't read, it falls back to the plan's sub-issues done of total.
 - **Orders received:** the owner's acts on GitHub from the repo's events (the header's read), newest first, at most 8, with chair "GitHub". Branch creation and deletion are left out.
 
-The left column, shared with the Commissions page (`bridge.nav_html`), links Commissions to `commissions.html` and Agents to Operations until the Agents page is drawn (#932). "Your chairs", "Lead recommends", "Discuss with…" and spend aren't shown: chairs and writes come later (#760), and GOV-0033 sets no engine total. Links go only to github.com or a page beside it. The page carries no script.
+The left column, shared with the Commissions and Agents pages (`bridge.nav_html`), links Commissions to `commissions.html` and Agents to `agents.html`. "Your chairs", "Lead recommends", "Discuss with…" and spend aren't shown: chairs and writes come later (#760), and GOV-0033 sets no engine total. Links go only to github.com or a page beside it. The page carries no script.
 
 ## Commissions
 
