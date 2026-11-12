@@ -15,10 +15,12 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
   - for every page's header (#402, activity.py): the repo's public events, 1 to 3 pages, to
     say when the owner last acted.
 
-Builds five pages in one look (layout.py), each headed by a red LIVE mark, the build time
+Builds six pages in one look (layout.py), each headed by a red LIVE mark, the build time
 and the owner's last act (#402), and copies the self-hosted fonts beside them:
   - bridge.html, the Bridge (bridge.py, #926): the owner's home, read-only: status, decisions
     waiting, the crew's reports, Goals and Areas in flight, and the owner's acts on GitHub;
+  - commissions.html (commissions.py, #931): each open Goal and Area, grouped by what it needs
+    from the owner, with a focus drawer for the one picked;
   - index.html, the desk: today's report and the plan (report.py, plan.py, #712), the trouble
     panel per Goal and Area (`swarm trouble`'s report without the acts sync, #903), on the floor (floor.py), grants in use (grants.py, #713), the wire (wire.py, #405), the committee desk while one is open (#404),
     what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
@@ -50,6 +52,7 @@ from pathlib import Path
 import activity
 import authority
 import bridge
+import commissions
 import committees
 import floor
 import ghql
@@ -541,7 +544,13 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
          # with_plan reads both; the plan's own None means its read failed, which the panel says
          "plan": plan.build(data.get("plan"), owner, repo) if data.get("report") else None,
          "trouble": data.get("trouble"),
-         "merged": data.get("merged") or [],   # #926: the Bridge's reports   # #903: trouble.report()'s dict, or {"error": why}
+         "merged": data.get("merged") or [],   # #926: the Bridge's reports
+         # #931: the owner's Goals and Areas closed in the window, for Commissions' "delivered"
+         "closed_scopes": [{"number": i["number"], "title": i.get("title"), "url": i.get("html_url"),
+                            "type": (i.get("type") or {}).get("name"), "closed_at": i.get("closed_at")}
+                           for i in data["issues"]
+                           if i.get("state") == "closed" and (i.get("type") or {}).get("name") in ("Goal", "Area")
+                           and (i.get("user") or {}).get("login") == owner],   # #903: trouble.report()'s dict, or {"error": why}
          "spend": {"per_day": per_day, "today": per_day[today],
                    "unpriced": [s for s in sessions if s["cost"] is None]}}
     m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
@@ -863,6 +872,11 @@ def render_bridge(m: dict) -> str:
     return bridge.page(m, committees.owner_login(), TITLE, owner_line(m))
 
 
+def render_commissions(m: dict) -> str:
+    """commissions.html: the owner's Goals and Areas, each with a focus drawer (#931)."""
+    return commissions.page(m, TITLE, owner_line(m))
+
+
 def render_authority(m: dict) -> str:
     """authority.html: who may decide what, from governance/jurisdictions.yml (#410)."""
     a = m.get("authority") or authority.build(None, [])
@@ -872,7 +886,7 @@ def render_authority(m: dict) -> str:
 
 def render(m: dict) -> dict[str, str]:
     """Every page, by file name, in layout.PAGES order."""
-    pages = {"bridge.html": render_bridge, "index.html": render_desk, "operations.html": render_operations,
+    pages = {"bridge.html": render_bridge, "commissions.html": render_commissions, "index.html": render_desk, "operations.html": render_operations,
              "decisions.html": render_decisions, "authority.html": render_authority}
     return {f: pages[f](m) for f, _ in layout.PAGES}
 

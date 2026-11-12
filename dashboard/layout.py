@@ -36,7 +36,7 @@ LATIN1 = ("U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6
           "U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02")
 
 # The pages, in footer order: (file, name).
-PAGES = (("bridge.html", "Bridge"), ("index.html", "Desk"), ("operations.html", "Operations"), ("decisions.html", "Decisions"),
+PAGES = (("bridge.html", "Bridge"), ("commissions.html", "Commissions"), ("index.html", "Desk"), ("operations.html", "Operations"), ("decisions.html", "Decisions"),
          ("authority.html", "Authority"))
 
 # #397's palette: paper, ink, agents blue, owner amber, and red for live marks and blocks only.
@@ -246,6 +246,36 @@ h2.br-h.owner, .br-kind.owner { color:var(--owner); }
 .br-dot { width:9px; height:9px; border-radius:50%; flex:none; align-self:center; background:var(--quiet); }
 .br-dot.agent { background:var(--agent); } .br-dot.owner { background:var(--owner); }
 .br-dot.red { background:var(--red); }
+/* The Commissions page (#931): a list and a focus drawer shown by :target, no script. */
+.cm-wrap { flex:999 1 520px; min-width:0; display:flex; flex-wrap:wrap; gap:24px; align-items:flex-start; }
+.cm-main { flex:3 1 400px; min-width:0; }
+.cm-grp { font:11px/1.4 var(--mono); letter-spacing:.06em; color:var(--muted); margin:20px 0 0;
+  padding-bottom:6px; border-bottom:1px solid var(--line); }
+.cm-grp.br-red { color:var(--red); } .cm-grp.owner { color:var(--owner); }
+a.cm-row { display:flex; flex-wrap:wrap; gap:6px 16px; align-items:center; padding:12px 8px;
+  border-bottom:1px solid #E4E2D9; text-decoration:none; color:var(--ink); }
+a.cm-row:hover { background:var(--card); }
+.cm-name { flex:1 1 220px; min-width:0; display:flex; flex-direction:column; } .cm-name .muted { font-size:13px; }
+.cm-bars { display:flex; align-items:center; gap:8px; width:120px; }
+.cm-bar { display:block; flex:1; height:5px; background:#E4E2D9; border-radius:3px; overflow:hidden; }
+.cm-fill { display:block; height:100%; background:var(--agent); }
+.cm-of, .cm-bar-none { font-size:12px; }
+.cm-word { min-width:80px; font-size:13px; color:var(--muted); } .cm-word.br-red { color:var(--red); }
+.cm-word.owner { color:var(--owner); }
+.cm-aside { flex:2 1 300px; min-width:0; max-width:420px; background:var(--card); border:1px solid var(--line);
+  border-radius:10px; padding:14px 18px; position:sticky; top:12px; }
+.cm-drawer { display:none; } .cm-drawer:target { display:block; }
+.cm-aside:has(.cm-drawer:target) .cm-pick { display:none; }
+.cm-crumb { margin:4px 0 0; font-size:13px; } h2.cm-dtitle { font-size:22px; margin:2px 0 6px; }
+.cm-pill { font:12px/1 var(--mono); padding:3px 8px; border-radius:999px; color:#fff; background:var(--ink); }
+.cm-pill.red { background:var(--red); } .cm-pill.owner { background:var(--owner); }
+.cm-pill.agent { background:var(--agent); }
+.cm-sec { border-top:1px solid #E4E2D9; padding:10px 0 4px; margin:10px 0 0; }
+.cm-sec .br-kind { margin:0 0 4px; }
+ul.cm-list { margin:0; padding:0; list-style:none; font-size:14px; } ul.cm-list li { padding:4px 0; }
+ul.cm-list li.status-failing b { color:var(--red); } ul.cm-list li.status-met b { color:var(--agent); }
+ul.cm-list .st { font:600 13px/1.3 var(--cond); } ul.cm-list .st.go { color:var(--agent); }
+ul.cm-list .st.not_go { color:var(--owner); }
 """
 
 
