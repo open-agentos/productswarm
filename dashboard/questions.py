@@ -68,6 +68,7 @@ def fetch(repo: str, now: dt.datetime, days: int, gh_items) -> dict:
                           for n, t in timelines.items()},
             "merged": [(m.get("pull_request") or {}).get("merged_at") or m.get("closed_at")
                        for m in merged],
+            "merged_items": merged,   # the Bridge's Reports (bridge.py, #926)
             "records": record_dates()}
 
 

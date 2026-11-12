@@ -174,8 +174,8 @@ class PageTest(unittest.TestCase):
 
     def test_every_page_keeps_the_shell(self):
         pages = g.render(self.model())
-        self.assertEqual(list(pages), ["index.html", "operations.html", "decisions.html",
-                                       "authority.html"])
+        self.assertEqual(list(pages), ["index.html", "bridge.html", "operations.html",
+                                       "decisions.html", "authority.html"])
         for name, page in pages.items():
             head = page.split("</head>")[0]
             self.assertIn('<meta name="robots" content="noindex, nofollow">', head, name)

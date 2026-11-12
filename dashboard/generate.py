@@ -15,12 +15,13 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
   - for every page's header (#402, activity.py): the repo's public events, 1 to 3 pages, to
     say when the owner last acted.
 
-Builds four pages in one look (layout.py), each headed by a red LIVE mark, the build time
+Builds five pages in one look (layout.py), each headed by a red LIVE mark, the build time
 and the owner's last act (#402), and copies the self-hosted fonts beside them:
   - index.html, the desk: today's report and the plan (report.py, plan.py, #712), the trouble
     panel per Goal and Area (`swarm trouble`'s report without the acts sync, #903), on the floor (floor.py), grants in use (grants.py, #713), the wire (wire.py, #405), the committee desk while one is open (#404),
     what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
     committee (#409), and a pointer to the other pages (#397 fills it);
+  - bridge.html: the Bridge home (bridge.py, #926), read-only, from the same model;
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
     progress and spend;
   - decisions.html: the governance section with the full decision log, open committees with
@@ -47,6 +48,7 @@ from pathlib import Path
 
 import activity
 import authority
+import bridge
 import committees
 import floor
 import ghql
@@ -531,6 +533,8 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
          "spend": {"per_day": per_day, "today": per_day[today],
                    "unpriced": [s for s in sessions if s["cost"] is None]}}
     m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
+    m["bridge"] = bridge.build(m, (data.get("questions") or {}).get("merged_items"),   # #926
+                               (data.get("plan") or {}).get("trees"), owner, ttl_date)
     return m
 
 
@@ -770,6 +774,13 @@ def render_desk(m: dict) -> str:
                        live_refresh=True)
 
 
+def render_bridge(m: dict) -> str:
+    """bridge.html (#926): the Bridge home, read-only, from the model build() already made.
+    No script, so no live refresh; the meta refresh still reloads it."""
+    b = m.get("bridge") or bridge.build(m, ttl_date=ttl_date)
+    return layout.page("bridge.html", TITLE, m["repo"], m["now"], bridge.body(b), owner_line(m))
+
+
 def render_operations(m: dict) -> str:
     """operations.html: what needs the owner, and the swarm's day-to-day running."""
     repo, now, titles = m["repo"], m["now"], m["issue_titles"]
@@ -853,7 +864,7 @@ def render_authority(m: dict) -> str:
 
 def render(m: dict) -> dict[str, str]:
     """Every page, by file name, in layout.PAGES order."""
-    pages = {"index.html": render_desk, "operations.html": render_operations,
+    pages = {"index.html": render_desk, "bridge.html": render_bridge, "operations.html": render_operations,
              "decisions.html": render_decisions, "authority.html": render_authority}
     return {f: pages[f](m) for f, _ in layout.PAGES}
 

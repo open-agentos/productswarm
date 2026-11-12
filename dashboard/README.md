@@ -15,16 +15,17 @@ It reads GitHub through `gh api`, so inside a swarm session it acts as the role'
 
 ## Pages
 
-One build writes four pages, and the fonts, into the `--out` page's directory (#401, part of #397):
+One build writes five pages, and the fonts, into the `--out` page's directory (#401, part of #397):
 
 | Page | What it shows |
 |---|---|
 | `index.html`, the **desk** | Today's report and the plan (#712), the trouble panel per Goal and Area (#903: `swarm trouble`'s report, built by `generate.py` without the owner-acts sync, so M4's acts criterion reads unmeasured here; no spend), [On the floor](#on-the-floor), [the wire](#the-wire), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), [How the questions went](#how-the-questions-went), [precedent in use](#precedent-in-use), a card per [past committee](#past-committees), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
+| `bridge.html`, the **Bridge** | [The Bridge](#the-bridge) home (#926): status strip, decisions waiting, reports, in flight and orders received, read-only, from data the build already reads |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" with their round grids |
 | `authority.html` | The [authority map](#authority-map): who may decide what, one row per domain in `governance/jurisdictions.yml` |
 
-Every page opens with the [header](#header) and carries `noindex` and a [Content-Security-Policy](#live-refresh), reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the four pages. `generate.render(model)` returns the pages by file name.
+Every page opens with the [header](#header) and carries `noindex` and a [Content-Security-Policy](#live-refresh), reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the five pages. `generate.render(model)` returns the pages by file name.
 
 ### Look
 
@@ -109,6 +110,22 @@ With JavaScript on, an open desk redraws itself from `state.json` every 15 secon
 - **JavaScript off.** Nothing changes: the page is complete as built, and the meta refresh stays.
 
 It adds **no API calls** per build: browser fetches hit Pages, not the API, and need no token.
+
+## The Bridge
+
+`bridge.html` (`bridge.py`, #926, under M3 #685) is the Bridge home from the owner's "v5 · the bridge" mock-up, pulled forward from M5 read-only. It is built only from the model `generate.build()` already makes, so it adds **no API calls**. It carries no script (complete with JavaScript off; the 300-second meta refresh still reloads it), no buttons or forms (writes are #752's), and no spend (GOV-0033). It fits a phone's width: the left column becomes a row of links above the page.
+
+**Left column:** Bridge; **Commissions** (the open sub-issues listed under the plan, both levels) linking to the desk's plan; **Agents** (the floor's cards plus its idle sessions) linking to Operations, until those pages are built; then the other pages.
+
+Top to bottom:
+
+1. **Status strip:** the open Goals and Areas, and how many have a not-go sub-issue (`plan.py`); agents working (the floor's cards); decisions waiting (section 2's count); and the merger's calls in the last 24 hours (`grants.py`). A count that couldn't be read shows `?`.
+2. **Decisions waiting**, in owner amber, each linking to where it's answered on GitHub: open `gov:question`s without `gov:ruled`, with their time to live (or "past its time to live"); sessions blocked on a question; PRs the merger left for the owner (linking its comment) or that GOV-0011 hands to the owner; and the asks in today's daily report. With none: "Nothing is waiting on you."
+3. **Reports**, each with its agent: today's daily report (`REPORTED`, planner), or a `DAILY` line saying it's due, late (red), a weekend or unread, in the report panel's words; then PRs merged in the last 7 days whose author is a `productswarm-<role>[bot]` App, newest first: `DELIVERED` when the PR's `Closes #N` names an issue the plan's trees type as Brief, `SHIPPED` otherwise. The merged PRs are the items [What the numbers say](#what-the-numbers-say)'s search already reads (`questions.py` keeps them as `merged_items`), so a Brief outside the plan's two levels shows as `SHIPPED`.
+4. **In flight:** each open Goal and Area the owner opened, with "done of total" over its direct sub-issues and a dot: red if today's trouble report flags it (a missed date or a failing criterion), amber if a sub-issue isn't go, blue if one is go, ink if all wait on blockers, grey when nothing is open or the status is unknown.
+5. **Orders received:** the owner's acts among the repo's events the header already reads (`activity.py`, without the watcher's issue edits), newest first, at most 20, each with chair "GitHub", the UTC time and what was done, linked.
+
+Not on it yet: "Your chairs", "Lead recommends", "Discuss with…", one-tap answers, spend, and the Commissions and Agents pages, which are next.
 
 ## Plan, report and grants: layout
 

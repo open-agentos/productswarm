@@ -36,7 +36,7 @@ LATIN1 = ("U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6
           "U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02")
 
 # The pages, in footer order: (file, name).
-PAGES = (("index.html", "Desk"), ("operations.html", "Operations"), ("decisions.html", "Decisions"),
+PAGES = (("index.html", "Desk"), ("bridge.html", "Bridge"), ("operations.html", "Operations"), ("decisions.html", "Decisions"),
          ("authority.html", "Authority"))
 
 # #397's palette: paper, ink, agents blue, owner amber, and red for live marks and blocks only.
@@ -195,6 +195,34 @@ ol.asks li::marker { color:var(--owner); font-weight:600; }
 .w-agent { color:var(--agent); font-weight:600; } .w-owner { color:var(--owner); font-weight:600; }
 .w-other { color:var(--quiet); }
 table.authority td:first-child { min-width:200px; }
+.bridge { display:grid; grid-template-columns:160px minmax(0, 1fr); gap:24px; }
+.bridge .rail { display:flex; flex-direction:column; gap:6px; padding-top:16px;
+  font:600 14px/1.4 var(--cond); text-transform:uppercase; letter-spacing:.05em; }
+.bridge .rail .here { color:var(--agent); }
+.bridge .rail .sep { border-top:1px solid var(--line); margin:4px 0; }
+.bridge .rail .num { color:var(--muted); margin-left:4px; }
+@media (max-width:640px) { .bridge { grid-template-columns:minmax(0, 1fr); gap:0; }
+  .bridge .rail { flex-direction:row; flex-wrap:wrap; gap:4px 14px; padding-top:4px; }
+  .bridge .rail .sep { display:none; } }
+.strip { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 0; }
+.strip div { background:var(--card); border:1px solid var(--line); padding:8px 12px; }
+.strip b { font:600 20px/1 var(--cond); margin-right:6px; }
+.strip .working b { color:var(--agent); } .strip .hot { border-color:var(--owner); }
+.strip .hot b { color:var(--owner); }
+ol.decide, ol.reports, ol.orders, ul.flight { list-style:none; margin:0; padding:0; max-width:820px; }
+ol.decide li, ol.reports li, ol.orders li, ul.flight li { padding:6px 0; border-bottom:1px solid var(--line); }
+ol.decide a { color:var(--owner); text-decoration-color:var(--owner); }
+ol.decide .tag, ol.reports .word, ol.orders .chair { font:600 12px/1.3 var(--cond);
+  text-transform:uppercase; letter-spacing:.05em; margin-right:4px; }
+ol.decide .tag { color:var(--owner); }
+ol.reports .word { color:var(--agent); } ol.reports .word.brief { color:var(--ink); }
+ol.reports .agent { font:600 13px/1.3 var(--cond); color:var(--agent); text-transform:uppercase; }
+ol.reports li.flag, ol.reports li.flag .word { color:var(--red); }
+ol.orders .chair { color:var(--owner); } ol.orders time { margin-right:6px; }
+ul.flight .dot { display:inline-block; width:10px; height:10px; border-radius:50%;
+  margin-right:8px; background:var(--quiet); }
+ul.flight .dot.agent { background:var(--agent); } ul.flight .dot.owner { background:var(--owner); }
+ul.flight .dot.red { background:var(--red); } ul.flight .dot.ink { background:var(--ink); }
 footer.foot { margin-top:40px; padding-top:8px; border-top:2px solid var(--ink);
   display:flex; flex-wrap:wrap; gap:4px 18px; font:600 13px/1.6 var(--cond);
   text-transform:uppercase; letter-spacing:.06em; }
