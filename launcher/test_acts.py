@@ -1,5 +1,5 @@
 """Tests for launcher/acts.py and `swarm acts` (#771): the owner's acts per working day, kept
-from webhook deliveries and read back from GitHub (M4 readiness checks 1 and 2)."""
+from webhook deliveries and read back from GitHub, counted with no limit (M4, GOV-0040)."""
 from __future__ import annotations
 
 import datetime as dt
@@ -246,7 +246,8 @@ class Counts(Base):
             ("12:00", "merge", "protected-merge", "merged", 900),
             ("13:00", "merge", "other", "merged", 901),
         ])
-        self.assertEqual((d["count"], d["other"], d["under_limit"], d["c_team"]), (9, 3, False, False))
+        self.assertEqual((d["count"], d["other"], d["c_team"]), (9, 3, False))
+        self.assertNotIn("under_limit", d)             # counted, with no limit (GOV-0040)
         self.assertEqual(self.day("2026-11-10")["count"], 1)
 
     def test_goal_and_area_opens_and_edits_dont_count(self):
@@ -314,6 +315,13 @@ class Command(Base):
         self.assertIn("16:00  other            commented on #802", out)
         self.assertNotIn("2026-11-11", out)
 
+    def test_no_limit_however_many_acts(self):
+        self.deliver()
+        out = self.run_acts(dt.date(2026, 11, 11), False)
+        self.assertIn("counted, with no limit, per GOV-0040", out)
+        self.assertIn("9 acts so far (the day isn't over)  (3 not C-team)", out)
+        self.assertNotIn("or more", out)
+
     def test_cli_parses(self):
         self.deliver()
         lines: list[str] = []
@@ -338,7 +346,7 @@ class NotCounted(Base):
 
     def test_no_backfill_reads_not_counted_never_zero(self):
         rows = acts.per_day(acts.stored(self.dir), [dt.date(2026, 11, 9)], UTC, now=NOW)
-        self.assertEqual((rows[0]["status"], rows[0]["count"], rows[0]["under_limit"], rows[0]["c_team"]),
+        self.assertEqual((rows[0]["status"], rows[0]["count"], rows[0]["other"], rows[0]["c_team"]),
                          ("not counted", None, None, None))
         self.assertIn("Mon 2026-11-09  not counted (not read back from GitHub yet)",
                       acts.text(rows, OWNER, REPO))
@@ -354,7 +362,7 @@ class NotCounted(Base):
         self.assertEqual(errors, [])
         self.assertEqual([(r["status"], r["count"]) for r in rows],
                          [("in progress", 9), ("counted", 1), ("counted", 0)])   # 0 still counts
-        self.assertIsNone(rows[0]["under_limit"])
+        self.assertIsNone(rows[0]["c_team"])
         before = acts.stored(self.dir)
         self.deliver()                                   # the same acts arrive by webhook too
         self.sync()
