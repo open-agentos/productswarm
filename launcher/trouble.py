@@ -12,10 +12,11 @@ For each Goal and Area (GOV-0031):
   (`met`, `progress`, `failing`, or `counted` for M4's acts), or `unmeasured` when no measure covers it: an
   unmeasured criterion is never reported as on track, and an Area is never "delivered".
   A `**Date:**` that has passed with the Goal still open is `date_missed`. The measures
-  reuse the commands that count the same thing: M1's report streak from `swarm daily`,
-  M2's merge share and unreviewed reverts this UTC week from `swarm merges`, and M4's
-  acts from `swarm acts` (which first reads the owner's acts back from GitHub into
-  swarm.db). M4's acts are reported as `counted`, with each counted day's acts and how
+  reuse the commands that count the same thing: M1's "a daily report posts without the
+  owner starting it" from `swarm daily`, met once a report [daily] started exists in its
+  window (shown once, not a streak: GOV-0040), M2's merge share and unreviewed reverts
+  this UTC week from `swarm merges`, and M4's acts from `swarm acts` (which first reads
+  the owner's acts back from GitHub into swarm.db). M4's acts are reported as `counted`, with each counted day's acts and how
   many weren't C-team, never as met or failing: owner acts are counted, never a gate
   (per GOV-0040). With no counted day M4's acts criterion is `unmeasured` (#844).
 - **Stuck**: work nothing will start, with the reason and since when. Three rules, each from
@@ -56,7 +57,7 @@ items under none are in `outside`.
 
 Limits: a `Call in:` asking for multi-step work gets one comment and can't be told apart
 here; asks in the daily report and `decide` calls under jurisdictions.yml aren't read;
-only M1's streak, M2's two criteria and M4's acts are measured, so other criteria read
+only M1's [daily]-started report, M2's two criteria and M4's acts are measured, so other criteria read
 `unmeasured` until one is added to MEASURES; a PR the merger hasn't judged at its head yet
 isn't listed as left for the owner.
 """
@@ -121,7 +122,7 @@ class Data:
     comments: list[dict] = field(default_factory=list)   # repo comments, last COMMAND_DAYS (REST)
     report_issue: int | None = None
     switches: dict[str, bool] = field(default_factory=dict)   # asks, call_ins, research
-    daily_streak: int | None = None                      # swarm daily's streak, None if unread
+    daily_rows: list[dict] | None = None                 # swarm.daily_rows(), None if unread
     week_merges: list[dict] | None = None                # swarm.gh_merged() this UTC week, None if unread
     owner_days: list[dict] | None = None                 # acts.per_day() for the last 11 working
                                                          # days (today may be in progress), newest
@@ -133,12 +134,15 @@ class Data:
     errors: list[str] = field(default_factory=list)
 
 
-def daily_streak(m: re.Match, d: Data) -> tuple[str, str] | None:
-    if d.daily_streak is None:
+def daily_shown(m: re.Match, d: Data) -> tuple[str, str] | None:
+    """M1: a daily report posts without the owner starting it. Shown once, not a streak
+    (GOV-0040): met once swarm daily's window holds a report a [daily] run started."""
+    if d.daily_rows is None:
         return None
-    need = int(m.group(1))
-    return ("met" if d.daily_streak >= need else "progress",
-            f"{d.daily_streak} of {need} working days (swarm daily)")
+    last = swarm.daily_started(d.daily_rows)
+    if last:
+        return "met", f"[daily] started the report for {last:%a %Y-%m-%d} (swarm daily)"
+    return "progress", f"no report in the last {len(d.daily_rows)} working days started by [daily] (swarm daily)"
 
 
 def this_week(d: Data) -> list[dict] | None:
@@ -194,13 +198,13 @@ def owner_acts(m: re.Match, d: Data) -> tuple[str, str] | None:
 
 # (pattern on the criterion's text, measure(match, data) -> (status, detail) or None if unread)
 Measure = tuple[re.Pattern, Callable[[re.Match, Data], tuple[str, str] | None]]
-DAILY_STREAK: Measure = (re.compile(r"\b(\d+) working days in a row with a daily report\b", re.I),
-                         daily_streak)
+DAILY_SHOWN: Measure = (re.compile(r"\bdaily report posts without the owner starting it\b", re.I),
+                        daily_shown)
 MERGE_SHARE: Measure = (re.compile(r"\bover half of a week's merges\b.*\bwithout the owner's click\b",
                                    re.I), merge_share)
 REVERTS: Measure = (re.compile(r"\bno unreviewed revert\b", re.I), reviewed_reverts)
 OWNER_ACTS: Measure = (re.compile(r"\bacts\b[^.]*\bcounted\b", re.I), owner_acts)
-MEASURES: list[Measure] = [DAILY_STREAK, MERGE_SHARE, REVERTS, OWNER_ACTS]
+MEASURES: list[Measure] = [DAILY_SHOWN, MERGE_SHARE, REVERTS, OWNER_ACTS]
 
 
 def criteria(body: str | None, kind: str) -> list[tuple[str, bool]]:
@@ -612,7 +616,7 @@ def hand_sessions(launcher) -> list[dict]:
 def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
            now: dt.datetime | None = None) -> Data:
     """Read everything report() needs. Raises RuntimeError if GitHub can't be read; a local
-    part that can't be read (the ledger, the daily streak) is left out and named in errors.
+    part that can't be read (the ledger, swarm daily's reports) is left out and named in errors.
 
     The reads that don't depend on each other run at once (#858): one at a time, they took
     about 25 seconds. The acts backfill (acts.refresh) runs beside them and starts no read
@@ -634,11 +638,10 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
     report_issue = limits.report_issue if limits else None
     today = now.astimezone().date()
 
-    def streak():
-        rows = swarm.daily_rows(swarm.working_days(today), watch.gh_comments(repo, report_issue),
+    def daily():
+        return swarm.daily_rows(swarm.working_days(today), watch.gh_comments(repo, report_issue),
                                 watch.load_state(launcher)["acted"], report_issue,
                                 swarm.agent_logins() | {owner})
-        return swarm.daily_streak(rows, today)
 
     def owner_acts():
         return acts.refresh(launcher.dir, owner, (repo, report_issue) if report_issue else None, repo,
@@ -656,7 +659,7 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
             "comments": pool.submit(watch.gh_recent_comments, repo, now - dt.timedelta(days=COMMAND_DAYS)),
             "week": pool.submit(swarm.gh_merged, repo, *swarm.week_of(now)),
             "acts": pool.submit(owner_acts),
-            "streak": pool.submit(streak) if report_issue else None,
+            "daily": pool.submit(daily) if report_issue else None,
         }
         issues = jobs["issues"].result()
         prs = jobs["prs"].result() or []
@@ -670,12 +673,12 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
         got = list(pool.map(lambda k: g.gh_json("api", "repos/{}/issues/{}".format(*k.split("#"))) or {}, keys))
         other = dict(zip(keys, got))
         comments = jobs["comments"].result()
-        streak_n = None
-        if jobs["streak"]:
+        daily_rows = None
+        if jobs["daily"]:
             try:
-                streak_n = jobs["streak"].result()
+                daily_rows = jobs["daily"].result()
             except RuntimeError as e:
-                errors.append(f"daily streak: {e}")
+                errors.append(f"swarm daily: {e}")
         try:
             week_merges = jobs["week"].result()
         except RuntimeError as e:
@@ -702,5 +705,5 @@ def gather(launcher, repo: str, owner: str, manifest_path, hours: int = HOURS,
     switches = {k: bool(getattr(limits, k, False)) for k in ("asks", "call_ins", "research")}
     return Data(repo=repo, owner=owner, now=now, issues=issues, scopes=scopes, other_scopes=other,
                 prs=prs, merged=merged, comments=comments, report_issue=report_issue,
-                switches=switches, daily_streak=streak_n, week_merges=week_merges, owner_days=owner_days,
+                switches=switches, daily_rows=daily_rows, week_merges=week_merges, owner_days=owner_days,
                 spend=spend, hours=hours, errors=errors, sessions=sessions)

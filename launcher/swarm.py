@@ -15,7 +15,7 @@
                                     owner, and each revert and whether it was reviewed (#710);
                                     --last for the week before
     launcher/swarm daily            the last 10 working days' daily reports and who started
-                                    each, and M1's streak (#707)
+                                    each, and the latest one [daily] started (#707, GOV-0040)
     launcher/swarm acts [--day D] [--json]
                                     the owner's acts on each working day of the last two
                                     weeks, or on day D, with count and kind, or "not counted"
@@ -173,8 +173,7 @@ def opener(role: str, issue: int | None = None, pr: int | None = None,
     elif issue and daily:
         then = (f"write {daily} on issue #{issue}, as roles/{role}.md says. swarm watch started "
                 f"this run from its [daily] trigger (GOV-0029). Run launcher/swarm daily first: its "
-                f"\"M1: day N of 5\" goes in the report's first line and its Goal and Area edits "
-                f"under Risks (#709). Then run launcher/swarm trouble --json and build the Trouble "
+                f"Goal and Area edits go under Risks (#709). Then run launcher/swarm trouble --json and build the Trouble "
                 f"section from it, not by hand (#804). Post on #{issue} and stop")
     elif issue and called_by:
         # "issue #M" in the why would give the heartbeat two issues and so none: say "#M".
@@ -1248,7 +1247,7 @@ def merges(launcher: Launcher, repo: str, last: bool = False, now: dt.datetime |
 
 # ---------------------------------------------------------------- daily (#707)
 
-DAILY_DAYS = 10                # M1's streak window: the goal's 10 working days
+DAILY_DAYS = 10                # how far back `swarm daily` lists reports; a lookback, not a streak (GOV-0040)
 REPORT_RE = re.compile(r"^\W*daily report\b", re.IGNORECASE)
 REPORT_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
@@ -1301,20 +1300,15 @@ def daily_rows(days: list[dt.date], comments: list[dict], acted: dict, report_is
     return rows
 
 
-def daily_streak(rows: list[dict], today: dt.date) -> int:
-    """Working days in a row, newest first, with a report [daily] started. Today counts only
-    once it has a report, so a report not yet written doesn't break the streak."""
-    n = 0
-    for r in rows:
-        if r["by"] == "[daily]":
-            n += 1
-        elif not (r["day"] == today and r["posted"] is None):
-            break
-    return n
+def daily_started(rows: list[dict]) -> dt.date | None:
+    """The latest day whose report a [daily] run started, else None. M1's criterion "a daily
+    report posts without the owner starting it" is shown once such a report exists (GOV-0040)."""
+    return next((r["day"] for r in rows if r["by"] == "[daily]"), None)
 
 
 def daily_text(rows: list[dict], report_issue: int, today: dt.date) -> str:
-    """`swarm daily`'s output: a line per working day, newest first, then the streak."""
+    """`swarm daily`'s output: a line per working day, newest first, then the latest report
+    [daily] started. No streak: a Goal's capability is shown once (GOV-0040)."""
     out = [f"Daily reports on #{report_issue}, last {len(rows)} working days (local time):"]
     for r in rows:
         when = f"{r['day']:%a %Y-%m-%d}"
@@ -1325,28 +1319,10 @@ def daily_text(rows: list[dict], report_issue: int, today: dt.date) -> str:
             out.append(f"  {when}  not yet posted" + ("  ([daily] run started)" if r["ran"] else ""))
         else:
             out.append(f"  {when}  missed" + ("  ([daily] ran but posted no report)" if r["ran"] else ""))
-    n = daily_streak(rows, today)
-    out.append(f"\nStreak: {n} working day{'' if n == 1 else 's'} in a row with a report "
-               f"[daily] started.")
+    last = daily_started(rows)
+    out.append(f"\nLatest report [daily] started: {last:%a %Y-%m-%d}." if last else
+               f"\nNo report in these {len(rows)} working days was started by [daily].")
     return "\n".join(out)
-
-
-M1_DAYS = 5                    # M1's done test: 5 working days in a row (Goal #683)
-
-
-def m1_day(rows: list[dict], today: dt.date) -> str:
-    """The daily report's "M1: day N of 5" (#709). N is the streak, counting today's report
-    once a [daily] run has started it, since the report that run writes is that day."""
-    n = daily_streak(rows, today)
-    now = rows[0] if rows and rows[0]["day"] == today else None
-    note = ""
-    if now is not None and now["posted"] is None:
-        if now["ran"]:
-            n += 1
-            note = " (counting today's report, which [daily] started)"
-        else:
-            note = " (today isn't counted: no [daily] run has started its report)"
-    return f"M1: day {n} of {M1_DAYS}" + (" (done test met)" if n >= M1_DAYS else note)
 
 
 # Goal and Area edits (#709, GOV-0031): the report flags any edit to one by anyone but the owner.
@@ -1469,9 +1445,9 @@ def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DE
           agents: set[str] | None = None, get_scopes: Callable | None = None,
           get_merged: Callable | None = None) -> int:
     """`swarm daily` (#707): for each of the last 10 working days, whether a daily report was
-    posted on the report issue, when, and who started it, so M1's streak isn't a hand count.
-    Who started it comes from swarm.db; the reports and their times come from the report
-    issue's comments (swarm.db holds no comments). Then the report's "M1: day N of 5", and
+    posted on the report issue, when, and who started it, and the latest one [daily] started
+    (as information, not a streak: GOV-0040). Who started it comes from swarm.db; the reports
+    and their times come from the report issue's comments (swarm.db holds no comments). Then
     the edits to a Goal or Area by anyone but the owner since the last working day began
     (#709), and the issues still open after a PR that closes them merged in those 10 working
     days (#806). Only reads."""
@@ -1505,7 +1481,7 @@ def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DE
         stale = unclosed_text(unclosed((get_merged or gh_merged_nodes)(repo, days[-1]), repo), days[-1], repo)
     except RuntimeError as e:
         stale = f"Issues still open after their PR merged couldn't be read: {e}"
-    launcher.out(f"{daily_text(rows, n, today)}\n{m1_day(rows, today)}\n\n{edits}\n\n{stale}")
+    launcher.out(f"{daily_text(rows, n, today)}\n\n{edits}\n\n{stale}")
     return 0
 
 
@@ -1998,7 +1974,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_merges.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_status = sub.add_parser("status", help="swarm watch's state with cost, from local files only")
     p_status.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
-    p_daily = sub.add_parser("daily", help="the last 10 working days' daily reports and the streak")
+    p_daily = sub.add_parser("daily", help="the last 10 working days' daily reports and who started each")
     p_daily.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_daily.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_acts = sub.add_parser("acts", help="the owner's acts per working day, with count and kind (no limit)")
