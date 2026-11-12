@@ -89,7 +89,7 @@ def comment(n: int, body: str, hours: float = 2, author: str = OWNER, on_pr: boo
             "html_url": f"https://github.com/{REPO}/{kind}/{n}#issuecomment-1"}
 
 
-M1 = goal(1, "**Criteria**\n- [ ] 5 working days in a row with a daily report the owner didn't start\n"
+M1 = goal(1, "**Criteria**\n- [ ] a daily report posts without the owner starting it\n"
              "- [x] each Monday in that run has its check-in\n- [ ] something nobody measures\n\n"
              "**Date:** when ready\n")
 
@@ -111,12 +111,19 @@ class Progress(unittest.TestCase):
         self.assertEqual([c["status"] for c in p], ["unmeasured", "met", "unmeasured"])
         self.assertNotIn("on track", json.dumps(p))
 
-    def test_daily_streak_measure(self):
-        p = scope(trouble.report(data(daily_streak=3)))["progress"]
-        self.assertEqual(p[0]["status"], "progress")
-        self.assertIn("3 of 5", p[0]["detail"])
-        p = scope(trouble.report(data(daily_streak=5)))["progress"]
+    def test_daily_report_shown_once_not_a_streak(self):
+        # GOV-0040: one report [daily] started meets M1's criterion; no "N of 5" or "N of 10".
+        mon, fri, thu = dt.date(2026, 11, 9), dt.date(2026, 11, 6), dt.date(2026, 11, 5)
+        rows = [{"day": mon, "posted": None, "by": None, "ran": False},
+                {"day": fri, "posted": NOW, "by": "by hand", "ran": False},
+                {"day": thu, "posted": NOW, "by": "[daily]", "ran": True}]
+        p = scope(trouble.report(data(daily_rows=rows)))["progress"]
         self.assertEqual(p[0]["status"], "met")
+        self.assertIn("Thu 2026-11-05", p[0]["detail"])
+        self.assertNotRegex(p[0]["detail"], r"\d+ of \d+")
+        p = scope(trouble.report(data(daily_rows=rows[:2])))["progress"]
+        self.assertEqual(p[0]["status"], "progress")
+        self.assertNotRegex(p[0]["detail"], r"\d+ of \d+")
 
     def test_missed_goal_date(self):
         g = goal(2, "**Criteria**\n- [ ] ship it\n\n**Date:** 2026-11-04\n")

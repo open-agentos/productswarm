@@ -1,4 +1,4 @@
-"""Tests for `swarm daily` (#707): M1's streak counted from swarm.db and the report issue."""
+"""Tests for `swarm daily` (#707): the daily reports and who started them, from swarm.db and the report issue (no streak, GOV-0040)."""
 from __future__ import annotations
 
 import datetime as dt
@@ -105,10 +105,11 @@ class DailyTest(unittest.TestCase):
         days = out.split("\n\n")[0]
         self.assertEqual(sum(1 for line in days.splitlines() if line.startswith("  ")), 10)
         self.assertIn("  Tue 2026-10-27  missed", out)                              # 10th working day
-        self.assertIn("Streak: 2 working days in a row with a report [daily] started.\n"
-                      "M1: day 2 of 5\n", out)
+        self.assertIn("Latest report [daily] started: Mon 2026-11-09.\n\n", out)
+        self.assertNotIn("Streak", out)                             # GOV-0040: no streak as progress
+        self.assertNotRegex(out, r"\bM1: day\b|\b\d+ of (5|10)\b")
 
-    def test_missed_day_breaks_the_streak(self):
+    def test_missed_day_is_listed_and_breaks_nothing(self):
         comments = [c("2026-11-04T08:35:00Z", "**Daily report, Wed 2026-11-04**"),
                     c("2026-11-06T08:35:00Z", "**Daily report, Fri 2026-11-06**"),
                     c("2026-11-09T08:35:00Z", "**Daily report, Mon 2026-11-09**")]
@@ -116,7 +117,7 @@ class DailyTest(unittest.TestCase):
         out = self.run_daily(comments, acted)
         self.assertIn("  Thu 2026-11-05  missed  ([daily] ran but posted no report)", out)
         self.assertIn("  Wed 2026-11-04  posted 08:35  started by [daily]", out)
-        self.assertIn("Streak: 2 working days", out)
+        self.assertIn("Latest report [daily] started: Mon 2026-11-09.", out)
 
     def test_owner_started_by_hand_doesnt_count(self):
         comments = [c("2026-11-06T10:00:00Z", "**Daily report, Fri 2026-11-06**"),
@@ -124,13 +125,13 @@ class DailyTest(unittest.TestCase):
         acted = {"daily:249:2026-11-09": "started planner-issue-249"}      # no [daily] on the 6th
         out = self.run_daily(comments, acted)
         self.assertIn("  Fri 2026-11-06  posted 10:00  started by the owner, by hand (no [daily] run)", out)
-        self.assertIn("Streak: 1 working day in a row", out)
+        self.assertIn("Latest report [daily] started: Mon 2026-11-09.", out)
 
-    def test_today_not_yet_posted_keeps_the_streak(self):
+    def test_today_not_yet_posted_isnt_the_latest(self):
         early = dt.datetime(2026, 11, 9, 7, 0, tzinfo=UTC)
         out = self.run_daily(COMMENTS_249[:3], ACTED_249 | {"daily:249:2026-11-09": "x"}, now=early)
         self.assertIn("  Mon 2026-11-09  not yet posted", out)
-        self.assertIn("Streak: 1 working day", out)
+        self.assertIn("Latest report [daily] started: Fri 2026-11-06.", out)
 
     def test_late_report_counts_for_its_day_and_untrusted_authors_dont(self):
         comments = [c("2026-11-07T01:10:00Z", "Daily report, Fri 2026-11-06"),       # after midnight
@@ -145,26 +146,20 @@ class DailyTest(unittest.TestCase):
                                      owner=OWNER, agents=set()), 1)
         self.assertIn("no [watch] report_issue", self.lines[-1])
 
-    # ---- #709: the report's "M1: day N of 5", and Goal and Area edits not by the owner
+    # ---- GOV-0040: no streak, just whether [daily] started a report; #709: Goal and Area edits
 
-    def test_m1_day_counts_todays_report_once_daily_started_it(self):
-        early = dt.datetime(2026, 11, 9, 8, 31, tzinfo=UTC)          # [daily] run under way
-        out = self.run_daily(COMMENTS_249[:3], ACTED_249, now=early)
-        self.assertIn("Streak: 1 working day", out)
-        self.assertIn("M1: day 2 of 5 (counting today's report, which [daily] started)", out)
+    def test_no_report_daily_started_says_so(self):
+        comments = [c("2026-11-06T10:00:00Z", "**Daily report, Fri 2026-11-06**")]
+        out = self.run_daily(comments, {})
+        self.assertIn("No report in these 10 working days was started by [daily].", out)
+        self.assertNotIn("M1: day", out)
 
-    def test_m1_day_leaves_out_a_report_no_daily_run_started(self):
-        early = dt.datetime(2026, 11, 9, 8, 0, tzinfo=UTC)
-        acted = {"daily:249:2026-11-06": "started planner-issue-249"}
-        out = self.run_daily(COMMENTS_249[:3], acted, now=early)
-        self.assertIn("M1: day 1 of 5 (today isn't counted: no [daily] run has started its report)", out)
-
-    def test_m1_day_by_hand_today_is_day_0_and_five_meets_the_done_test(self):
-        self.assertEqual(swarm.m1_day([{"day": dt.date(2026, 11, 9), "posted": NOW, "by": "by hand",
-                                        "ran": False}], dt.date(2026, 11, 9)), "M1: day 0 of 5")
+    def test_daily_started_is_the_newest_daily_row(self):
         days = swarm.working_days(dt.date(2026, 11, 9))
-        rows = [{"day": d, "posted": NOW, "by": "[daily]", "ran": True} for d in days]
-        self.assertEqual(swarm.m1_day(rows, days[0]), "M1: day 10 of 5 (done test met)")
+        rows = [{"day": d, "posted": NOW, "by": "by hand" if i < 2 else "[daily]", "ran": i >= 2}
+                for i, d in enumerate(days)]
+        self.assertEqual(swarm.daily_started(rows), days[2])
+        self.assertIsNone(swarm.daily_started(rows[:2]))
 
     def test_goal_edits_by_an_app_show_and_the_owners_dont(self):
         out = self.run_daily(COMMENTS_249, ACTED_249, scopes=[

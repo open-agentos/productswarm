@@ -1,6 +1,6 @@
 # Launcher
 
-The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, `swarm status` (#457) prints what the loop is doing now, with cost, `swarm daily` (#707) counts the daily-report streak, `swarm spent` (#662) prints run spend from the runs ledger, and `swarm trouble` (#803) reports what is stuck per Goal and Area. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
+The v1 local launcher (GOV-0005). It starts sessions through `ops/swarm-session` unchanged. It covers the manifest (L1), `swarm up / ls / stop` (L2), `swarm launch` (L3), the warn-only spend cap (L4) and `swarm inbox` (L5). `swarm watch` is v2, the wake-up loop (GOV-0009). `swarm cost` (#176) prints the cost per PR of the runs `swarm watch` recorded, locally, `swarm status` (#457) prints what the loop is doing now, with cost, `swarm daily` (#707) lists the daily reports and who started each, `swarm spent` (#662) prints run spend from the runs ledger, and `swarm trouble` (#803) reports what is stuck per Goal and Area. The reviewer runs by default (L6) because `swarm.toml` lists it, so `up` starts it like any other role.
 
 ## swarm up / ls / stop
 
@@ -223,13 +223,13 @@ Reverts: 1, 1 unreviewed
 
 It reads GitHub through one `gh pr list` search, which returns at most 1000 PRs, and it writes nothing.
 
-## swarm daily: M1's streak
+## swarm daily: the daily reports and who started them
 
 ```bash
 launcher/swarm daily [--manifest swarm.toml] [--repo owner/name]
 ```
 
-For each of the last 10 working days (Monday to Friday, this machine's local time), whether a daily report was posted on `[watch] report_issue`, when, and who started it. Then it gives the streak: the working days in a row, up to now, whose report `[daily]` started (#707). The daily report and M1's done test can count from this instead of by hand.
+For each of the last 10 working days (Monday to Friday, this machine's local time), whether a daily report was posted on `[watch] report_issue`, when, and who started it. Then it gives the latest day whose report `[daily]` started (#707). That is information, not a streak: M1's "a daily report posts without the owner starting it" is shown once such a report exists (per GOV-0040), and `swarm trouble` reads it from here.
 
 ```
 Daily reports on #249, last 10 working days (local time):
@@ -238,8 +238,7 @@ Daily reports on #249, last 10 working days (local time):
   Thu 2026-11-05  missed
   ...
 
-Streak: 2 working days in a row with a report [daily] started.
-M1: day 2 of 5
+Latest report [daily] started: Mon 2026-11-09.
 
 Goal and Area edits not made by @mattmcalister since Fri 2026-11-06 00:00 (GOV-0031):
   Mon 2026-11-09 10:00  productswarm-planner[bot] edited the body: Goal #683 M1: Daily report runs without the owner
@@ -252,9 +251,8 @@ Issues still open after a merged PR that closes them, PRs merged since Tue 2026-
 
 - **A report** is a comment on the report issue by a swarm App or the owner whose first line starts "Daily report" (bold or not). It counts for the first date on that line, or for the day it was posted if the line has no date. The time shown is when the day's first report was posted.
 - **Who started it** comes from `swarm.db`. If `watch_acted` holds a `[daily]` key `daily:<report issue>:<date>`, `[daily]` started it. The watcher never prunes these keys, unlike run records, which it drops after 7 days. A report posted with no such key was started **by hand**. A day with a `[daily]` start but no report says so.
-- **Today** shows `not yet posted` until its report appears, and doesn't break the streak.
+- **Today** shows `not yet posted` until its report appears.
 - `swarm.db` holds no comments, so the reports and their times are read from GitHub, one call for the report issue's comments. Only `report_issue` is needed in `[watch]`: `daily` may be off.
-- **`M1: day N of 5`** goes in the daily report's first line (#709). N is the streak, plus today once a `[daily]` run has started today's report, since that run's report is the day being counted. Before any `[daily]` run today it says today isn't counted; a report started by hand today makes it day 0. At 5 or more it says the done test is met.
 - **Goal and Area edits** (#709, GOV-0031): edits since the start of the previous working day to an open or closed Goal or Area issue the owner opened, by anyone but the owner: body edits, renames, closes and reopens. It searches the repo owner's account, so Goals in any of its repos count, with one GraphQL search per type. The planner lists them under Risks. If an issue's history is too long to read whole, it says to check that one by hand; if the search fails, it says so in one line and the rest still prints.
 
 ## swarm acts: the owner's acts per day (#771)
@@ -280,7 +278,7 @@ launcher/swarm trouble [--json] [--hours 24] [--manifest swarm.toml] [--repo own
 
 Stage 1 of #760. For each open Goal and Area the owner opened (GOV-0031), and for the work under none:
 
-- **Progress** per done-test criterion (a Goal's checkboxes, an Area's `**Target:**` bullets): `met` when ticked, else what its measure says, else `unmeasured`. Unmeasured is never reported as on track. The measures reuse the commands that count the same thing: M1's daily-report streak (`swarm daily`), M2's share of this UTC week's merges made without the owner's click and its unreviewed reverts (`swarm merges`), and M4's owner acts (`swarm acts`, which first reads the owner's acts back from GitHub into `swarm.db`). M4's acts criterion reads `counted`, with the acts on the counted working days, how many weren't C-team and how many days aren't counted yet, never `met` or `failing`: owner acts are counted, never a gate (per GOV-0040). Today is left out while it is in progress, and with no counted day the criterion is `unmeasured`. A passed `**Date:**` is `date_missed`.
+- **Progress** per done-test criterion (a Goal's checkboxes, an Area's `**Target:**` bullets): `met` when ticked, else what its measure says, else `unmeasured`. Unmeasured is never reported as on track. The measures reuse the commands that count the same thing: M1's daily report posted without the owner starting it, met once `swarm daily` lists a report `[daily]` started (shown once, not a streak, per GOV-0040), M2's share of this UTC week's merges made without the owner's click and its unreviewed reverts (`swarm merges`), and M4's owner acts (`swarm acts`, which first reads the owner's acts back from GitHub into `swarm.db`). M4's acts criterion reads `counted`, with the acts on the counted working days, how many weren't C-team and how many days aren't counted yet, never `met` or `failing`: owner acts are counted, never a gate (per GOV-0040). Today is left out while it is in progress, and with no counted day the criterion is `unmeasured`. A passed `**Date:**` is `date_missed`.
 - **Stuck**, with the reason nothing will start it and since when: requested changes, or an overstep the owner has answered, at a PR's head with no push since and no trigger that restarts the role (which roles `[respond]` and `[ruling]` start is read from `watch.py`'s `RESPOND_ROLES` and `RULING_ROLES`); a merged PR whose issue is still open; an issue under no Goal or Area that another issue waits on; an owner `Ask:`, `Call in:` or `Research:` that nothing listens to; and three more from #858:
   - `conflict`: a PR approved at head (by the reviewer, and the owner if they approved too) that conflicts with `main`. The merger can't merge it and nothing starts a fix (PR #839).
   - `quiet-session`: a session started by hand (not by `swarm watch`) that is still running but whose role's App hasn't posted on its issue or that issue's PR for 60 minutes (`QUIET_MINUTES`), with when it last posted (#773). A session whose issue is closed, whose issue's PR has merged, or whose PR is no longer open is an idle window and isn't listed. **Limit:** only sessions on this repo's issues and PRs are read; a session on another org repo's issue (#829) is skipped, not checked against that repo.

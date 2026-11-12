@@ -791,9 +791,8 @@ class LaunchTest(Base):
         self.assertEqual(o, "You are the planner for productswarm. Read CLAUDE.md, PRODUCT.md and "
                             "roles/planner.md, then write the daily report on issue #600, as "
                             "roles/planner.md says. swarm watch started this run from its [daily] "
-                            "trigger (GOV-0029). Run launcher/swarm daily first: its \"M1: day N "
-                            "of 5\" goes in the report's first line and its Goal and Area edits "
-                            "under Risks (#709). Then run launcher/swarm trouble --json and build "
+                            "trigger (GOV-0029). Run launcher/swarm daily first: its Goal and Area "
+                            "edits go under Risks (#709). Then run launcher/swarm trouble --json and build "
                             "the Trouble section from it, not by hand (#804). Post on #600 and stop.")
         self.assertIn("write the daily report and the Monday check-in on issue #600",
                       swarm.opener("planner", 600, daily="the daily report and the Monday check-in"))
