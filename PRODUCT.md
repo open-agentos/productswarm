@@ -1,6 +1,6 @@
 # Product brief: productswarm
 
-**Owner:** @mattmcalister · **Status:** goal set: the department that reports to you (#526) · Q2–Q4 in force (GOV-0031, GOV-0027, GOV-0029), outside project unnamed (GOV-0035), Q5 to come · v0–v3 shipped or in progress (History)
+**Owner:** @mattmcalister · **Status:** goal set: the department that reports to you (#526), done test per GOV-0040 · Q2–Q4 in force (GOV-0031, GOV-0027, GOV-0029), outside project unnamed (GOV-0035), Q5 to come · v0–v3 shipped or in progress (History)
 
 This brief follows the owner's direction on #526 (Option 2). That question is `gov:ruled` with no merged record, so it is direction for #526 only, not precedent (GOV-0006). Every in-force record still holds, and GOV-0015 still sets v3's order. Where this brief describes something a later ruling must allow, it says which one.
 
@@ -20,17 +20,13 @@ v0–v3 solved "I can't see my sessions". The owner still directs the swarm one 
 
 **An AI team run like a department.** A lead agent keeps the plan with the owner: the Goals and Areas the owner opens (GOV-0031). The swarm works that plan under authority the owner delegates, not with the owner approving each issue or merge. The lead reports daily and checks in against the plan weekly, with the owner as its C-team.
 
-**Done when:** productswarm runs itself that way for 10 working days in a row, with the owner acting only as the C-team (plan, report, asks, protected merges) and under 5 owner acts a day, down from about 40. It ends in a readiness review for the first outside project, once the owner names one (GOV-0035).
+**Done when** (GOV-0040): each open Goal's capability is shown once, on real work or in a scripted drill in the scratch repo. Owner acts are counted and reported (`swarm acts`), never a gate. It ends in a readiness review for the first outside project, once the owner names one (GOV-0035).
 
 **After that:** the first outside project, once the owner names one, is this goal's finish line. A consultant's kit (B) follows once a named peer asks for it.
 
-### On track at day 30 (Dec 4) if
+### On track if
 
-- [ ] a daily report on every working day, with none started by the owner
-- [ ] owner acts under 5 a day, not counting plan approval and reading reports
-- [ ] more than half of merges made without the owner's click, and no unreviewed revert
-- [ ] every merged PR cites a Goal or Area
-- [ ] the readiness review is scheduled, with its checklist in the plan
+Each open Goal's own done test says when it is met: M1–M4 (#683–#686). GOV-0040 dropped the earlier day-30 checks.
 
 ## Operating model
 
