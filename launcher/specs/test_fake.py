@@ -220,8 +220,18 @@ class SchemaErrorTest(FixtureCase):
         self.broken(lambda d: d["features"][0]["spec"].update(Problem={"x": 1}))
         self.broken(lambda d: d["features"][0]["spec"].update(Notes=3))
         self.broken(lambda d: d["features"][0].update(last_edited_time="yesterday"))
+        self.broken(lambda d: d["features"][0].update(last_edited_time=5))
+        self.broken(lambda d: d["features"][0].update(last_edited_time=[]))
         self.broken(lambda d: d["features"][0].pop("comments"))
         self.broken(lambda d: d.pop("initiatives"))
+
+    def test_unknown_heading_reported_before_its_value(self):
+        data = json.loads(FIXTURE.read_text())
+        data["features"][0]["spec"]["Requirements"] = {}
+        with self.assertRaises(SchemaError) as cm:
+            FakeSource(self.write(data))
+        self.assertIn("unknown spec heading", str(cm.exception))
+        self.assertIn("Requirements", str(cm.exception))
 
     def test_not_json(self):
         p = Path(self.tmp.name) / "bad.json"

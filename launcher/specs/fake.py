@@ -125,7 +125,9 @@ class FakeSource:
         return spec
 
     def dump(self, path: Union[str, Path]) -> None:
-        """Write the current state as a fixture that FakeSource loads back unchanged."""
+        """Write the current state as a fixture. Loading it gives the same state; the file
+        matches the original only if every feature had every heading (Acceptance criteria
+        may be left out), since a missing section dumps as `""`."""
         data = {
             "initiatives": list(self.initiatives.values()),
             "features": [self._dump_feature(f) for f in self._features.values()],
@@ -180,7 +182,11 @@ def _later(ts: Optional[str]) -> str:
 
 def _check_spec_values(spec: dict, where: str) -> None:
     """Each section is a string or null; Acceptance criteria is null or a list of
-    `{"text": str, "checked": bool}`. Anything else is refused, not stringified."""
+    `{"text": str, "checked": bool}`. Anything else is refused, not stringified. An
+    unknown heading is reported as that first, whatever its value."""
+    unknown = sorted(set(spec) - set(SPEC_HEADINGS))
+    if unknown:
+        raise SchemaError(f"{where}: unknown spec heading(s): {', '.join(unknown)}")
     for heading, value in spec.items():
         w = f"{where}[{heading!r}]"
         if heading != "Acceptance criteria":
@@ -200,6 +206,8 @@ def _check_spec_values(spec: dict, where: str) -> None:
 
 
 def _parse_ts(ts: str, where: str) -> datetime:
+    if not isinstance(ts, str):
+        raise SchemaError(f"{where}: not an ISO 8601 timestamp: {ts!r}")
     try:
         d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (TypeError, ValueError):
