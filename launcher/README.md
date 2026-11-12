@@ -776,6 +776,18 @@ To unpause it, take the repo out of the list or delete the line.
 
 The pause fails closed. If `paused` isn't a list of `owner/name` strings, it is reported like any other bad `[org]` value and **every** repo counts as paused until the list is fixed, because there's no telling which repo you meant.
 
+## Notion token (specs bridge, #951)
+
+The `notion` spec backend (`launcher/specs/notion.py`) reads the `productswarm` integration's token from one place, as the owner set on #943:
+
+- **Where:** `~/.config/productswarm/notion.token`, on the owner's machine only. The engine host doesn't get it until R4's `[specs]` trigger revisits custody.
+- **Mode:** `0600` (or stricter), a regular file you own. `chmod 600 ~/.config/productswarm/notion.token`. Anything looser, a symlink, or an empty or missing file is refused, with no fallback: `NOTION_TOKEN` and other environment variables are never read.
+- **Who reads it:** only `swarm specs`, at call time. It is never exported to an environment, so `swarm launch` and containers never pass or mount it.
+- **Capabilities:** Read content, Update content, Read comments and Insert comments. No Insert content and no user information. The backend refuses any call outside those, and it updates only a feature's Status, Issue, PR and Last synced properties, never a page body.
+- **Sharing:** share the integration only with the "productswarm specs" page. `adopt` finds the Initiatives and Features databases under it and checks them against #937 §6; it never creates or changes one.
+
+It pins Notion API version `2022-06-28`, the last that treats a database as one table.
+
 ## Tests
 
 ```bash
