@@ -1563,14 +1563,14 @@ def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DE
           get_comments: Callable | None = None, now: dt.datetime | None = None,
           tz: dt.tzinfo | None = None, owner: str | None = None,
           agents: set[str] | None = None, get_scopes: Callable | None = None,
-          get_merged: Callable | None = None) -> int:
+          get_merged: Callable | None = None, effort_cache: Path | str | None = None) -> int:
     """`swarm daily` (#707): for each of the last 10 working days, whether a daily report was
     posted on the report issue, when, and who started it, and the latest one [daily] started
     (as information, not a streak: GOV-0040). Who started it comes from swarm.db; the reports
     and their times come from the report issue's comments (swarm.db holds no comments). Then
     the edits to a Goal or Area by anyone but the owner since the last working day began
     (#709), and the issues still open after a PR that closes them merged in those 10 working
-    days (#806). Only reads."""
+    days (#806), and the upkeep risk per Goal from the effort cache (#1013). Only reads."""
     import watch
     try:
         limits = manifest.load_watch(manifest_path)
@@ -1601,7 +1601,11 @@ def daily(launcher: Launcher, repo: str, manifest_path: Path | str = manifest.DE
         stale = unclosed_text(unclosed((get_merged or gh_merged_nodes)(repo, days[-1]), repo), days[-1], repo)
     except RuntimeError as e:
         stale = f"Issues still open after their PR merged couldn't be read: {e}"
-    launcher.out(f"{daily_text(rows, n, today)}\n\n{edits}\n\n{stale}")
+    dashboard()   # puts effort.py on the path
+    import effort
+    cache = effort.load(effort_cache) if effort_cache else effort.load()
+    effort_risks = effort.daily_text(effort.build(cache, repo, now, []), effort_cache or effort.CACHE_NAME)
+    launcher.out(f"{daily_text(rows, n, today)}\n\n{edits}\n\n{effort_risks}\n\n{stale}")
     return 0
 
 

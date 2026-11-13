@@ -37,8 +37,8 @@ LATIN1 = ("U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6
 
 # The pages, in footer order: (file, name).
 PAGES = (("bridge.html", "Bridge"), ("commissions.html", "Commissions"), ("agents.html", "Agents"),
-         ("index.html", "Desk"), ("operations.html", "Operations"), ("decisions.html", "Decisions"),
-         ("authority.html", "Authority"))
+         ("index.html", "Desk"), ("effort.html", "Effort"), ("operations.html", "Operations"),
+         ("decisions.html", "Decisions"), ("authority.html", "Authority"))
 
 # #397's palette: paper, ink, agents blue, owner amber, and red for live marks and blocks only.
 PALETTE = {"paper": "#F4F3EE", "ink": "#1B1B18", "muted": "#66655E", "line": "#D8D6CC",
@@ -286,6 +286,22 @@ a.cm-row .br-av { align-self:flex-start; }
 .ag-tiles { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; }
 .ag-tile { background:#fff; border:1px solid #E4E2D9; border-radius:8px; padding:8px 10px; display:flex;
   flex-direction:column; gap:2px; font-size:13px; } .ag-tile .mono { font-size:18px; }
+/* Effort (#1013): a stacked bar per open Goal, the fix share hatched, and the capability line. */
+.ef-goal { margin:10px 0 0; } .ef-name { font-weight:600; }
+.ef-row { display:flex; align-items:center; gap:8px; margin:3px 0; }
+.ef-when { flex:none; width:96px; font-size:13px; }
+.ef-bar { flex:1 1 auto; min-width:0; display:flex; height:14px; background:var(--line); }
+.ef-n { flex:none; min-width:24px; text-align:right; }
+.ef-seg { display:block; height:100%; min-width:3px; border-right:1px solid var(--paper); }
+.ef-capability { background:var(--agent); } .ef-governance { background:var(--owner); }
+.ef-knowledge { background:var(--ink); } .ef-upkeep { background:var(--quiet); }
+.ef-fix { display:block; height:100%;
+  background:repeating-linear-gradient(135deg, var(--paper) 0 2px, transparent 2px 5px); }
+.ef-legend { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:13px; margin:6px 0; }
+.ef-key { display:inline-block; width:12px; height:12px; margin-right:5px; vertical-align:-1px; }
+.ef-trend h3 { margin-top:16px; }
+svg.ef-line { display:block; max-width:100%; height:auto; fill:none; stroke:var(--agent); stroke-width:1.5; }
+svg.ef-line circle { fill:var(--agent); stroke:none; }
 """
 
 

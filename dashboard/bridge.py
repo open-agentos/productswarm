@@ -14,7 +14,8 @@ calls of its own (the merged PRs come from the closed items generate.fetch() alr
     what `swarm trouble` says is stuck (a flag), and PRs a role's App had merged in the last
     REPORT_DAYS days (shipped, or delivered for a Brief).
   - In flight: each open Goal and Area, its criteria met of total, and a dot: red if flagged,
-    amber if it waits on the owner, blue otherwise.
+    amber if it waits on the owner, blue otherwise. Each Goal adds its merged PRs by kind of
+    work over the last 7 days, from the effort cache (effort.py, #1013).
   - Orders received: the owner's acts on GitHub from the repo's events, newest first. The
     chair is "GitHub" until a chair can send orders (#760: orders stay the owner's acts).
 
@@ -29,6 +30,7 @@ import datetime as dt
 import re
 
 import activity
+import effort
 import layout
 from layout import esc
 from report import inline
@@ -192,7 +194,19 @@ def reports(m: dict) -> list[dict]:
 
 
 def in_flight(m: dict) -> list[dict]:
-    """Each open Goal and Area: criteria met of total, and its state."""
+    """Each open Goal and Area: criteria met of total, and its state; a Goal also gets its PRs by
+    kind of work over the last effort.WINDOW days, when the effort cache was read (#1013)."""
+    out = _flights(m)
+    by_goal = (m.get("effort") or {}).get("by_goal")
+    if (m.get("effort") or {}).get("status") == "ok":
+        for f in out:
+            ref = effort.ref_of_url(f.get("url"))
+            if f.get("type") == "Goal" and ref:
+                f["effort"] = effort.card_line(by_goal.get(ref) or effort.counts([]))
+    return out
+
+
+def _flights(m: dict) -> list[dict]:
     out = []
     for s in _scopes(m.get("trouble")):
         crit = s.get("progress") or []
@@ -357,7 +371,9 @@ def flights_html(b: dict) -> str:
         count = f'{f["met"]}/{f["total"]} {unit}' if f["total"] else "no criteria"
         rows.append(f'<div class="br-row"><span class="br-dot {DOT[f["state"]]}" aria-hidden="true"></span>'
                     f'<span class="br-grow">{lead_html}{_a(f["url"], esc(f["title"]))}'
-                    f'<br><span class="muted">{esc(STATE_WORD[f["state"]])} · {esc(count)}</span></span></div>')
+                    f'<br><span class="muted">{esc(STATE_WORD[f["state"]])} · {esc(count)}</span>'
+                    + (f'<br><a class="muted" href="index.html">{esc(f["effort"])}</a>' if f.get("effort") else "")
+                    + '</span></div>')
     return f'<section class="br-flight">{head}{"".join(rows)}</section>'
 
 

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import activity
 import committees
+import effort
 import grants
 import floor as floor_mod
 import generate
@@ -132,5 +133,6 @@ def state(m: dict) -> dict:
         "report": report.state(m.get("report")),   # #712: today's report, its asks, the check-in
         "plan": plan.state(m.get("plan")),   # #712: the owner's Goals and Areas, each sub-issue's go   # #405: today's governance events, newest first
         "grants": grants.state(m.get("grants")),   # #713: the merger's calls in the last 24 hours
+        "effort": effort.state(m.get("effort")),   # #1013: PRs by kind of work per open Goal, and the trend
         "desk": desk(m),   # #411: what the desk's live refresh draws
     })

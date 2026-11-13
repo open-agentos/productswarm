@@ -1,0 +1,173 @@
+{
+ "schema": 1,
+ "labelset": "effort",
+ "classifier": "paths",
+ "updated_at": "2026-11-13T09:00:00Z",
+ "prs": {
+  "1001": {
+   "title": "Effort panel on the desk",
+   "merged_at": "2026-11-12T10:00:00Z",
+   "label": "capability",
+   "fix": false,
+   "fixes": null,
+   "goal": "o/r#987",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "1002": {
+   "title": "Fix the effort bar width",
+   "merged_at": "2026-11-12T11:00:00Z",
+   "label": "capability",
+   "fix": true,
+   "fixes": 1001,
+   "goal": "o/r#987",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "1003": {
+   "title": "Bump the test runner",
+   "merged_at": "2026-11-11T09:00:00Z",
+   "label": "upkeep",
+   "fix": false,
+   "fixes": null,
+   "goal": "o/r#987",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "1004": {
+   "title": "Record GOV-0044",
+   "merged_at": "2026-11-10T09:00:00Z",
+   "label": "governance",
+   "fix": false,
+   "fixes": null,
+   "goal": 987,
+   "hash": "h",
+   "labeller": "model"
+  },
+  "1005": {
+   "title": "Brief: label boundaries",
+   "merged_at": "2026-11-09T09:00:00Z",
+   "label": "knowledge",
+   "fix": false,
+   "fixes": null,
+   "goal": "#987",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "1006": {
+   "title": "Retry the daily run",
+   "merged_at": "2026-11-13T08:00:00Z",
+   "label": "upkeep",
+   "fix": false,
+   "fixes": null,
+   "goal": "o/r#683",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "1007": {
+   "title": "Quieter watch logs",
+   "merged_at": "2026-11-08T08:00:00Z",
+   "label": "upkeep",
+   "fix": true,
+   "fixes": 1006,
+   "goal": "o/r#683",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "1008": {
+   "title": "swarm daily lists asks",
+   "merged_at": "2026-11-07T08:00:00Z",
+   "label": "capability",
+   "fix": false,
+   "fixes": null,
+   "goal": "o/r#683",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "1009": {
+   "title": "Tidy the merger log",
+   "merged_at": "2026-11-12T08:00:00Z",
+   "label": "upkeep",
+   "fix": false,
+   "fixes": null,
+   "goal": "o/r#684",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "1010": {
+   "title": "Readiness checklist page",
+   "merged_at": "2026-11-12T09:00:00Z",
+   "label": "capability",
+   "fix": false,
+   "fixes": null,
+   "goal": "o/r#684",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "990": {
+   "title": "Pin the classifier model",
+   "merged_at": "2026-11-05T09:00:00Z",
+   "label": "upkeep",
+   "fix": false,
+   "fixes": null,
+   "goal": "o/r#987",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "991": {
+   "title": "swarm classify eval",
+   "merged_at": "2026-11-04T09:00:00Z",
+   "label": "capability",
+   "fix": false,
+   "fixes": null,
+   "goal": "o/r#987",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "992": {
+   "title": "Rotate the App key",
+   "merged_at": "2026-11-03T09:00:00Z",
+   "label": "upkeep",
+   "fix": false,
+   "fixes": null,
+   "goal": null,
+   "hash": "h",
+   "labeller": "model"
+  },
+  "900": {
+   "title": "Commissions page",
+   "merged_at": "2026-10-01T09:00:00Z",
+   "label": "capability",
+   "fix": false,
+   "fixes": null,
+   "goal": null,
+   "hash": "h",
+   "labeller": "model"
+  },
+  "993": {
+   "title": "Not a label",
+   "merged_at": "2026-11-12T09:00:00Z",
+   "label": "bogus",
+   "fix": false,
+   "fixes": null,
+   "goal": "o/r#987",
+   "hash": "h",
+   "labeller": "model"
+  },
+  "994": {
+   "title": "No merge time",
+   "label": "upkeep",
+   "goal": "o/r#987"
+  },
+  "x": {
+   "title": "Not a PR number",
+   "merged_at": "2026-11-12T09:00:00Z",
+   "label": "upkeep",
+   "fix": false,
+   "fixes": null,
+   "goal": "o/r#987",
+   "hash": "h",
+   "labeller": "model"
+  }
+ }
+}
