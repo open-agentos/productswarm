@@ -709,6 +709,19 @@ class CliTest(Base):
         self.assertIn("pinned by digest", self.lines[-1])
         self.assertEqual(self.fake.commands, [])
 
+    def test_classify_eval_replays_the_fixture_with_no_model_calls(self):
+        """#1010: `swarm classify eval` runs the fixture in --replay mode and writes the report
+        classify/testdata/expected holds."""
+        classify = Path(__file__).resolve().parent.parent / "classify" / "testdata"
+        out = self.home / "report.md"
+        self.assertEqual(swarm.main(["classify", "eval", "fixture", "--replay", "--dir", str(classify),
+                                     "--out", str(out), "--manifest", str(self.home / "none.toml")],
+                                    self.l), 0)
+        self.assertEqual(out.read_text(),
+                         (classify / "expected" / "fixture-dev-claude-haiku-5-5.md").read_text())
+        self.assertIn("swarm classify eval: wrote", self.lines[-1])
+        self.assertEqual(self.fake.commands, [])
+
     def test_corrupt_state_file(self):
         (self.home / "launcher" / "sessions.json").write_text("{")
         self.assertEqual(swarm.main(["stop", "builder-1"], self.l), 1)

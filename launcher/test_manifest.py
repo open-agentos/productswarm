@@ -85,6 +85,12 @@ class InvalidManifestTest(Base):
         self.assertIn("unknown top-level key 'other'",
                       self.problems(session() + '[other]\nbackend = "fake"\n')[0])
 
+    def test_classify_table_is_allowed_and_must_be_a_table(self):
+        """#1010: [classify] parses (classify/evalrun.py checks its contents)."""
+        self.assertEqual(len(self.parse(session() + '[classify]\nmodel = "m"\n')), 1)
+        self.assertIn("classify: must be a [classify] table",
+                      self.problems('classify = "m"\n' + session()))
+
     def test_specs_must_be_a_table(self):
         self.assertIn("specs: must be a [specs] table",
                       self.problems('specs = "fake"\n' + session()))

@@ -1,0 +1,10 @@
+{"id": "d1", "text": "Fix the crash when a Goal has no sub-issues.\nUrgent: blocks the daily report.", "label": "bug", "flags": {"urgent": true}, "split": "dev", "labelled_by": "fixture", "week": "2026-W45"}
+{"id": "d2", "text": "Stop the merger counting a revert twice.", "label": "bug", "flags": {"urgent": false}, "split": "dev", "labelled_by": "fixture", "week": "2026-W45"}
+{"id": "d3", "text": "Handle a missing week field instead of failing.", "label": "bug", "split": "dev", "labelled_by": "fixture", "week": "2026-W45"}
+{"id": "d4", "text": "Add a --json flag to swarm trouble.", "label": "feature", "split": "dev", "labelled_by": "fixture", "week": "2026-W45"}
+{"id": "d5", "text": "New: a weekly trend line, and a fix to its legend.", "label": "feature", "split": "dev", "labelled_by": "fixture", "week": "2026-W46"}
+{"id": "d6", "text": "Rewrite the launcher README's watch section.", "label": "docs", "split": "dev", "labelled_by": "fixture", "week": "2026-W46"}
+{"id": "d7", "text": "Explain the pass mark in classify/README.md.\nUrgent before the first live run.", "label": "docs", "flags": {"urgent": true}, "split": "dev", "labelled_by": "fixture", "week": "2026-W46"}
+{"id": "d8", "text": "Correct the wrong example in the specs guide.", "label": "docs", "split": "dev", "labelled_by": "fixture", "week": "2026-W46"}
+{"id": "t1", "text": "Fix the off-by-one in the acts window.", "label": "bug", "split": "test", "labelled_by": "fixture"}
+{"id": "t2", "text": "Add effort labels to the Desk.", "label": "feature", "split": "test", "labelled_by": "fixture"}

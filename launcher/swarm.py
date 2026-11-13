@@ -41,6 +41,11 @@
                                     specs edited since their snapshot was pulled, under the
                                     Goal or every linked one, and the lead's decision on one
                                     (#956; specs/drift.py)
+    launcher/swarm classify eval <labelset> [--split dev|test] [--baseline NAME]
+                                 [--replay | --live] [--runs N] [--model M]
+                                    score a classifier on a labelled set and write a
+                                    Markdown report; --replay (default) makes no model calls
+                                    (#1010; classify/evalrun.py, GOV-0044, GOV-0045)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
 unchanged, in a new Terminal window: the owner's answer on #43.
@@ -2281,6 +2286,13 @@ def model_for(role: str, given: str | None, path: str) -> str:
 
 # ---------------------------------------------------------------- CLI
 
+def classify_eval():
+    """classify/evalrun.py, the `swarm classify eval` command (#1010)."""
+    sys.path.insert(0, str(ROOT / "classify"))
+    import evalrun
+    return evalrun
+
+
 def main(argv: list[str], launcher: Launcher | None = None) -> int:
     ap = argparse.ArgumentParser(prog="swarm", description="Start, list and stop the swarm in swarm.toml.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2388,12 +2400,18 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
         decide.add_argument(f"--{choice}", metavar="FEAT-n", help=what)
     p_diff.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_diff.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_classify = sub.add_parser("classify", help="the classifier engine: evals of label sets (#1010)")
+    classify_sub = p_classify.add_subparsers(dest="classify_cmd", required=True)
+    classify_eval().add_eval_args(classify_sub.add_parser(
+        "eval", help="score a classifier on a labelled set and write a Markdown report"))
     p_backup = sub.add_parser("backup", help="copy swarm.db consistently, for the nightly timer")
     p_backup.add_argument("--out", help=f"default: backups/swarm-<UTC time>.db, keeping the newest "
                                         f"{statedb.KEEP_BACKUPS}")
     args = ap.parse_args(argv)
 
     launcher = launcher or Launcher(home())
+    if args.cmd == "classify":
+        return classify_eval().eval_main(args, say=launcher.out)
     if args.cmd == "backup":
         try:
             out = statedb.backup(launcher.dir, Path(args.out) if args.out else None)

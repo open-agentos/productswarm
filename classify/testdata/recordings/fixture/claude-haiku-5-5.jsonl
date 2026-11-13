@@ -1,0 +1,24 @@
+{"item": "d1", "sample": 0, "prompt": "b5297113382aa33c", "reply": "{\"label\": \"bug\", \"flags\": {\"urgent\": true}, \"evidence\": \"Fix the crash when a Goal has no sub-issues.\"}"}
+{"item": "d1", "sample": 1, "prompt": "b5297113382aa33c", "reply": "{\"label\": \"bug\", \"flags\": {\"urgent\": true}, \"evidence\": \"Fix the crash when a Goal has no sub-issues.\"}"}
+{"item": "d1", "sample": 2, "prompt": "b5297113382aa33c", "reply": "{\"label\": \"bug\", \"flags\": {\"urgent\": true}, \"evidence\": \"Fix the crash when a Goal has no sub-issues.\"}"}
+{"item": "d2", "sample": 0, "prompt": "e55bdcfa25352683", "reply": "{\"label\": \"bug\", \"flags\": {\"urgent\": false}, \"evidence\": \"Stop the merger counting a revert twice.\"}"}
+{"item": "d2", "sample": 1, "prompt": "e55bdcfa25352683", "reply": "{\"label\": \"bug\", \"flags\": {\"urgent\": false}, \"evidence\": \"counting a revert twice\"}"}
+{"item": "d2", "sample": 2, "prompt": "e55bdcfa25352683", "reply": "{\"label\": \"feature\", \"flags\": {\"urgent\": false}, \"evidence\": \"Stop the merger\"}"}
+{"item": "d3", "sample": 0, "prompt": "222d87b30d7cb70c", "reply": "{\"label\": \"feature\", \"flags\": {\"urgent\": false}, \"evidence\": \"Handle a missing week field\"}"}
+{"item": "d3", "sample": 1, "prompt": "222d87b30d7cb70c", "reply": "{\"label\": \"feature\", \"flags\": {\"urgent\": false}, \"evidence\": \"Handle a missing week field\"}"}
+{"item": "d3", "sample": 2, "prompt": "222d87b30d7cb70c", "reply": "{\"label\": \"feature\", \"flags\": {\"urgent\": false}, \"evidence\": \"Handle a missing week field\"}"}
+{"item": "d4", "sample": 0, "prompt": "d7fe59bbf201a5f9", "reply": "{\"label\": \"feature\", \"flags\": {\"urgent\": false}, \"evidence\": \"Add a --json flag to swarm trouble.\"}"}
+{"item": "d4", "sample": 1, "prompt": "d7fe59bbf201a5f9", "reply": "I think this is a feature."}
+{"item": "d4", "sample": 2, "prompt": "d7fe59bbf201a5f9", "reply": "```json\n{\"label\": \"feature\", \"flags\": {\"urgent\": false}, \"evidence\": \"Add a --json flag\"}\n```"}
+{"item": "d5", "sample": 0, "prompt": "1cfb409ba98946d5", "reply": "{\"label\": \"feature\", \"flags\": {\"urgent\": false}, \"evidence\": \"New: a weekly trend line\"}"}
+{"item": "d5", "sample": 1, "prompt": "1cfb409ba98946d5", "reply": "{\"label\": \"bug\", \"flags\": {\"urgent\": false}, \"evidence\": \"a fix to its legend\"}"}
+{"item": "d5", "sample": 2, "prompt": "1cfb409ba98946d5", "reply": "{\"label\": \"docs\", \"flags\": {\"urgent\": false}, \"evidence\": \"legend\"}"}
+{"item": "d6", "sample": 0, "prompt": "4ff82da27896ca5f", "reply": "{\"label\": \"docs\", \"flags\": {\"urgent\": false}, \"evidence\": \"Rewrite the launcher README's watch section.\"}"}
+{"item": "d6", "sample": 1, "prompt": "4ff82da27896ca5f", "reply": "{\"label\": \"docs\", \"flags\": {\"urgent\": false}, \"evidence\": \"Rewrite the launcher README's watch section.\"}"}
+{"item": "d6", "sample": 2, "prompt": "4ff82da27896ca5f", "reply": "{\"label\": \"docs\", \"flags\": {\"urgent\": false}, \"evidence\": \"Rewrite the launcher README's watch section.\"}"}
+{"item": "d7", "sample": 0, "prompt": "5d3c5167d5c6d68a", "reply": "{\"label\": \"docs\", \"flags\": {\"urgent\": true}, \"evidence\": \"Explain the pass mark in classify/README.md.\"}"}
+{"item": "d7", "sample": 1, "prompt": "5d3c5167d5c6d68a", "reply": "{\"label\": \"docs\", \"flags\": {\"urgent\": true}, \"evidence\": \"Explain the pass mark in classify/README.md.\"}"}
+{"item": "d7", "sample": 2, "prompt": "5d3c5167d5c6d68a", "reply": "{\"label\": \"bug\", \"flags\": {\"urgent\": true}, \"evidence\": \"Urgent before the first live run.\"}"}
+{"item": "d8", "sample": 0, "prompt": "4943fbd7dba451c9", "reply": "{\"label\": \"bug\", \"flags\": {\"urgent\": false}, \"evidence\": \"Correct the wrong example\"}"}
+{"item": "d8", "sample": 1, "prompt": "4943fbd7dba451c9", "reply": "{\"label\": \"bug\", \"flags\": {\"urgent\": false}, \"evidence\": \"Correct the wrong example\"}"}
+{"item": "d8", "sample": 2, "prompt": "4943fbd7dba451c9", "reply": "{\"label\": \"bug\", \"flags\": {\"urgent\": false}, \"evidence\": \"Correct the wrong example\"}"}
