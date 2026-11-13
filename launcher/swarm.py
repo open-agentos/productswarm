@@ -28,6 +28,10 @@
     launcher/swarm desk             the live, read-only Desk on the engine host, rebuilt on
                                     each webhook nudge (#664; desk.py)
     launcher/swarm backup [--out P] a consistent copy of swarm.db (#659; statedb.py)
+    launcher/swarm specs pull <goal> [--dry-run]
+                                    open a sub-issue under the Goal for each Ready feature of
+                                    the initiative its `Spec source:` line links, from the
+                                    [specs] backend in swarm.toml (#955; specs/sync.py)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
 unchanged, in a new Terminal window: the owner's answer on #43.
@@ -2043,6 +2047,65 @@ def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, forc
     return 0 if launcher.start(entry, live, dry_run) else 1
 
 
+# ---------------------------------------------------------------- specs bridge (#955, #937)
+
+SPECS_GOAL_QUERY = (
+    "query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { "
+    "issue(number: $n) { state body author { login __typename } issueType { name } "
+    "userContentEdits(first: 100) { totalCount nodes { editor { login __typename } } } } } }")
+
+
+class GhSpecs:
+    """specs/sync.py's GitHub, through the gh CLI as the session's App."""
+
+    def goal(self, repo: str, n: int) -> dict | None:
+        owner, name = repo.split("/", 1)
+        d = dashboard().gh_json("api", "graphql", "-f", f"query={SPECS_GOAL_QUERY}",
+                                "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"n={n}")
+        return (((d or {}).get("data") or {}).get("repository") or {}).get("issue")
+
+    def open_issue(self, repo: str, title: str, body: str) -> dict:
+        return dashboard().gh_json("api", "-X", "POST", f"repos/{repo}/issues",
+                                   "-f", f"title={title}", "-f", f"body={body}")
+
+    def add_sub_issue(self, repo: str, n: int, sub_issue_id: int) -> None:
+        dashboard().gh_json("api", "-X", "POST", f"repos/{repo}/issues/{n}/sub_issues",
+                            "-F", f"sub_issue_id={sub_issue_id}")
+
+
+def specs_pull(launcher: Launcher, repo: str, goal: str, manifest_path: Path | str,
+               dry_run: bool = False, gh=None, owner: Callable[[], str] = owner_login) -> int:
+    """`swarm specs pull <goal>`: the backend from swarm.toml's [specs] (#952), then sync.pull.
+    A fake backend's state is saved back to its fixture after a real run, so the next manual
+    run carries on from it, even if the run stopped part-way."""
+    from specs import config as specs_config, sync
+    from specs.source import SchemaError
+    try:
+        goal_repo, n = parse_ref(goal, repo)
+        cfg = specs_config.load(manifest_path)
+        if cfg is None:
+            launcher.out(f"swarm specs pull: {manifest_path} has no [specs] table")
+            return 1
+        source = specs_config.source(cfg)
+    except (ValueError, SchemaError) as e:   # SpecsConfigError is a ValueError
+        launcher.out(f"swarm specs pull: {e}")
+        return 1
+    try:
+        sync.pull((goal_repo or repo, n), source, gh or GhSpecs(), dry_run=dry_run,
+                  owner=owner(), backend=cfg.backend, out=launcher.out)
+    except sync.Refused as e:
+        launcher.out(f"swarm specs pull: refused: {e}")
+        return 1
+    except SchemaError as e:
+        launcher.out(f"swarm specs pull: stopped, nothing written: the {cfg.backend} source's "
+                     f"layout doesn't match #937 §6: {e}")
+        return 1
+    finally:
+        if not dry_run and getattr(source, "writes", None) and cfg.fixture:
+            source.dump(cfg.fixture)
+    return 0
+
+
 def model_for(role: str, given: str | None, path: str) -> str:
     """--model if given, else the manifest's model for the role. Raises ManifestError/LookupError."""
     if given:
@@ -2128,6 +2191,15 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
     p_desk.add_argument("--port", type=int, default=8080)
     p_desk.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     sub.add_parser("spent", help="today's and this month's run spend, and Spent per Mission, Goal and Area (#662)")
+    p_specs = sub.add_parser("specs", help="the specs bridge: specs in a source ship through the swarm (#937)")
+    specs_sub = p_specs.add_subparsers(dest="specs_cmd", required=True)
+    p_pull = specs_sub.add_parser("pull", help="open a sub-issue under the Goal for each Ready feature "
+                                               "of its linked initiative (#955)")
+    p_pull.add_argument("goal", help="the Goal: N or #N (this repo), or owner/name#N")
+    p_pull.add_argument("--dry-run", action="store_true",
+                        help="print what would happen; write nothing to GitHub or the source")
+    p_pull.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
+    p_pull.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_backup = sub.add_parser("backup", help="copy swarm.db consistently, for the nightly timer")
     p_backup.add_argument("--out", help=f"default: backups/swarm-<UTC time>.db, keeping the newest "
                                         f"{statedb.KEEP_BACKUPS}")
@@ -2170,7 +2242,7 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             launcher.out(f"swarm watch: {e}")
             return 2
     repo = None
-    if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges", "daily", "acts", "trouble"):
+    if args.cmd in ("ls", "launch", "inbox", "watch", "cost", "merges", "daily", "acts", "trouble", "specs"):
         repo = args.repo or dashboard().default_repo()
         if not repo:
             launcher.out(f"swarm {args.cmd}: can't tell the repo; pass --repo owner/name")
@@ -2193,6 +2265,8 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return launch(launcher, args.role, n, model, repo=repo, force=args.force,
                           dry_run=args.dry_run, idle_minutes=args.idle_minutes, pr=args.pr,
                           issue_repo=issue_repo)
+        if args.cmd == "specs":
+            return specs_pull(launcher, repo, args.goal, args.manifest, args.dry_run)
         if args.cmd == "up":
             try:
                 sessions = manifest.load(args.manifest)

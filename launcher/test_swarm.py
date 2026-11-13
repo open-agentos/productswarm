@@ -1794,5 +1794,95 @@ class SnapshotTest(unittest.TestCase):
         self.assertTrue(self.actions_calls(lambda: g.fetch("o/r", now, days=1, with_actions=True)))
 
 
+class SpecsPullTest(Base):
+    """`swarm specs pull` (#955): the [specs] backend, the fixture saved back, and refusals.
+    specs/test_sync.py covers pull itself."""
+    FIXTURE = HERE / "specs" / "testdata" / "fake_initiative.json"
+    INIT = "init-0001-recipe-box"
+
+    def setUp(self):
+        super().setUp()
+        env = mock.patch.dict(os.environ, {"PRODUCTSWARM_HOME": str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.fixture = self.home / "fixture.json"
+        self.fixture.write_text(self.FIXTURE.read_text())
+        self.toml = self.home / "swarm.toml"
+        self.toml.write_text('[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n\n'
+                             '[specs]\nbackend = "fake"\nfixture = "fixture.json"\n')
+        self.gh = mock.Mock()
+        self.gh.goal.return_value = {
+            "state": "OPEN", "body": f"Spec source: fake://{self.INIT}\n",
+            "issueType": {"name": "Goal"}, "author": {"login": OWNER, "__typename": "User"},
+            "userContentEdits": {"totalCount": 0, "nodes": []}}
+        self.gh.open_issue.return_value = {"id": 9001, "number": 101,
+                                           "html_url": "https://github.com/o/r/issues/101"}
+
+    def pull(self, goal="#938", dry_run=False):
+        return swarm.specs_pull(self.l, "o/r", goal, self.toml, dry_run, gh=self.gh,
+                                owner=lambda: OWNER)
+
+    def feature(self, fid):
+        return next(f for f in json.loads(self.fixture.read_text())["features"]
+                    if f["properties"]["ID"] == fid)["properties"]
+
+    def test_pull_saves_the_fixture_for_the_next_run(self):
+        self.assertEqual(self.pull(), 0)
+        self.gh.goal.assert_called_with("o/r", 938)
+        self.gh.open_issue.assert_called_once()
+        self.gh.add_sub_issue.assert_called_once_with("o/r", 938, 9001)
+        self.assertEqual(self.feature("FEAT-1")["Issue"], "https://github.com/o/r/issues/101")
+        self.assertEqual(self.feature("FEAT-1")["Status"], "In progress")
+        self.assertIn("  FEAT-1 Save a recipe from a link: opened https://github.com/o/r/issues/101",
+                      self.lines)
+        # The next run carries on from the saved state and opens nothing.
+        self.assertEqual(self.pull(), 0)
+        self.gh.open_issue.assert_called_once()
+
+    def test_other_repo_goal(self):
+        self.assertEqual(self.pull("acme/plans#7", dry_run=True), 0)
+        self.gh.goal.assert_called_with("acme/plans", 7)
+
+    def test_dry_run_leaves_the_fixture(self):
+        before = self.fixture.read_text()
+        self.assertEqual(self.pull(dry_run=True), 0)
+        self.assertEqual(self.fixture.read_text(), before)
+        self.gh.open_issue.assert_not_called()
+        self.gh.add_sub_issue.assert_not_called()
+
+    def test_saves_what_was_written_when_github_fails_part_way(self):
+        self.gh.add_sub_issue.side_effect = RuntimeError("gh api failed: boom")
+        with self.assertRaises(RuntimeError):
+            self.pull()
+        self.assertEqual(self.feature("FEAT-1")["Issue"], "https://github.com/o/r/issues/101")
+
+    def test_refusal(self):
+        self.gh.goal.return_value["author"] = {"login": "someone", "__typename": "User"}
+        before = self.fixture.read_text()
+        self.assertEqual(self.pull(), 1)
+        self.assertIn("swarm specs pull: refused: o/r#938 was opened by someone", self.lines[-1])
+        self.assertEqual(self.fixture.read_text(), before)
+
+    def test_schema_error(self):
+        self.fixture.write_text('{"initiatives": []}')
+        self.assertEqual(self.pull(), 1)
+        self.assertIn("fixture must be an object", self.lines[-1])
+
+    def test_no_specs_table(self):
+        self.toml.write_text('[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n')
+        self.assertEqual(self.pull(), 1)
+        self.assertIn("has no [specs] table", self.lines[-1])
+
+    def test_bad_goal_ref(self):
+        self.assertEqual(self.pull("goal-938"), 1)
+        self.assertIn("isn't an issue ref", self.lines[-1])
+
+    def test_main_routes_to_specs_pull(self):
+        with mock.patch.object(swarm, "specs_pull", return_value=0) as sp:
+            self.assertEqual(swarm.main(["specs", "pull", "#938", "--dry-run", "--repo", "o/r",
+                                         "--manifest", str(self.toml)], self.l), 0)
+        sp.assert_called_once_with(self.l, "o/r", "#938", str(self.toml), True)
+
+
 if __name__ == "__main__":
     unittest.main()
