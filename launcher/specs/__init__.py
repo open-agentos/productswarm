@@ -6,4 +6,5 @@
 `events.py` is the append-only `events.jsonl` log of pulls, writes and decisions (#954).
 `config.py` reads swarm.toml's `[specs]` table and builds the backend it names (#952).
 `sync.py` is `swarm specs pull`: Ready features become sub-issues under the Goal (#955).
+`push.py` is `swarm specs push`: status, links and delivery comments go back to the source (#957).
 """

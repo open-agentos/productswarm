@@ -1794,9 +1794,8 @@ class SnapshotTest(unittest.TestCase):
         self.assertTrue(self.actions_calls(lambda: g.fetch("o/r", now, days=1, with_actions=True)))
 
 
-class SpecsPullTest(Base):
-    """`swarm specs pull` (#955): the [specs] backend, the fixture saved back, and refusals.
-    specs/test_sync.py covers pull itself."""
+class SpecsBase(Base):
+    """A [specs] fake backend in swarm.toml, its fixture and a mock GitHub (#955, #957)."""
     FIXTURE = HERE / "specs" / "testdata" / "fake_initiative.json"
     INIT = "init-0001-recipe-box"
 
@@ -1818,13 +1817,18 @@ class SpecsPullTest(Base):
         self.gh.open_issue.return_value = {"id": 9001, "number": 101,
                                            "html_url": "https://github.com/o/r/issues/101"}
 
-    def pull(self, goal="#938", dry_run=False):
-        return swarm.specs_pull(self.l, "o/r", goal, self.toml, dry_run, gh=self.gh,
-                                owner=lambda: OWNER)
-
     def feature(self, fid):
         return next(f for f in json.loads(self.fixture.read_text())["features"]
                     if f["properties"]["ID"] == fid)["properties"]
+
+
+class SpecsPullTest(SpecsBase):
+    """`swarm specs pull` (#955): the [specs] backend, the fixture saved back, and refusals.
+    specs/test_sync.py covers pull itself."""
+
+    def pull(self, goal="#938", dry_run=False):
+        return swarm.specs_pull(self.l, "o/r", goal, self.toml, dry_run, gh=self.gh,
+                                owner=lambda: OWNER)
 
     def test_pull_saves_the_fixture_for_the_next_run(self):
         self.assertEqual(self.pull(), 0)
@@ -1882,6 +1886,81 @@ class SpecsPullTest(Base):
             self.assertEqual(swarm.main(["specs", "pull", "#938", "--dry-run", "--repo", "o/r",
                                          "--manifest", str(self.toml)], self.l), 0)
         sp.assert_called_once_with(self.l, "o/r", "#938", str(self.toml), True)
+
+
+class SpecsPushTest(SpecsBase):
+    """`swarm specs push` (#957): the [specs] backend, the lead's model, the fixture saved
+    back, and refusals. specs/test_push.py covers push itself."""
+
+    def setUp(self):
+        super().setUp()
+        from specs import push, snapshot
+        from specs.fake import FakeSource
+        source = FakeSource(self.fixture)
+        source.set_links("FEAT-1", issue_url="https://github.com/o/r/issues/101")
+        source.dump(self.fixture)
+        f = source._features["FEAT-1"]
+        body = snapshot.render(f, source.get_spec("FEAT-1"), "fake",
+                               dt.datetime(2026, 11, 13, tzinfo=dt.timezone.utc))
+        self.gh.sub_issues.return_value = [push.Item(
+            "https://github.com/o/r/issues/101", "CLOSED", body, (),
+            (push.PR(120, "https://github.com/o/r/pull/120", "MERGED", "a" * 40),))]
+        self.toml.write_text(self.toml.read_text().replace(
+            "[specs]", '[[session]]\nrole = "planner"\ncount = 1\nmodel = "lead-model"\n\n[specs]'))
+
+    def push(self, goal="#938", what=(), dry_run=False, model=None):
+        return swarm.specs_push(self.l, "o/r", goal, self.toml, what, dry_run, model,
+                                gh=self.gh, owner=lambda: OWNER)
+
+    def test_push_saves_the_fixture_and_signs_with_the_planner_model(self):
+        self.assertEqual(self.push(what=["FEAT-1=It ships."]), 0)
+        self.gh.sub_issues.assert_called_with("o/r", 938)
+        self.assertEqual(self.feature("FEAT-1")["Status"], "Shipped")
+        self.assertEqual(self.feature("FEAT-1")["PR"], "https://github.com/o/r/pull/120")
+        f = next(x for x in json.loads(self.fixture.read_text())["features"]
+                 if x["properties"]["ID"] == "FEAT-1")
+        self.assertEqual(len(f["comments"]), 1)
+        self.assertTrue(f["comments"][0]["body"].endswith("-- lead (lead-model)"))
+        before = self.fixture.read_text()
+        self.assertEqual(self.push(what=["FEAT-1=It ships."]), 0)
+        self.assertEqual(self.fixture.read_text(), before)
+
+    def test_model_flag_wins(self):
+        self.assertEqual(self.push(what=["FEAT-1=It ships."], model="other"), 0)
+        f = next(x for x in json.loads(self.fixture.read_text())["features"]
+                 if x["properties"]["ID"] == "FEAT-1")
+        self.assertTrue(f["comments"][0]["body"].endswith("-- lead (other)"))
+
+    def test_dry_run_leaves_the_fixture(self):
+        before = self.fixture.read_text()
+        self.assertEqual(self.push(what=["FEAT-1=It ships."], dry_run=True), 0)
+        self.assertEqual(self.fixture.read_text(), before)
+
+    def test_bad_what_shipped(self):
+        self.assertEqual(self.push(what=["FEAT-1"]), 1)
+        self.assertIn("swarm specs push: --what-shipped takes FEAT-n=", self.lines[-1])
+
+    def test_refusal(self):
+        self.gh.goal.return_value["author"] = {"login": "someone", "__typename": "User"}
+        before = self.fixture.read_text()
+        self.assertEqual(self.push(), 1)
+        self.assertIn("swarm specs push: refused: o/r#938 was opened by someone", self.lines[-1])
+        self.assertEqual(self.fixture.read_text(), before)
+
+    def test_no_planner_and_no_model(self):
+        self.toml.write_text('[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n\n'
+                             '[specs]\nbackend = "fake"\nfixture = "fixture.json"\n')
+        self.assertEqual(self.push(), 1)
+        self.assertIn("planner isn't in", self.lines[-1])
+
+    def test_main_routes_to_specs_push(self):
+        with mock.patch.object(swarm, "specs_push", return_value=0) as sp:
+            self.assertEqual(swarm.main(["specs", "push", "#938", "--what-shipped", "FEAT-1=a",
+                                         "--what-shipped", "FEAT-2=b", "--model", "x",
+                                         "--repo", "o/r", "--manifest", str(self.toml)],
+                                        self.l), 0)
+        sp.assert_called_once_with(self.l, "o/r", "#938", str(self.toml), ["FEAT-1=a", "FEAT-2=b"],
+                                   False, "x")
 
 
 if __name__ == "__main__":
