@@ -1794,9 +1794,8 @@ class SnapshotTest(unittest.TestCase):
         self.assertTrue(self.actions_calls(lambda: g.fetch("o/r", now, days=1, with_actions=True)))
 
 
-class SpecsPullTest(Base):
-    """`swarm specs pull` (#955): the [specs] backend, the fixture saved back, and refusals.
-    specs/test_sync.py covers pull itself."""
+class SpecsBase(Base):
+    """A home with the fake fixture, a swarm.toml naming it, and a stub GitHub with the Goal."""
     FIXTURE = HERE / "specs" / "testdata" / "fake_initiative.json"
     INIT = "init-0001-recipe-box"
 
@@ -1817,6 +1816,11 @@ class SpecsPullTest(Base):
             "userContentEdits": {"totalCount": 0, "nodes": []}}
         self.gh.open_issue.return_value = {"id": 9001, "number": 101,
                                            "html_url": "https://github.com/o/r/issues/101"}
+
+
+class SpecsPullTest(SpecsBase):
+    """`swarm specs pull` (#955): the [specs] backend, the fixture saved back, and refusals.
+    specs/test_sync.py covers pull itself."""
 
     def pull(self, goal="#938", dry_run=False):
         return swarm.specs_pull(self.l, "o/r", goal, self.toml, dry_run, gh=self.gh,
@@ -1882,6 +1886,84 @@ class SpecsPullTest(Base):
             self.assertEqual(swarm.main(["specs", "pull", "#938", "--dry-run", "--repo", "o/r",
                                          "--manifest", str(self.toml)], self.l), 0)
         sp.assert_called_once_with(self.l, "o/r", "#938", str(self.toml), True)
+
+
+class SpecsDiffTest(SpecsBase):
+    """`swarm specs diff` (#956): the [specs] backend, routing and refusals.
+    specs/test_drift.py covers diff and the decisions themselves."""
+
+    def setUp(self):
+        super().setUp()
+        from specs import snapshot, sync
+        from specs.fake import FakeSource
+        src = FakeSource(self.fixture)
+        when = dt.datetime(2026, 11, 5, tzinfo=dt.timezone.utc)
+        body = sync.issue_body(snapshot.render(src._features["FEAT-1"], src._specs["FEAT-1"],
+                                               "fake", when), "o/r#938")
+        self.gh.sub_issues.return_value = [{"id": 5101, "number": 101, "state": "open",
+                                            "body": body,
+                                            "html_url": "https://github.com/o/r/issues/101"}]
+        self.gh.open_goals.return_value = [938]
+        self.gh.open_prs_closing.return_value = []
+
+    def diff(self, goal="#938", as_json=False, decision=None):
+        return swarm.specs_diff(self.l, "o/r", goal, self.toml, as_json, decision, gh=self.gh,
+                                owner=lambda: OWNER)
+
+    def edit_feat1(self):
+        data = json.loads(self.fixture.read_text())
+        data["features"][0]["last_edited_time"] = "2026-11-10T00:00:00Z"
+        data["features"][0]["spec"]["Scope"] = "Paste a URL or a photo."
+        self.fixture.write_text(json.dumps(data))
+
+    def test_unchanged(self):
+        self.assertEqual(self.diff(), 0)
+        self.gh.sub_issues.assert_called_with("o/r", 938)
+        self.assertIn("0 changed, 1 unchanged", self.lines[-1])
+
+    def test_every_goal(self):
+        self.assertEqual(self.diff(goal=None), 0)
+        self.gh.open_goals.assert_called_with("o/r", OWNER)
+        self.assertIn("Goal o/r#938", self.lines[-1])
+
+    def test_changed_json(self):
+        self.edit_feat1()
+        self.assertEqual(self.diff(as_json=True), 0)
+        data = json.loads(self.lines[-1])
+        self.assertEqual(data["goals"][0]["changes"][0]["sections"], ["Scope"])
+
+    def test_adopt(self):
+        self.edit_feat1()
+        before = self.fixture.read_text()
+        self.assertEqual(self.diff(decision=("adopt", "FEAT-1")), 0)
+        self.gh.edit_body.assert_called_once()
+        self.assertEqual(self.gh.comment.call_count, 1)
+        self.assertEqual(self.fixture.read_text(), before)     # the source is never written
+        self.assertIn("adopted FEAT-1", self.lines[-1])
+
+    def test_decision_without_a_change_is_refused(self):
+        self.assertEqual(self.diff(decision=("defer", "FEAT-1")), 1)
+        self.assertIn("refused: FEAT-1's spec hasn't changed", self.lines[-1])
+        self.gh.open_issue.assert_not_called()
+
+    def test_decision_needs_a_goal(self):
+        self.assertEqual(self.diff(goal=None, decision=("ask", "FEAT-1")), 2)
+        self.assertIn("--ask needs the Goal", self.lines[-1])
+
+    def test_refusal(self):
+        self.gh.goal.return_value["author"] = {"login": "someone", "__typename": "User"}
+        self.assertEqual(self.diff(), 1)
+        self.assertIn("swarm specs diff: refused: o/r#938 was opened by someone", self.lines[-1])
+
+    def test_main_routes_to_specs_diff(self):
+        with mock.patch.object(swarm, "specs_diff", return_value=0) as sd:
+            self.assertEqual(swarm.main(["specs", "diff", "#938", "--defer", "FEAT-2", "--repo",
+                                         "o/r", "--manifest", str(self.toml)], self.l), 0)
+        sd.assert_called_once_with(self.l, "o/r", "#938", str(self.toml), False, ("defer", "FEAT-2"))
+        with mock.patch.object(swarm, "specs_diff", return_value=0) as sd:
+            swarm.main(["specs", "diff", "--json", "--repo", "o/r", "--manifest", str(self.toml)],
+                       self.l)
+        sd.assert_called_once_with(self.l, "o/r", None, str(self.toml), True, None)
 
 
 if __name__ == "__main__":
