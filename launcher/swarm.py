@@ -36,6 +36,11 @@
                                     write each linked feature's status, Issue and PR links
                                     and one delivery comment per merged PR back to the
                                     source (#957; specs/push.py)
+    launcher/swarm specs diff [<goal>] [--json]
+    launcher/swarm specs diff <goal> --adopt FEAT-n | --defer FEAT-n | --ask FEAT-n
+                                    specs edited since their snapshot was pulled, under the
+                                    Goal or every linked one, and the lead's decision on one
+                                    (#956; specs/drift.py)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
 unchanged, in a new Terminal window: the owner's answer on #43.
@@ -2051,7 +2056,7 @@ def launch(launcher: Launcher, role: str, n: int, model: str, *, repo: str, forc
     return 0 if launcher.start(entry, live, dry_run) else 1
 
 
-# ---------------------------------------------------------------- specs bridge (#955, #937)
+# ---------------------------------------------------------------- specs bridge (#955, #956, #937)
 
 SPECS_GOAL_QUERY = (
     "query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { "
@@ -2066,6 +2071,15 @@ SPECS_SUB_ISSUES_QUERY = (
     "closedByPullRequestsReferences(first: 10, includeClosedPrs: true) { totalCount nodes { "
     "number url state headRefOid reviews(last: 50) { nodes { author { login __typename } "
     "state commit { oid } } } } } } } } } }")
+SPECS_GOALS_QUERY = (
+    "query($owner: String!, $name: String!, $author: String!, $after: String) { "
+    "repository(owner: $owner, name: $name) { issues(first: 100, after: $after, states: OPEN, "
+    "filterBy: {createdBy: $author}) { nodes { number issueType { name } } "
+    "pageInfo { hasNextPage endCursor } } } }")
+SPECS_CLOSING_PRS_QUERY = (
+    "query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { "
+    "issue(number: $n) { closedByPullRequestsReferences(first: 50, includeClosedPrs: false) { "
+    "nodes { number state repository { nameWithOwner } } } } } }")
 
 
 class GhSpecs:
@@ -2084,6 +2098,47 @@ class GhSpecs:
     def add_sub_issue(self, repo: str, n: int, sub_issue_id: int) -> None:
         dashboard().gh_json("api", "-X", "POST", f"repos/{repo}/issues/{n}/sub_issues",
                             "-F", f"sub_issue_id={sub_issue_id}")
+
+    # specs/drift.py's reads and writes (#956)
+
+    def open_goals(self, repo: str, owner: str) -> list[int]:
+        owner_name, name = repo.split("/", 1)
+        out, after = [], None
+        while True:
+            args = ["api", "graphql", "-f", f"query={SPECS_GOALS_QUERY}", "-f", f"owner={owner_name}",
+                    "-f", f"name={name}", "-f", f"author={owner}"]
+            if after:
+                args += ["-f", f"after={after}"]
+            issues = dashboard().gh_json(*args)["data"]["repository"]["issues"]
+            out += [i["number"] for i in issues["nodes"]
+                    if (i.get("issueType") or {}).get("name") == "Goal"]
+            if not issues["pageInfo"]["hasNextPage"]:
+                return out
+            after = issues["pageInfo"]["endCursor"]
+
+    def sub_issues_rest(self, repo: str, n: int) -> list[dict]:
+        return dashboard().gh_items(f"repos/{repo}/issues/{n}/sub_issues?per_page=100")
+
+    def edit_body(self, repo: str, n: int, body: str) -> None:
+        dashboard().gh_json("api", "-X", "PATCH", f"repos/{repo}/issues/{n}", "-f", f"body={body}")
+
+    def comment(self, repo: str, n: int, body: str) -> None:
+        dashboard().gh_json("api", "-X", "POST", f"repos/{repo}/issues/{n}/comments",
+                            "-f", f"body={body}")
+
+    def open_prs_closing(self, repo: str, n: int) -> list[tuple[str, int]]:
+        owner, name = repo.split("/", 1)
+        d = dashboard().gh_json("api", "graphql", "-f", f"query={SPECS_CLOSING_PRS_QUERY}",
+                                "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"n={n}")
+        nodes = d["data"]["repository"]["issue"]["closedByPullRequestsReferences"]["nodes"]
+        return [(p["repository"]["nameWithOwner"], p["number"]) for p in nodes
+                if p.get("state") == "OPEN"]
+
+    def add_blocked_by(self, repo: str, n: int, blocking_id: int) -> None:
+        dashboard().gh_json("api", "-X", "POST", f"repos/{repo}/issues/{n}/dependencies/blocked_by",
+                            "-F", f"issue_id={blocking_id}")
+
+    # specs/push.py's read (#957)
 
     def sub_issues(self, repo: str, n: int) -> list:
         from specs import push
@@ -2170,6 +2225,47 @@ def specs_push(launcher: Launcher, repo: str, goal: str, manifest_path: Path | s
     finally:
         if not dry_run and getattr(source, "writes", None) and cfg.fixture:
             source.dump(cfg.fixture)
+    return 0
+
+
+def specs_diff(launcher: Launcher, repo: str, goal: str | None, manifest_path: Path | str,
+               as_json: bool = False, decision: tuple[str, str] | None = None, gh=None,
+               owner: Callable[[], str] = owner_login) -> int:
+    """`swarm specs diff [<goal>]` and its decisions (#956): the backend from swarm.toml's
+    [specs] (#952), then drift.diff, or drift.decide for `decision` ((choice, FEAT-n))."""
+    from specs import config as specs_config, drift, sync
+    from specs.source import SchemaError
+    try:
+        target = None
+        if goal is not None:
+            goal_repo, n = parse_ref(goal, repo)
+            target = (goal_repo or repo, n)
+        if decision and target is None:
+            launcher.out(f"swarm specs diff: --{decision[0]} needs the Goal")
+            return 2
+        cfg = specs_config.load(manifest_path)
+        if cfg is None:
+            launcher.out(f"swarm specs diff: {manifest_path} has no [specs] table")
+            return 1
+        source = specs_config.source(cfg)
+    except (ValueError, SchemaError) as e:   # SpecsConfigError is a ValueError
+        launcher.out(f"swarm specs diff: {e}")
+        return 1
+    gh = gh or GhSpecs()
+    try:
+        if decision:
+            drift.decide(target, decision[1], decision[0], source, gh, owner=owner(),
+                         backend=cfg.backend, out=launcher.out)
+        else:
+            drift.diff(target, source, gh, owner=owner(), repo=repo, backend=cfg.backend,
+                       as_json=as_json, out=launcher.out)
+    except (sync.Refused, drift.Undecidable) as e:
+        launcher.out(f"swarm specs diff: refused: {e}")
+        return 1
+    except SchemaError as e:
+        launcher.out(f"swarm specs diff: stopped, nothing written: the {cfg.backend} source's "
+                     f"layout doesn't match #937 §6: {e}")
+        return 1
     return 0
 
 
@@ -2279,6 +2375,19 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                         help="print what would be written; write nothing to the source")
     p_push.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_push.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_diff = specs_sub.add_parser("diff", help="specs edited since their snapshot was pulled, and "
+                                               "the lead's decision on one (#956)")
+    p_diff.add_argument("goal", nargs="?", help="the Goal: N or #N (this repo), or owner/name#N; "
+                                                "default: every open Goal with a Spec source line")
+    p_diff.add_argument("--json", action="store_true", help="print the drift as JSON")
+    decide = p_diff.add_mutually_exclusive_group()
+    for choice, what in (("adopt", "replace the snapshot (open issue) or open a new sub-issue "
+                                   "(closed issue)"),
+                         ("defer", "open a follow-up sub-issue that waits on the issue"),
+                         ("ask", "print the ask for the lead's report; write nothing on GitHub")):
+        decide.add_argument(f"--{choice}", metavar="FEAT-n", help=what)
+    p_diff.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
+    p_diff.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_backup = sub.add_parser("backup", help="copy swarm.db consistently, for the nightly timer")
     p_backup.add_argument("--out", help=f"default: backups/swarm-<UTC time>.db, keeping the newest "
                                         f"{statedb.KEEP_BACKUPS}")
@@ -2347,6 +2456,10 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
         if args.cmd == "specs" and args.specs_cmd == "push":
             return specs_push(launcher, repo, args.goal, args.manifest, args.what_shipped,
                               args.dry_run, args.model)
+        if args.cmd == "specs" and args.specs_cmd == "diff":
+            decision = next(((c, getattr(args, c)) for c in ("adopt", "defer", "ask")
+                             if getattr(args, c)), None)
+            return specs_diff(launcher, repo, args.goal, args.manifest, args.json, decision)
         if args.cmd == "specs":
             return specs_pull(launcher, repo, args.goal, args.manifest, args.dry_run)
         if args.cmd == "up":

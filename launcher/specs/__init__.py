@@ -7,4 +7,5 @@
 `config.py` reads swarm.toml's `[specs]` table and builds the backend it names (#952).
 `sync.py` is `swarm specs pull`: Ready features become sub-issues under the Goal (#955).
 `push.py` is `swarm specs push`: status, links and delivery comments go back to the source (#957).
+`drift.py` is `swarm specs diff`: specs edited since their snapshot, and the lead's decisions (#956).
 """
