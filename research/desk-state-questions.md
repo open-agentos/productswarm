@@ -1,52 +1,59 @@
-# Brief: the state questions the Desk must answer, per Goal and Area
+# The Desk's state questions
 
-**Question (#888):** what must the Desk answer alone, for each open Goal and Area, and which field of `swarm trouble --json` (rendered by the trouble panel, `desk.trouble_panel()`, #889/PR #902) answers each one today?
-**For:** M3 (#685), criterion 1. **Written:** 2026-11-12. **By:** builder.
+**User and job.** The owner, as the C-team, at the desk or on a phone between meetings, wants the department's state from the Desk alone, without opening Claude Code, a terminal or a chat with an agent (M3 #685; M5's draft criterion in #760). They ask the same questions of every open Goal and Area they opened.
 
-The owner's call-in asked the designer to write this Brief as a comment on #888. No designer comment had appeared by the time the owner made #888 `ready`, so the builder wrote it from the merged code. The designer or owner can correct any question with a follow-up PR.
-
-## The point first
-
-#760's four questions hold, and `swarm trouble --json` answers all four per Goal and Area. Two gaps remain:
-
-1. **"Who is on what"**, which M3's own text lists, has no field. `swarm trouble` reads the running sessions only to flag quiet ones (rule 5), and never reports them.
-2. **The panel isn't served.** `trouble_panel()` is merged but no Desk page calls it (PR #902, "Not in this PR"). Until a page does, none of these questions can be answered "from the Desk alone", even where the field exists.
-
-Several questions are answered only in part. Each is marked below.
-
-## How to read the table
-
-Paths are into the dict `trouble.report()` returns (`swarm trouble --json`). `scopes[]` holds one entry per open Goal or Area the owner opened. `outside` has the same `stuck`/`waiting`/`authority` lists for items under no Goal or Area. Each item in those lists has `kind`, `ref`, `url`, `reason`, `since`, `age_hours`. "Panel" is the part of `trouble_panel()` that shows the field.
+**Source.** The trouble panel is `desk.trouble_panel()` (#902). It renders `swarm trouble --json` (`launcher/trouble.py`), and the desk's index page carries it (#903). Field names below are that JSON's: `scopes[]` holds one entry per Goal and Area, and `outside` holds the items under none. Every "today" figure comes from a live `swarm trouble --json` at 2026-11-12 22:08 UTC.
 
 ## The questions
 
-| # | Question, per Goal and Area | Field today | Panel | Answered? |
+The list has eight questions. The test for criterion 2 checks Q1–Q7 against a fixture, so each of those needs a field. Q0 is the reader's trust check.
+
+| # | Question, in the owner's words | Field that answers it | Panel today | Status |
 |---|---|---|---|---|
-| 1 | Which Goals and Areas are open, and what is each one for? | `scopes[].ref`, `.type`, `.title`, `.url` | scope heading | **Yes** |
-| 2 | How does each criterion of its done test stand? | `scopes[].progress[]`: `criterion`, `status` (`met`, `progress`, `failing`, `counted`, `unmeasured`), `detail` | Progress | **Yes** |
-| 3 | Which criteria are unmeasured? | `scopes[].progress[]` where `status == "unmeasured"` | Progress ("unmeasured: not known to be on track") | **Yes.** No separate count; the reader scans the list |
-| 4 | Has its date passed? | `scopes[].date`, `scopes[].date_missed` | heading (MISSED) | **Yes** |
-| 5 | What is stuck, why will nothing start it, and since when? | `scopes[].stuck[]`: `kind` is the rule (`changes-no-restart`, `merged-issue-open`, `waits-on-unplanned`, `unheard-command`, `conflict`, `quiet-session`, `stopped-no-issue`), `reason` says why nothing will start it, `since`, `age_hours` | Stuck | **Yes, for the seven rules.** A stall that fits none of them isn't flagged |
-| 6 | What waits on the owner, and for how long? | `scopes[].waiting[]`: `kind` (`pr`, `question`), `reason`, `since`, `age_hours`; untriaged issues are always in `outside.waiting[]` (`kind: untriaged`) | Waiting on the owner | **Yes.** Not read: asks in the daily report, and `decide` calls under `jurisdictions.yml` (trouble.py "Limits"). A PR the merger hasn't judged at head yet isn't listed |
-| 7 | What was done on the owner's authority, and when? | `scopes[].authority[]`: `kind` `grant` (merger merges under GOV-0027) or `call-in` (a swarm App's `Call in:`); window is `authority_hours` | On the owner's authority, last Nh | **In part.** Only merger merges and App call-ins. Not covered: issues the planner opens or closes under a Goal or Area (GOV-0031, GOV-0041), `[daily]` reports, `decide` calls, and any act older than the window |
-| 8 | Who is on what? | none. `Data.sessions` is read for rule 5 only and isn't in the output | none | **No.** Gap |
-| 9 | What has it spent? | `scopes[].spend_usd`; totals in `spend` | none | **In the JSON, not on the panel.** Reported only (GOV-0033) |
-| 10 | What couldn't be read? | `errors[]` | "not read: …" | **Yes** |
-| 11 | What is in trouble under no Goal or Area? | `outside.stuck[]`, `outside.waiting[]`, `outside.authority[]` | "Under no Goal or Area" | **Yes** |
+| Q0 | Is this current, and was everything read? | `generated_at`, `errors[]` | subtitle "from swarm trouble at …"; "not read: …" lines | answered |
+| Q1 | How far along is each criterion of the done test? | `scopes[].progress[]`: `criterion`, `status` (`met` / `progress` / `failing` / `counted` / `unmeasured`), `detail` | Progress | answered, but mostly `unmeasured` (see Q1a) |
+| Q1a | Which criteria have no measure? | `progress[].status == "unmeasured"` | each line reads "unmeasured: not known to be on track" | answered line by line; no count |
+| Q1b | Has a date passed? | `scopes[].date`, `date_missed` | "date … MISSED" in the heading | answered (no open Goal has a date today: all are "when ready") |
+| Q2 | What is stuck, and why will nothing start it? | `scopes[].stuck[]`: `kind` (the rule), `ref`, `url`, `reason`, `since`, `age_hours` | Stuck | answered |
+| Q3 | What waits on me, and for how long? | `scopes[].waiting[]`: `kind`, `ref`, `url`, `reason`, `since`, `age_hours` | Waiting on the owner | answered, except the daily report's asks (see gaps) |
+| Q4 | What was done on my authority? | `scopes[].authority[]` (`grant`, `call-in`), window `authority_hours` | On the owner's authority, last 24h | **wrong today**: always empty (#977) |
+| Q5 | Who is on what? | none in `swarm trouble` | none in the trouble panel | **gap**: the desk's floor (`floor.py`) shows sessions, but not per Goal or Area |
+| Q6 | What is happening outside my plan? | `outside.stuck`, `outside.waiting`, `outside.authority` | "Under no Goal or Area" | answered |
 
-Questions 1–7 and 11 are #760's four (2/3/4 progress, 5 stuck, 6 waiting, 7 authority) plus the "unmeasured" ask in #888, laid out per Goal and Area. Question 8 is from M3's own text ("who is on what"). Questions 9 and 10 are what the JSON already carries.
+Spend is left out on purpose. GOV-0033 sets no engine total and the desk is public, so `spend_usd` and `spend` never appear on the Desk.
 
-## What this confirms or corrects about #760's four
+## What the record shows, question by question
 
-- **Confirmed:** progress per criterion, stuck with the reason nothing will start it, waiting on the owner with its age. The panel shows all three per scope.
-- **Corrected, narrower than it reads:** "what was done on my authority" covers only merges and call-ins today (question 7). The panel heading says "last Nh", so it doesn't claim more, but the owner should not read an empty list as "nothing was done".
-- **Added:** "who is on what" (question 8). M3's criterion text lists it, and nothing answers it yet.
+**Q1. Progress.** 23 criteria across 5 Goals and 1 Area. 1 is `met` (M1 #683: "[daily] started the report for Thu 2026-11-12"), 1 is `counted` (M4 #686's acts), and **21 are `unmeasured`**. The panel is honest that they aren't known to be on track. It still can't answer the owner's real question, "is this Goal close?" Most criteria are "shown once" (GOV-0040), so the cheapest measure is a ticked box, which `trouble.criteria()` already reads as `met`. Two changes would fix it:
+- The lead ticks a criterion's box when it is shown, with a link to the showing on the same line. The panel then shows `met` with that link as the `detail`, instead of "ticked".
+- On the desk build, M4's acts criterion may read `unmeasured`. The desk builds trouble without the acts sync (#903), so `owner_days` is unread there. Worth a check in the fixture test.
 
-## Gaps, for the planner to turn into Tasks if wanted
+**Q1a. Unmeasured.** Each line is labelled, but there is no count. Put the count in the Progress heading, in these words: **"Progress: 1 of 3 met · 2 unmeasured"**. The Commissions page's bar already counts met of total. Use the same count on both.
 
-1. Serve the trouble panel on a Desk page (PR #902's "Not in this PR": running `swarm trouble` during the Desk build touches swarm.db and the host's token, so it may need an architecture or security question first).
-2. Report who is on what: running sessions (hand-started and loop-started) with role, issue or PR, and start time, filed per Goal and Area.
-3. Widen "on the owner's authority" past merges and call-ins, or say on the panel what it leaves out.
-4. Show `spend_usd` on the panel (reported only, never flagged, GOV-0033).
+**Q2. Stuck.** All six rules and the fourth signal file here with a reason. Today: #903 under M3, and #953 and #954 under M6 #938, each `merged-issue-open`. #953 and #954 were flagged 25 minutes after their PRs merged. Those are real, not noise, because the merger's merges still leave issues open (#760 replay 2). The reason line answers "why nothing will start it" in plain words. Keep it.
 
-M3's criterion 2 (a fixture test of this list) is partly met by `TroublePanelTest` (PR #902) for questions 2, 5 and 6. Questions 8 and the served page have no test because they have no code.
+**Q3. Waits on me.** Today: PR #964 and PR #947 under M6, both "the merger left it for the owner: … over [merger] max_changed_lines 500". Outside the plan: #751, #760, #908 and #909 untriaged (#751 and #760 for 34h), and the gov:question #936. Ages show. The gap: asks in the daily report aren't read (trouble.py's Limits), so an ask made only there doesn't show. The Bridge reads them (#928), so the two pages disagree.
+
+**Q4. My authority.** The merger merged 13 PRs in the 24h before the reading, but every `authority[]` was empty. Cause: `gh` returns `app/productswarm-merger`, and `trouble.py` compares that with `productswarm-merger` (#977). Until that is fixed, the panel tells the owner the grants are unused, which is the opposite of the truth. The fixture test should use the login as `gh` returns it. Also not read: approved asks and `decide` calls under `jurisdictions.yml` (trouble.py's Limits). The panel should say so where it lists authority, in these words: **"Counts merges by the merger and call-ins by agents; approved asks and role decisions aren't counted yet."**
+
+**Q5. Who is on what.** M3's criterion text lists it, and #760's four don't. `swarm trouble` has no session or role field except `quiet-session`, which shows only a hand-started session that has gone quiet. The desk's floor shows sessions, but not under the Goal or Area they serve. Proposed field: `scopes[].working[]`, with `role`, `ref`, `since` and `started_by` (`watch` or `hand`), filed under the Goal or Area by the same `goal_of()` rule. Proposed panel words: **"Working now: builder on #951 (since 21:40)"**, or **"Working now: nobody"**.
+
+**Q6. Outside the plan.** Today: 1 stuck (#812) and 5 waiting. This is where untriaged issues land, so it answers "what isn't in my plan?" Keep it last.
+
+## Gaps to open as Tasks under M3
+
+1. #977: count the merger's merges (Q4). Opened.
+2. `working[]` per scope (Q5).
+3. A per-scope count in the Progress heading (Q1a).
+4. A `detail` that links to the showing when a criterion is ticked (Q1).
+5. The authority caveat line (Q4).
+6. The daily report's asks under `waiting` (Q3), or a line saying they're on the Bridge.
+
+## How we'll know it worked
+
+- **Criterion 2's test.** One fixture state answers Q0–Q6: each question's field holds at least one item, plus a merger merge with the `app/` login, a stalled PR, a question waiting 7 days and a failed Area target. The test asserts that each question's panel words appear.
+- **UX measure: "unmeasured share".** Unmeasured criteria over all open criteria, from `swarm trouble --json`. **Baseline: 21 of 23 (91%), 2026-11-12 22:08 UTC.** It should fall as Goals are shown and ticked. A Desk that is 91% "unmeasured" can't answer Q1 alone, whatever the layout.
+- **UX measure: "went around the Desk".** Days the owner asked an agent a state question (an `Ask:` or a Claude Code session whose prompt is about state) per working week. No baseline yet: the record doesn't tag a state question. **Research question:** for one week, the owner adds `(state)` to any `Ask:` that asks about state. Cost: one word per ask.
+
+-- designer (claude-opus-5-5)
+
