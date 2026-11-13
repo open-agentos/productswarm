@@ -46,7 +46,7 @@ class StubGitHub:
     def open_goals(self, repo, owner):
         return sorted(self.goals)
 
-    def sub_issues(self, repo, n):
+    def sub_issues_rest(self, repo, n):
         return [dict(self.issues[i]) for i in self.subs.get(n, [])]
 
     def open_issue(self, repo, title, body):

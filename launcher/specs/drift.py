@@ -50,7 +50,7 @@ class GitHub(sync.GitHub, Protocol):
         """The numbers of repo's open issues of type Goal that `owner` opened."""
         ...
 
-    def sub_issues(self, repo: str, n: int) -> list[dict]:
+    def sub_issues_rest(self, repo: str, n: int) -> list[dict]:
         """repo#n's sub-issues as REST gives them: `id`, `number`, `state`, `body`, `html_url`."""
         ...
 
@@ -74,7 +74,7 @@ class Check:
     """One feature's latest snapshot under the Goal, checked against the live spec."""
 
     feature_id: str
-    issue: dict                          # the sub-issue, as `sub_issues` gives it
+    issue: dict                          # the sub-issue, as `sub_issues_rest` gives it
     repo: str                            # the sub-issue's owner/name
     snap: snapshot.Snapshot
     feature: Optional[Feature] = None    # None when the source no longer has it
@@ -175,7 +175,7 @@ def check(goal: tuple[str, int], source: SpecSource, gh: GitHub, *, owner: str,
     out = GoalDrift(ref, backend, initiative)
 
     latest: dict[str, Check] = {}
-    for issue in gh.sub_issues(*goal):
+    for issue in gh.sub_issues_rest(*goal):
         repo = _repo_of(issue, goal[0])
         try:
             snap = snapshot.parse(issue.get("body") or "")
