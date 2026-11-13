@@ -32,6 +32,10 @@
                                     open a sub-issue under the Goal for each Ready feature of
                                     the initiative its `Spec source:` line links, from the
                                     [specs] backend in swarm.toml (#955; specs/sync.py)
+    launcher/swarm specs push <goal> [--what-shipped FEAT-n=TEXT ...] [--dry-run]
+                                    write each linked feature's status, Issue and PR links
+                                    and one delivery comment per merged PR back to the
+                                    source (#957; specs/push.py)
 
 Each session runs `ops/swarm-session <role> --model <model> --session-id <uuid> <opener>`,
 unchanged, in a new Terminal window: the owner's answer on #43.
@@ -2054,6 +2058,15 @@ SPECS_GOAL_QUERY = (
     "issue(number: $n) { state body author { login __typename } issueType { name } "
     "userContentEdits(first: 100) { totalCount nodes { editor { login __typename } } } } } }")
 
+# The Goal's sub-issues with the PRs that close them and their reviews (specs/push.py).
+SPECS_SUB_ISSUES_QUERY = (
+    "query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { "
+    "issue(number: $n) { subIssues(first: 100) { totalCount nodes { url state body "
+    "labels(first: 50) { nodes { name } } "
+    "closedByPullRequestsReferences(first: 10, includeClosedPrs: true) { totalCount nodes { "
+    "number url state headRefOid reviews(last: 50) { nodes { author { login __typename } "
+    "state commit { oid } } } } } } } } } }")
+
 
 class GhSpecs:
     """specs/sync.py's GitHub, through the gh CLI as the session's App."""
@@ -2072,32 +2085,86 @@ class GhSpecs:
         dashboard().gh_json("api", "-X", "POST", f"repos/{repo}/issues/{n}/sub_issues",
                             "-F", f"sub_issue_id={sub_issue_id}")
 
+    def sub_issues(self, repo: str, n: int) -> list:
+        from specs import push
+        owner, name = repo.split("/", 1)
+        d = dashboard().gh_json("api", "graphql", "-f", f"query={SPECS_SUB_ISSUES_QUERY}",
+                                "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"n={n}")
+        return push.items_from_graphql(
+            (((d or {}).get("data") or {}).get("repository") or {}).get("issue"))
+
+
+def _specs_backend(launcher: Launcher, cmd: str, repo: str, goal: str,
+                   manifest_path: Path | str):
+    """((owner/name, N), [specs] config, its SpecSource) for `swarm specs <cmd>`, or None
+    after saying why."""
+    from specs import config as specs_config
+    from specs.source import SchemaError
+    try:
+        goal_repo, n = parse_ref(goal, repo)
+        cfg = specs_config.load(manifest_path)
+        if cfg is None:
+            launcher.out(f"swarm specs {cmd}: {manifest_path} has no [specs] table")
+            return None
+        return (goal_repo or repo, n), cfg, specs_config.source(cfg)
+    except (ValueError, SchemaError) as e:   # SpecsConfigError is a ValueError
+        launcher.out(f"swarm specs {cmd}: {e}")
+        return None
+
 
 def specs_pull(launcher: Launcher, repo: str, goal: str, manifest_path: Path | str,
                dry_run: bool = False, gh=None, owner: Callable[[], str] = owner_login) -> int:
     """`swarm specs pull <goal>`: the backend from swarm.toml's [specs] (#952), then sync.pull.
     A fake backend's state is saved back to its fixture after a real run, so the next manual
     run carries on from it, even if the run stopped part-way."""
-    from specs import config as specs_config, sync
+    from specs import sync
     from specs.source import SchemaError
-    try:
-        goal_repo, n = parse_ref(goal, repo)
-        cfg = specs_config.load(manifest_path)
-        if cfg is None:
-            launcher.out(f"swarm specs pull: {manifest_path} has no [specs] table")
-            return 1
-        source = specs_config.source(cfg)
-    except (ValueError, SchemaError) as e:   # SpecsConfigError is a ValueError
-        launcher.out(f"swarm specs pull: {e}")
+    loaded = _specs_backend(launcher, "pull", repo, goal, manifest_path)
+    if loaded is None:
         return 1
+    goal_ref, cfg, source = loaded
     try:
-        sync.pull((goal_repo or repo, n), source, gh or GhSpecs(), dry_run=dry_run,
+        sync.pull(goal_ref, source, gh or GhSpecs(), dry_run=dry_run,
                   owner=owner(), backend=cfg.backend, out=launcher.out)
     except sync.Refused as e:
         launcher.out(f"swarm specs pull: refused: {e}")
         return 1
     except SchemaError as e:
         launcher.out(f"swarm specs pull: stopped, nothing written: the {cfg.backend} source's "
+                     f"layout doesn't match #937 §6: {e}")
+        return 1
+    finally:
+        if not dry_run and getattr(source, "writes", None) and cfg.fixture:
+            source.dump(cfg.fixture)
+    return 0
+
+
+def specs_push(launcher: Launcher, repo: str, goal: str, manifest_path: Path | str,
+               what_shipped=(), dry_run: bool = False, model: str | None = None, gh=None,
+               owner: Callable[[], str] = owner_login) -> int:
+    """`swarm specs push <goal>`: the backend from swarm.toml's [specs] (#952), then push.push.
+    The delivery comment ends `-- lead (<model>)`: --model, else the planner's model in the
+    manifest. A fake backend's state is saved back to its fixture after a real run."""
+    from specs import push, sync
+    from specs.source import SchemaError
+    try:
+        paragraphs = push.parse_what_shipped(what_shipped)
+        model = model_for("planner", model, str(manifest_path))
+    except (ValueError, LookupError, manifest.ManifestError) as e:
+        launcher.out(f"swarm specs push: {e}")
+        return 1
+    loaded = _specs_backend(launcher, "push", repo, goal, manifest_path)
+    if loaded is None:
+        return 1
+    goal_ref, cfg, source = loaded
+    try:
+        push.push(goal_ref, source, gh or GhSpecs(), paragraphs, dry_run, owner=owner(),
+                  model=model, backend=cfg.backend, out=launcher.out)
+    except sync.Refused as e:
+        launcher.out(f"swarm specs push: refused: {e}")
+        return 1
+    except SchemaError as e:
+        launcher.out(f"swarm specs push: stopped, nothing written: the {cfg.backend} source's "
                      f"layout doesn't match #937 §6: {e}")
         return 1
     finally:
@@ -2200,6 +2267,18 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
                         help="print what would happen; write nothing to GitHub or the source")
     p_pull.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
     p_pull.add_argument("--repo", help="owner/name (default: this checkout's origin)")
+    p_push = specs_sub.add_parser("push", help="write each linked feature's status, links and "
+                                               "delivery comments back to the source (#957)")
+    p_push.add_argument("goal", help="the Goal: N or #N (this repo), or owner/name#N")
+    p_push.add_argument("--what-shipped", action="append", default=[], metavar="FEAT-n=TEXT",
+                        help="the lead's one-paragraph 'what shipped' for a merged feature "
+                             "(repeatable); a merge without one gets no comment yet")
+    p_push.add_argument("--model", help="the lead's model, for the comment's '-- lead (<model>)' "
+                                        "(default: the planner's in the manifest)")
+    p_push.add_argument("--dry-run", action="store_true",
+                        help="print what would be written; write nothing to the source")
+    p_push.add_argument("--manifest", default=str(manifest.DEFAULT_PATH), help="default: swarm.toml")
+    p_push.add_argument("--repo", help="owner/name (default: this checkout's origin)")
     p_backup = sub.add_parser("backup", help="copy swarm.db consistently, for the nightly timer")
     p_backup.add_argument("--out", help=f"default: backups/swarm-<UTC time>.db, keeping the newest "
                                         f"{statedb.KEEP_BACKUPS}")
@@ -2265,6 +2344,9 @@ def main(argv: list[str], launcher: Launcher | None = None) -> int:
             return launch(launcher, args.role, n, model, repo=repo, force=args.force,
                           dry_run=args.dry_run, idle_minutes=args.idle_minutes, pr=args.pr,
                           issue_repo=issue_repo)
+        if args.cmd == "specs" and args.specs_cmd == "push":
+            return specs_push(launcher, repo, args.goal, args.manifest, args.what_shipped,
+                              args.dry_run, args.model)
         if args.cmd == "specs":
             return specs_pull(launcher, repo, args.goal, args.manifest, args.dry_run)
         if args.cmd == "up":
