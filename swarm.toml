@@ -65,6 +65,16 @@ call_ins = true
 mode = "live"
 max_changed_lines = 500
 
+# The specs bridge's source (#952, #1007): `swarm specs pull / diff / push` read and write
+# it. The Notion token is never here: NotionSource reads it from
+# ~/.config/productswarm/notion.token (mode 0600) at call time (GOV-0043).
+#   backend      "notion", "fake" or "productboard"
+#   parent_page  the Notion page the integration is shared with
+#   fixture      the fake backend's state file; unused by notion
+[specs]
+backend = "notion"
+parent_page = "416ec22e-b1e3-8129-8868-d1d23514d60e"   # "productswarm specs"
+
 [[session]]
 role = "planner"
 count = 1

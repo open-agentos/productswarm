@@ -10,8 +10,8 @@ command builds a backend itself. launcher/manifest.py only checks that `[specs]`
 table; this module validates what is in it, as merger.py does for `[merger]`.
 
 A relative `fixture` is read from the directory swarm.toml is in. No token is read here or
-from swarm.toml: the Notion token is read only from its own file (#951, owner's answer on
-#943). Standard library only.
+from swarm.toml: the Notion token is read only by NotionSource, from its own file (#951,
+GOV-0043). The notion backend is wired in by #1007. Standard library only.
 """
 from __future__ import annotations
 
@@ -68,16 +68,25 @@ def load(path: Union[str, Path]) -> Optional[SpecsConfig]:
 
 
 def source(cfg: SpecsConfig):
-    """The SpecSource cfg names. Raises SpecsConfigError for a backend that isn't built yet
-    or a fake backend with no fixture; FakeSource's own errors pass through."""
+    """The SpecSource cfg names. Raises SpecsConfigError for a backend that isn't built yet,
+    a fake backend with no fixture, a notion backend with no parent_page, or a Notion token
+    file that is missing or not private (its message never holds the token). FakeSource's
+    own errors pass through."""
     if cfg.backend == "fake":
         if cfg.fixture is None:
             raise SpecsConfigError("specs: backend \"fake\" needs 'fixture'")
         from .fake import FakeSource
         return FakeSource(cfg.fixture)
     if cfg.backend == "notion":
-        # NotionSource exists (#951); wiring it in here is a later issue.
-        raise SpecsConfigError("specs: backend \"notion\" is not built yet")
+        if cfg.parent_page is None:
+            raise SpecsConfigError("specs: backend \"notion\" needs 'parent_page'")
+        from .notion import NotionSource, TokenError
+        try:
+            # NotionSource reads the token itself, from its own file (GOV-0043), here and
+            # before any request; a missing or open file stops the command on one line.
+            return NotionSource(cfg.parent_page)
+        except TokenError as e:
+            raise SpecsConfigError(f"specs: {e}") from None
     if cfg.backend == "productboard":
         raise SpecsConfigError("specs: backend \"productboard\" is not built yet "
                                "(a stub until an account exists, #937 §7)")
