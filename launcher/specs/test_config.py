@@ -2,16 +2,20 @@
 
 Run: python3 run_tests.py launcher
 """
+import os
 import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from specs import config  # noqa: E402
 from specs.config import SpecsConfig, SpecsConfigError  # noqa: E402
+from specs import notion  # noqa: E402
 from specs.fake import FakeSource  # noqa: E402
+from specs.notion import NotionSource  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "testdata" / "fake_initiative.json"
 SESSION = '[[session]]\nrole = "builder"\ncount = 1\nmodel = "claude-opus-5-5"\n'
@@ -92,12 +96,64 @@ class SourceTest(unittest.TestCase):
             config.source(SpecsConfig("fake"))
         self.assertIn("needs 'fixture'", str(cm.exception))
 
-    def test_notion_and_productboard_are_not_built_yet(self):
-        for backend in ("notion", "productboard"):
-            with self.assertRaises(SpecsConfigError) as cm:
-                config.source(SpecsConfig(backend, parent_page="abc123"))
-            self.assertIn("not built yet", str(cm.exception), backend)
+    def test_productboard_is_not_built_yet(self):
+        with self.assertRaises(SpecsConfigError) as cm:
+            config.source(SpecsConfig("productboard", parent_page="abc123"))
+        self.assertIn("not built yet", str(cm.exception))
 
+
+class NotionSourceTest(unittest.TestCase):
+    """The notion backend (#1007): a temporary token file and a transport that fails the test
+    if called, so no network and no real token."""
+    TOKEN = "ntn_TESTtoken0123456789"
+    PARENT = "416ec22e-b1e3-8129-8868-d1d23514d60e"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.token = Path(tmp.name) / "notion.token"
+        self.token.write_text(self.TOKEN + "\n", encoding="utf-8")
+        os.chmod(self.token, 0o600)
+        self.requests = []
+        for target, new in (("token_path", lambda: self.token),
+                            ("urllib_transport", lambda *a: self.requests.append(a))):
+            p = mock.patch.object(notion, target, new)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def error(self, cfg) -> str:
+        with self.assertRaises(SpecsConfigError) as cm:
+            config.source(cfg)
+        self.assertEqual(self.requests, [])
+        return str(cm.exception)
+
+    def test_builds_a_notion_source_and_makes_no_request(self):
+        src = config.source(SpecsConfig("notion", parent_page=self.PARENT))
+        self.assertIsInstance(src, NotionSource)
+        self.assertEqual(src.parent_page, self.PARENT)
+        self.assertEqual(self.requests, [])
+        self.assertNotIn(self.TOKEN, repr(src))
+
+    def test_needs_a_parent_page(self):
+        self.assertIn("backend \"notion\" needs 'parent_page'", self.error(SpecsConfig("notion")))
+
+    def test_missing_token_is_one_line(self):
+        self.token.unlink()
+        msg = self.error(SpecsConfig("notion", parent_page=self.PARENT))
+        self.assertIn(f"no Notion token file at {self.token}", msg)
+        self.assertNotIn("\n", msg)
+
+    def test_token_not_0600_is_one_line_without_the_token(self):
+        os.chmod(self.token, 0o644)
+        msg = self.error(SpecsConfig("notion", parent_page=self.PARENT))
+        self.assertIn("has mode 0644; it must be 0600", msg)
+        self.assertNotIn("\n", msg)
+        self.assertNotIn(self.TOKEN, msg)
+
+    def test_the_repo_manifest_names_notion(self):
+        cfg = config.load(Path(__file__).resolve().parents[2] / "swarm.toml")
+        self.assertEqual((cfg.backend, cfg.parent_page, cfg.fixture),
+                         ("notion", self.PARENT, None))
 
 if __name__ == "__main__":
     unittest.main()

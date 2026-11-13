@@ -1888,6 +1888,67 @@ class SpecsPullTest(SpecsBase):
         sp.assert_called_once_with(self.l, "o/r", "#938", str(self.toml), True)
 
 
+class SpecsNotionTest(SpecsBase):
+    """`swarm specs` with [specs] backend = "notion" (#1007), against specs/test_notion.py's
+    FakeNotion as the transport and a temporary token file: no network, no real token."""
+
+    def setUp(self):
+        super().setUp()
+        from specs import notion
+        from specs.test_notion import FakeNotion, INITIATIVE, PARENT
+        self.notion = FakeNotion()
+        self.token = self.home / "notion.token"
+        self.token.write_text("ntn_TESTtoken0123456789\n")
+        os.chmod(self.token, 0o600)
+        for target, new in (("token_path", lambda: self.token),
+                            ("urllib_transport", self.notion)):
+            p = mock.patch.object(notion, target, new)
+            p.start()
+            self.addCleanup(p.stop)
+        self.toml.write_text('[[session]]\nrole = "builder"\ncount = 1\nmodel = "m"\n\n'
+                             f'[specs]\nbackend = "notion"\nparent_page = "{PARENT}"\n')
+        self.gh.goal.return_value["body"] = f"Spec source: notion://{INITIATIVE}\n"
+
+    def pull(self, dry_run=True):
+        return swarm.specs_pull(self.l, "o/r", "#987", self.toml, dry_run, gh=self.gh,
+                                owner=lambda: OWNER)
+
+    def test_dry_run_only_reads(self):
+        self.assertEqual(self.pull(), 0)
+        self.assertTrue(self.notion.calls)
+        for method, path, *_ in self.notion.calls:
+            self.assertTrue(method == "GET" or (method == "POST" and path.endswith("/query")),
+                            (method, path))
+        self.assertEqual(self.notion.writes(), [])
+        self.assertIsNone(self.notion.pages["55555555-5555-5555-5555-555555555501"]
+                          ["properties"]["Last synced"]["date"])
+        self.gh.open_issue.assert_not_called()
+        self.gh.add_sub_issue.assert_not_called()
+        self.assertIn("  FEAT-1 Effort mix chart: would open an issue in o/r", self.lines)
+
+    def test_missing_token_is_one_line_and_no_request(self):
+        self.token.unlink()
+        self.assertEqual(self.pull(), 1)
+        self.assertEqual(self.lines, [f"swarm specs pull: specs: no Notion token file at "
+                                      f"{self.token}: create it with mode 0600"])
+        self.assertEqual(self.notion.calls, [])
+        self.gh.goal.assert_not_called()
+
+    def test_open_token_file_is_one_line_and_no_request(self):
+        os.chmod(self.token, 0o640)
+        for run in (self.pull,
+                    lambda: swarm.specs_diff(self.l, "o/r", "#987", self.toml, gh=self.gh,
+                                             owner=lambda: OWNER),
+                    lambda: swarm.specs_push(self.l, "o/r", "#987", self.toml, dry_run=True,
+                                             model="m", gh=self.gh, owner=lambda: OWNER)):
+            self.lines.clear()
+            self.assertEqual(run(), 1)
+            self.assertEqual(len(self.lines), 1, self.lines)
+            self.assertIn("has mode 0640; it must be 0600", self.lines[0])
+            self.assertNotIn("ntn_TEST", self.lines[0])
+        self.assertEqual(self.notion.calls, [])
+
+
 class SpecsDiffTest(SpecsBase):
     """`swarm specs diff` (#956): the [specs] backend, routing and refusals.
     specs/test_drift.py covers diff and the decisions themselves."""
