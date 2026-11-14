@@ -75,6 +75,17 @@ max_changed_lines = 500
 backend = "notion"
 parent_page = "416ec22e-b1e3-8129-8868-d1d23514d60e"   # "productswarm specs"
 
+# The classifier engine (#1010): `swarm classify eval` reads this. Per GOV-0045 its model
+# calls run on this Mac through the Claude Code login (`claude -p`), with no new key.
+#   model            the model a classifier run uses unless --model names another;
+#                    Haiku-class unless an eval shows it fails the pass mark (GOV-0045)
+#   eval_budget_usd  one live eval run's budget: each call gets what is left of it as
+#                    --max-budget-usd, and the run stops when it is spent (GOV-0045).
+#                    The label set's max_calls caps the same run's calls.
+[classify]
+model = "claude-haiku-5-5"
+eval_budget_usd = 5
+
 [[session]]
 role = "planner"
 count = 1

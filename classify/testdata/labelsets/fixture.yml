@@ -1,0 +1,33 @@
+# A fixture label set for the engine's tests (#1010). Not a real label set.
+description: Sort a short change note by the kind of work it describes.
+threshold: 0.6     # majority agreement below this answers "needs human"
+runs: 3
+max_calls: 30
+labels:
+  - name: bug
+    definition: The change fixes behaviour that was wrong.
+    boundary:
+      - A fix to documentation is docs, not bug.
+    examples:
+      - "Fix the crash when the list is empty"
+      - "Stop double-counting merges"
+  - name: feature
+    definition: The change adds something a user can now do.
+    examples:
+      - "Add a --json flag to swarm acts"
+      - "Show spend per Goal"
+  - name: docs
+    definition: The change only edits documentation.
+    boundary:
+      - "Code comments alone count as docs."
+    examples:
+      - "Fix a typo in the README"
+      - "Explain the pass mark"
+flags:
+  - name: urgent
+    definition: The text says the change is urgent or blocks other work.
+pass_mark:
+  accuracy: 0.6
+  coverage: 0.8
+  min_recall:
+    bug: 0.6

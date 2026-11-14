@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Run every test_*.py under launcher/, dashboard/, evals/ and heartbeat/ (#521).
+"""Run every test_*.py under launcher/, dashboard/, evals/, heartbeat/ and classify/ (#521, #1010).
 
 This is the test check GOV-0022 stage 1 needs: `.github/workflows/tests.yml` runs it on
 every pull request to main. Each directory runs in its own process, from inside that
 directory, because its tests import their siblings by bare name (`import swarm`,
 `import generate`) and two directories may share a module name.
 
-Usage: python3 run_tests.py [dir ...]   (default: all four)
+Usage: python3 run_tests.py [dir ...]   (default: all five)
 Exits 0 only if every directory's tests pass and at least one test ran in each.
 """
 import subprocess
@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DIRS = ("launcher", "dashboard", "evals", "heartbeat")
+DIRS = ("launcher", "dashboard", "evals", "heartbeat", "classify")
 
 
 def run(name: str) -> bool:

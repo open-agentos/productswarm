@@ -298,6 +298,10 @@ It only reads GitHub; locally it syncs `swarm.db`'s owner acts as `swarm acts` d
 
 **Time (#858).** A run takes about 13 seconds, and about 20 on the first run after a working day ends, which reads that day's acts back from GitHub. Its reads run at once, not one after another. The acts backfill runs beside them and starts no new GitHub read after 20 seconds (`BUDGET_SECONDS`); `swarm acts` runs with no limit. Acts it found but didn't read back are read on the next run. A backfill of many days at once (the first ever, or after a long gap) can't finish in that time: the report says so under `not read`, and `launcher/swarm acts` finishes it.
 
+## swarm classify eval: score a classifier (#1010)
+
+`launcher/swarm classify eval <labelset> [--split dev|test] [--baseline NAME] [--replay | --live] [--runs N] [--model M]` scores a classifier on `classify/data/<labelset>.jsonl` against `classify/labelsets/<labelset>.yml` and writes a Markdown report under `classify/reports/`. `--replay`, the default, makes no model calls. `--live` calls `claude -p` on this Mac's login and stops at the label set's `max_calls` or `swarm.toml`'s `[classify] eval_budget_usd` (GOV-0045). The formats, metrics and rules are in `classify/README.md`.
+
 ## swarm watch: the wake-up loop
 
 ```bash
