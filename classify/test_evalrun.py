@@ -78,6 +78,22 @@ class EvalTest(unittest.TestCase):
         self.assertIn("| Accuracy | 37.5% (3 of 8) |", text)
         self.assertIn("**Result: FAIL**", text)
 
+    def test_draft_labels_are_never_scored(self):
+        d = self.copy_fixture()
+        data = d / "data" / "fixture.jsonl"
+        lines = data.read_text().splitlines()
+        drafted = [ln.replace('"labelled_by": "fixture"', '"labelled_by": "draft"')
+                   if i < 2 else ln for i, ln in enumerate(lines)]
+        data.write_text("\n".join(drafted) + "\n")
+        self.eval("--baseline", "majority", dir=d)
+        text = (self.tmp / "report.md").read_text()
+        dev_drafts = sum('"draft"' in ln and '"dev"' in ln for ln in drafted)
+        self.assertIn(f"({dev_drafts} with only a draft label left out)", text)
+        data.write_text("\n".join(ln.replace('"labelled_by": "fixture"', '"labelled_by": "draft"')
+                                  for ln in lines) + "\n")
+        self.assertEqual(self.eval("--baseline", "majority", dir=d), 2)
+        self.assertIn("has no dev items with a gold label", self.said[-1])
+
     def test_unknown_baseline_and_baseline_with_live_are_refused(self):
         self.assertEqual(self.eval("--baseline", "nope"), 2)
         self.assertIn("unknown baseline 'nope' (known: majority)", self.said[-1])

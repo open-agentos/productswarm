@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 NEEDS_HUMAN = "needs human"
+DRAFT = "draft"   # labelled_by for a model's draft label: never gold, never scored
 SPLITS = ("dev", "test")
 KEY_RE = re.compile(r"([A-Za-z0-9_-]+):(?:\s+(.*))?$")
 
@@ -358,9 +359,11 @@ class Item:
     labelled_by: str
     flags: dict = field(default_factory=dict)   # flag -> bool, gold
     week: Optional[str] = None                  # e.g. "2026-W45", for share error
+    hard: Optional[str] = None                  # the boundary rule a hard case tests
+    fixes: Optional[int] = None                 # the PR number a fix flag points at
 
 
-ITEM_KEYS = ("id", "text", "label", "split", "labelled_by", "flags", "week")
+ITEM_KEYS = ("id", "text", "label", "split", "labelled_by", "flags", "week", "hard", "fixes")
 
 
 def parse_items(text: str, labelset: LabelSet) -> tuple[list[Item], list[str]]:
@@ -393,6 +396,11 @@ def parse_items(text: str, labelset: LabelSet) -> tuple[list[Item], list[str]]:
         bad += [f"{where}: flag '{k}' isn't in the label set" for k in flags if k not in labelset.flag_names]
         if "week" in d and not _text(d["week"]):
             bad.append(f"{where}: week must be a non-empty string")
+        if "hard" in d and not _text(d["hard"]):
+            bad.append(f"{where}: hard must be the name of a boundary rule")
+        if "fixes" in d and (not isinstance(d["fixes"], int) or isinstance(d["fixes"], bool)
+                             or d["fixes"] < 1):
+            bad.append(f"{where}: fixes must be a PR number")
         if _text(d.get("id")):
             if d["id"] in seen:
                 bad.append(f"{where}: id '{d['id']}' appears twice")
@@ -401,7 +409,7 @@ def parse_items(text: str, labelset: LabelSet) -> tuple[list[Item], list[str]]:
             p += bad
             continue
         items.append(Item(d["id"], d["text"], d["label"], d["split"], d["labelled_by"], dict(flags),
-                          d.get("week")))
+                          d.get("week"), d.get("hard"), d.get("fixes")))
     return items, p
 
 
