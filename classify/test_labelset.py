@@ -85,6 +85,17 @@ class ItemsTest(unittest.TestCase):
         self.assertEqual(items[0].week, "2026-W45")
         self.assertEqual(items[0].flags, {})
 
+    def test_hard_and_fixes_are_optional_item_keys(self):
+        items, problems = l.parse_items(
+            '{"id": "1", "text": "t", "label": "a", "split": "test", "labelled_by": "owner", '
+            '"hard": "tests-only", "fixes": 12}', self.ls)
+        self.assertEqual(problems, [])
+        self.assertEqual((items[0].hard, items[0].fixes), ("tests-only", 12))
+        _, problems = l.parse_items(
+            '{"id": "1", "text": "t", "label": "a", "split": "dev", "labelled_by": "o", '
+            '"hard": "", "fixes": "12"}', self.ls)
+        self.assertEqual(len(problems), 2, problems)
+
     def test_bad_items_are_refused(self):
         text = "\n".join([
             '{"id": "1", "text": "t", "label": "zz", "split": "dev", "labelled_by": "o"}',

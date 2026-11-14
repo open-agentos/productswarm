@@ -1,0 +1,52 @@
+# The effort-mix label set (#1011, FEAT-2 of Goal #987).
+#
+# Each merged PR gets one label. The test for every label is "who benefits, and how?".
+# Each boundary rule starts with its name. A hard case in data/effort.jsonl names the rule it
+# tests in its `hard` key (`classify/effort_data.py check` counts them per rule).
+#
+# The labelled set is every PR merged up to the cut-off, 2026-11-13 (UTC) inclusive.
+#
+# pass_mark: the owner sets it here before FEAT-3's first live run, and the PR that sets it
+# records it (pre-registered, as evals/README.md does for Stage B). The value below is a
+# placeholder so the file loads. It is not the bar.
+description: "Sort one merged pull request of productswarm, a swarm of AI agents that builds itself, by the kind of effort it is. Ask who benefits from the change, and how."
+threshold: 0.6     # majority agreement below this answers "needs human"
+runs: 3
+max_calls: 800     # a live eval of every item at 3 samples is about 760 calls
+labels:
+  - name: capability
+    definition: The owner, or a future user, can see or do something new once this merges.
+    boundary:
+      - "feature-and-fix: A PR that adds something new and also fixes a bug is capability. Set the fix flag too when the bug was merged in the previous 14 days."
+      - "role-prompt-capability: A role-prompt change that makes a role do something new the owner sees or uses (a new report section, a new run the owner can start) is capability, even though the file is a prompt."
+    examples:
+      - "swarm acts: the owner's acts per working day, kept from webhooks"
+      - "Desk: the Agents page, read-only, with a focus drawer"
+      - "Planner: Monday check-in carries a hand-made Trouble section"
+  - name: upkeep
+    definition: Keeps the swarm running or tidy. Nothing new to see or do once it merges.
+    boundary:
+      - "tests-only: A PR that changes only tests or the test runner is upkeep, whatever the tests cover."
+    examples:
+      - "Lock the launcher state file; unique temp file per write"
+      - "Remove committed bytecode and ignore __pycache__"
+      - "Launcher tests no longer depend on the owner's swarm.toml switches"
+  - name: governance
+    definition: "Changes the rules, the roles or how decisions are made: a decision record, GOVERNANCE.md, jurisdictions, or a role prompt pointed at a new ruling with nothing new to see or do."
+    boundary:
+      - "ruling-implementation: A PR that builds what a ruling allows is labelled by what it adds, usually capability or upkeep. Only the record itself, GOVERNANCE.md, jurisdictions, and prompts or docs that restate a ruling are governance."
+    examples:
+      - "GOV-0027: standing grants and approved asks for the merger"
+      - "Point CLAUDE.md and role prompts at GOV-0006 (ready, gov:ruled)"
+  - name: knowledge
+    definition: Research, briefs, specs and docs that inform the owner or the swarm.
+    boundary:
+      - "brief-for-capability: A brief or spec written to unblock a capability is knowledge. The capability gets its own label when a later PR ships it."
+    examples:
+      - "Brief: what the finance and scenario planner will demand (M4)"
+      - "Docs: top-level README and v1 catch-up"
+flags:
+  - name: fix
+    definition: "The PR fixes something merged in the 14 days before it. The item's `fixes` key holds the fixed PR's number. For example: 'Fix swarm-session aborting on unbound GIT_AUTHOR_EMAIL', or 'swarm watch: retry a run that hit the usage limit instead of marking it done'."
+pass_mark:
+  accuracy: 0.8    # placeholder, not the bar: the owner sets it before FEAT-3's first live run

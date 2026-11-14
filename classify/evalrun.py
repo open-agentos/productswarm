@@ -99,14 +99,15 @@ def cell(s: str) -> str:
 
 
 def render(ls: lsmod.LabelSet, data_sha: str, split: str, who: str, mode: str,
-           items: list, preds: dict, m: metrics.Metrics, checks: list) -> str:
+           items: list, preds: dict, m: metrics.Metrics, checks: list, drafts: int = 0) -> str:
     passed = all(c.ok for c in checks)
     out = [f"# Classify eval: {ls.name}, {split} split", "",
            f"- **Classifier:** {who}",
            f"- **Mode:** {mode}",
            f"- **Label set:** `labelsets/{ls.name}.yml` sha256 `{ls.sha}`",
            f"- **Labelled set:** `data/{ls.name}.jsonl` sha256 `{data_sha}`",
-           f"- **Items:** {m.n}", "",
+           f"- **Items:** {m.n}" + (f" ({drafts} with only a draft label left out)" if drafts else ""),
+           "",
            f"**Result: {'PASS' if passed else 'FAIL'}**", "",
            "## Pass mark", "", "| Check | Value | Bar | |", "|---|---|---|---|"]
     out += [f"| {c.what} | {pct(c.value)} | {pct(c.bar)} | {'pass' if c.ok else 'FAIL'} |"
@@ -167,10 +168,15 @@ def run(name: str, root: Path, split: str = "dev", baseline: Optional[str] = Non
         all_items = lsmod.load_items(data_path, ls)
     except lsmod.FormatError as e:
         raise CantRun(str(e)) from None
-    items = [it for it in all_items if it.split == split]
+    # A draft label is a model's guess, never gold: drafts are neither scored nor seen by
+    # baselines (#1011).
+    gold = [it for it in all_items if it.labelled_by != lsmod.DRAFT]
+    drafts = sum(it.split == split for it in all_items) - sum(it.split == split for it in gold)
+    items = [it for it in gold if it.split == split]
     if not items:
-        raise CantRun(f"{data_path} has no {split} items")
-    dev = [it for it in all_items if it.split == "dev"]
+        raise CantRun(f"{data_path} has no {split} items with a gold label"
+                      + (f" ({drafts} have only a draft label)" if drafts else ""))
+    dev = [it for it in gold if it.split == "dev"]
 
     if baseline is not None:
         if live:
@@ -214,7 +220,8 @@ def run(name: str, root: Path, split: str = "dev", baseline: Optional[str] = Non
 
     m = metrics.compute(ls, items, preds)
     checks = metrics.check(ls, m)
-    report = render(ls, lsmod.sha256(data_path), split, who, mode, items, preds, m, checks)
+    report = render(ls, lsmod.sha256(data_path), split, who, mode, items, preds, m, checks,
+                    drafts)
     out = out or root / "reports" / f"{name}-{split}-{slug}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")

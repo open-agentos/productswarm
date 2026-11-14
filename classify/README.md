@@ -16,6 +16,8 @@ login (`claude -p`), capped per run (GOV-0045). **No cost figures** go in any fi
 | `data/<name>.jsonl` | its labelled set |
 | `recordings/<name>/<model>.jsonl` | every reply a live run got, for replay |
 | `reports/<name>-<split>-<classifier>.md` | eval reports |
+| `effort_data.py` | builds the effort labelled set, drafts its labels and takes the owner's review (#1011) |
+| `review/<name>.md` | the file the owner edits to label a labelled set |
 | `testdata/` | the fixture label set, labelled set, recordings and expected report the tests use |
 
 Standard library only.
@@ -60,6 +62,11 @@ One JSON object per line:
 
 `id`, `text`, `label`, `split` (`dev` or `test`) and `labelled_by` are required. `flags` and
 `week` are optional. Share error is reported only for items that carry a week.
+
+`hard` (the name of the boundary rule a hard case tests) and `fixes` (the PR number a `fix`
+flag points at) are optional too. An item `labelled_by: draft` carries a model's guess, not a
+gold label: an eval neither scores it nor lets a baseline see it, and the report says how many
+it left out.
 
 ## The report
 
@@ -124,3 +131,25 @@ It exits 0 when the run passes its pass mark, 1 when it fails it, and 2 when it 
 
 Recordings hold the item id, the sample number, the prompt hash and the model's reply, and
 nothing else: no prompt text, keys or session data (GOV-0044).
+
+## The effort label set (#1011)
+
+`labelsets/effort.yml` sorts merged PRs into capability, upkeep, governance and knowledge, with
+a `fix` flag (FEAT-2 of Goal #987). Each boundary rule starts with its name, and a hard case
+names its rule in `hard`. `data/effort.jsonl` holds every PR merged up to the cut-off
+(2026-11-13 UTC), with title, linked issue, paths touched and body in `text`, and its merge
+week.
+
+```sh
+python3 classify/effort_data.py build --live   # add new PRs, drafted by the model (GOV-0045)
+python3 classify/effort_data.py review         # write review/effort.md
+python3 classify/effort_data.py apply          # take the owner's edits from it
+python3 classify/effort_data.py check          # how far from #1011's criteria
+```
+
+`build` drafts each new PR with one model sample, capped at $0.25 per PR (GOV-0045), and
+records the reply in `recordings/effort-draft/`. Without `--live` it replays them. New items are
+split 70/30, dev/test, stratified by draft label and merge month. In `review/effort.md` the
+owner sets each PR's `label`, `fix` and `hard`, and `reviewed: yes` makes the label gold
+(`labelled_by: owner`). A PR tagged `hard` moves to test, and a draft test PR with the same label
+moves to dev in its place. Every test item needs the owner's label before the set is done.
