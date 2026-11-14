@@ -174,7 +174,7 @@ class PageTest(unittest.TestCase):
 
     def test_every_page_keeps_the_shell(self):
         pages = g.render(self.model())
-        self.assertEqual(list(pages), ["bridge.html", "commissions.html", "agents.html", "index.html", "operations.html", "decisions.html",
+        self.assertEqual(list(pages), ["bridge.html", "commissions.html", "agents.html", "index.html", "effort.html", "operations.html", "decisions.html",
                                        "authority.html"])   # the Bridge (#926) leads the footer
         for name, page in pages.items():
             head = page.split("</head>")[0]

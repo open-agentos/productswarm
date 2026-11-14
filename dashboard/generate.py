@@ -15,7 +15,7 @@ Reads, through `gh api` (in a swarm session that's ops/shims/gh acting as the ro
   - for every page's header (#402, activity.py): the repo's public events, 1 to 3 pages, to
     say when the owner last acted.
 
-Builds seven pages in one look (layout.py), each headed by a red LIVE mark, the build time
+Builds eight pages in one look (layout.py), each headed by a red LIVE mark, the build time
 and the owner's last act (#402), and copies the self-hosted fonts beside them:
   - bridge.html, the Bridge (bridge.py, #926): the owner's home, read-only: status, decisions
     waiting, the crew's reports, Goals and Areas in flight, and the owner's acts on GitHub;
@@ -25,7 +25,8 @@ and the owner's last act (#402), and copies the self-hosted fonts beside them:
   - index.html, the desk: today's report and the plan (report.py, plan.py, #712), the trouble
     panel per Goal and Area (`swarm trouble`'s report without the acts sync, #903), on the floor (floor.py), grants in use (grants.py, #713), the wire (wire.py, #405), the committee desk while one is open (#404),
     what the numbers say (trends.py), how the questions went (questions.py), precedent in use (precedent.py), a card per past
-    committee (#409), and a pointer to the other pages (#397 fills it);
+    committee (#409), effort per open Goal (effort.py, #1013), and a pointer to the other pages;
+  - effort.html (effort.py, #1013): the PRs behind each segment of the desk's Effort bars;
   - operations.html: the needs-you list, sessions, open PRs, the Actions reviewer, v3
     progress and spend;
   - decisions.html: the governance section with the full decision log, open committees with
@@ -56,6 +57,7 @@ import authority
 import bridge
 import commissions
 import committees
+import effort
 import floor
 import ghql
 import governance
@@ -556,6 +558,8 @@ def build(data: dict, now: dt.datetime, idle_after: dt.timedelta,
          "spend": {"per_day": per_day, "today": per_day[today],
                    "unpriced": [s for s in sessions if s["cost"] is None]}}
     m["authority"] = authority.build(data.get("jurisdictions"), m["governance"]["all_records"])
+    # #1013: effort per open Goal, from classify/cache/effort.json alone (main() reads it)
+    m["effort"] = effort.build(data.get("effort"), repo, now, effort.goals_of(m))
     return m
 
 
@@ -775,6 +779,7 @@ def desk_panels(m: dict) -> dict[str, str]:
             "grants": grants.render(m.get("grants"), repo),
             "wire": wire.render(m.get("wire")),
             "committee_desk": committees.desk(m.get("committees"), repo),
+            "effort": effort.render(m.get("effort")),   # #1013
             "trends": trends.render(m.get("trends")),
             "questions_went": questions.render_went(m.get("questions_went")),
             "precedent": precedent.render(m.get("precedent"), repo),
@@ -884,6 +889,12 @@ def render_agents(m: dict) -> str:
     return agents.page(m, TITLE, owner_line(m))
 
 
+def render_effort(m: dict) -> str:
+    """effort.html (#1013): the PRs behind each of the desk's Effort bar segments."""
+    return layout.page(effort.FILE, TITLE, m["repo"], m["now"], effort.page_body(m.get("effort"), m["repo"]),
+                       owner_line(m))
+
+
 def render_authority(m: dict) -> str:
     """authority.html: who may decide what, from governance/jurisdictions.yml (#410)."""
     a = m.get("authority") or authority.build(None, [])
@@ -894,7 +905,7 @@ def render_authority(m: dict) -> str:
 def render(m: dict) -> dict[str, str]:
     """Every page, by file name, in layout.PAGES order."""
     pages = {"bridge.html": render_bridge, "commissions.html": render_commissions,
-             "agents.html": render_agents, "index.html": render_desk, "operations.html": render_operations,
+             "agents.html": render_agents, "index.html": render_desk, "effort.html": render_effort, "operations.html": render_operations,
              "decisions.html": render_decisions, "authority.html": render_authority}
     return {f: pages[f](m) for f, _ in layout.PAGES}
 
@@ -1016,6 +1027,7 @@ def main(argv: list[str]) -> int:
                      with_activity=True, with_grants=True, with_plan=True, with_trouble=True,
                      prev=Path(args.prev) if args.prev else None)
         data["records"] = precedent.load_records()
+        data["effort"] = effort.load()   # #1013: a local file, no API call
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"generate.py: {e}", file=sys.stderr)
         return 1

@@ -77,7 +77,7 @@ class DailyTest(unittest.TestCase):
         self.lines: list[str] = []
         self.l = swarm.Launcher(self.home, root=self.home / "repo", out=self.lines.append)
 
-    def run_daily(self, comments, acted, now=NOW, scopes=(), prs=()):
+    def run_daily(self, comments, acted, now=NOW, scopes=(), prs=(), effort_cache=None):
         statedb.save(self.home / "launcher", {"acted": acted})
         self.since = self.merged_since = None
 
@@ -90,7 +90,8 @@ class DailyTest(unittest.TestCase):
             return list(scopes)
         rc = swarm.daily(self.l, "o/r", self.toml, get_comments=lambda repo, n: comments, now=now,
                          tz=UTC, owner=OWNER, agents={PLANNER, "productswarm-builder[bot]"},
-                         get_scopes=get_scopes, get_merged=get_merged)
+                         get_scopes=get_scopes, get_merged=get_merged,
+                         effort_cache=effort_cache or self.home / "no-effort.json")
         self.assertEqual(rc, 0)
         return self.lines[-1]
 
@@ -264,6 +265,32 @@ class DailyTest(unittest.TestCase):
         self.assertEqual(days[1], dt.date(2026, 11, 6))
         self.assertTrue(all(d.weekday() < 5 for d in days))
 
+
+class DailyEffortTest(unittest.TestCase):
+    """#1013: the upkeep risk line, from the effort cache, for the report's Risks."""
+    FIXTURE = Path(__file__).resolve().parent / "testdata" / "effort.json"
+    setUp = DailyTest.setUp
+    run_daily = DailyTest.run_daily
+
+    def section(self, out: str) -> list[str]:
+        return out[out.index("Effort risks"):out.index("Issues still open")].strip().splitlines()
+
+    def test_upkeep_risk_line_from_the_fixture(self):
+        friday = dt.datetime(2026, 11, 13, 12, 0, tzinfo=UTC)
+        out = self.run_daily(COMMENTS_249, ACTED_249, now=friday, effort_cache=self.FIXTURE)
+        # o/r#683: 2 of 3 upkeep. o/r#684 is exactly half and o/r#987 1 of 5: no line.
+        self.assertEqual(self.section(out)[1:], [
+            "  Upkeep risk: o/r#683: 2 of 3 PRs merged in the last 7 days were upkeep (more than half)."])
+
+    def test_no_cache_says_none_checked(self):
+        out = self.run_daily(COMMENTS_249, ACTED_249)
+        self.assertEqual(len(self.section(out)), 1)
+        self.assertIn("Effort risks: no effort cache yet", out)
+
+    def test_nothing_in_the_window_says_none(self):
+        later = dt.datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
+        out = self.run_daily(COMMENTS_249, ACTED_249, now=later, effort_cache=self.FIXTURE)
+        self.assertEqual(self.section(out)[1:], ["  none"])
 
 if __name__ == "__main__":
     unittest.main()

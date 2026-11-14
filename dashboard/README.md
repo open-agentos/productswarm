@@ -15,7 +15,7 @@ It reads GitHub through `gh api`, so inside a swarm session it acts as the role'
 
 ## Pages
 
-One build writes seven pages, and the fonts, into the `--out` page's directory (#401, part of #397):
+One build writes eight pages, and the fonts, into the `--out` page's directory (#401, part of #397):
 
 | Page | What it shows |
 |---|---|
@@ -23,11 +23,12 @@ One build writes seven pages, and the fonts, into the `--out` page's directory (
 | `commissions.html` | Each open Goal and Area, grouped by what it needs from the owner, with a focus drawer ([Commissions](#commissions), #931) |
 | `agents.html` | One row per role, working or idle, with a focus drawer ([Agents](#agents), #932) |
 | `index.html`, the **desk** | Today's report and the plan (#712), the trouble panel per Goal and Area (#903: `swarm trouble`'s report, built by `generate.py` without the owner-acts sync, so M4's acts criterion reads unmeasured here; no spend), [On the floor](#on-the-floor), [the wire](#the-wire), the [committee desk](#committee-desk) while a committee is open, [What the numbers say](#what-the-numbers-say), [How the questions went](#how-the-questions-went), [precedent in use](#precedent-in-use), a card per [past committee](#past-committees), and a one-line pointer to the other pages. #397's later issues add the desk's other panels here. |
+| `effort.html` | The PRs behind each segment of the desk's [Effort](#effort) bars, per open Goal, window and label (#1013) |
 | `operations.html` | The [needs-you](#needs-you) list and its tiles, sessions, open PRs, the [Actions reviewer](#actions-reviewer) section, [v3 progress](#v3-progress) and [spend per day](#spend) |
 | `decisions.html` | The [governance](#governance) section with the **full** decision log from `governance/INDEX.md`, open and lapsed gov questions, the [Committees](#committees) section with each open committee's round grid, and ended committees as "Past committees" with their round grids |
 | `authority.html` | The [authority map](#authority-map): who may decide what, one row per domain in `governance/jurisdictions.yml` |
 
-Every page opens with the [header](#header) and carries `noindex` and a [Content-Security-Policy](#live-refresh), reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the seven pages. `generate.render(model)` returns the pages by file name.
+Every page opens with the [header](#header) and carries `noindex` and a [Content-Security-Policy](#live-refresh), reloads itself every 300 seconds, fits a phone's width (only `.scroll` boxes scroll sideways), and ends with a footer linking the eight pages. `generate.render(model)` returns the pages by file name.
 
 ### Look
 
@@ -42,7 +43,7 @@ The fonts are **self-hosted**, so the public page loads nothing from a third par
 - **Status:** open Goals and Areas and how many are flagged; agents working (the floor's cards) of the live sessions; decisions waiting, with the oldest one's age; and authority used in `swarm trouble`'s window. A Goal or Area is **flagged** when something under it is stuck, one of its criteria is failing, or its date is missed.
 - **Decisions waiting**, in owner amber: what `swarm trouble` says waits on the owner, then open gov questions it doesn't already list (not ruled, no session blocked on them), oldest first, at most 12. Each links to where it's answered on GitHub; there are no buttons until the desk can write (#752).
 - **Reports**, newest first, at most 12, each with its role: today's daily report (a red flag when it's late), each item `swarm trouble` says is stuck (a flag), and the PRs a role's App had merged in the last 7 days (`SHIPPED`, or `DELIVERED` for a PR whose title starts "Brief").
-- **In flight:** each open Goal and Area with its criteria met of total and a dot: red if flagged, amber if it waits on the owner, blue otherwise. If the trouble report wasn't read, it falls back to the plan's sub-issues done of total.
+- **In flight:** each open Goal and Area with its criteria met of total and a dot: red if flagged, amber if it waits on the owner, blue otherwise. If the trouble report wasn't read, it falls back to the plan's sub-issues done of total. Each Goal also shows its merged PRs for the last 7 days by kind of work, e.g. "5 PRs · 2 capability · 1 upkeep · 1 governance · 1 knowledge · 1 fix", from the [effort cache](#effort); without a cache it shows nothing.
 - **Orders received:** the owner's acts on GitHub from the repo's events (the header's read), newest first, at most 8, with chair "GitHub". Branch creation and deletion are left out.
 
 The left column, shared with the Commissions and Agents pages (`bridge.nav_html`), links Commissions to `commissions.html` and Agents to `agents.html`. "Your chairs", "Lead recommends", "Discuss with…" and spend aren't shown: chairs and writes come later (#760), and GOV-0033 sets no engine total. Links go only to github.com or a page beside it. The page carries no script.
@@ -66,6 +67,27 @@ Its **focus drawer** opens through CSS `:target`, as on Commissions. It shows:
 - how to ask it something: an `Ask: <role>: …` comment on the report issue (GOV-0029).
 
 There's no spend, cap or cost per result (GOV-0033), no first-pass review rate or reverts (the build doesn't read merged PRs' reviews), and no reassign or one-on-one buttons (#760).
+
+## Effort
+
+`effort.py` (#1013, FEAT-4 under M7 #987) shows what kind of work the swarm ships. It reads only `classify/cache/effort.json`, which `swarm classify run effort` writes (#1012): no model call, no credential and no API call. `main()` reads it from the checkout.
+
+- **The desk's Effort panel:** a stacked bar per open Goal for the last 7 days and the 7 before, one segment per label (capability blue, governance amber, knowledge ink, upkeep grey: layout.py's colours), with the share that fixes recent work hatched. Each segment links to its PRs on `effort.html`. Below, the capability share of all merged PRs in the cache by week (from Monday, UTC, the last 8 weeks) as a line and a sentence. With no cache it says so; an unreadable cache says why.
+- **The Bridge:** each Goal card's counts (above).
+- **`swarm daily`:** an "Effort risks" section for the report's Risks and mitigations: a line for each Goal where upkeep is more than half of its PRs merged in the last 7 days.
+
+The cache, schema 1 (#1012 writes it; this is what the desk reads):
+
+```json
+{"schema": 1, "labelset": "effort", "classifier": "model",
+ "updated_at": "2026-11-13T09:00:00Z",
+ "prs": {"1009": {"repo": "open-agentos/productswarm", "title": "...",
+                  "merged_at": "2026-11-13T08:00:00Z", "label": "upkeep",
+                  "fix": false, "fixes": null, "goal": "open-agentos/productswarm#987",
+                  "hash": "...", "labeller": "model"}}}
+```
+
+`label` is one of capability, upkeep, governance or knowledge; `classifier` is `model` or `paths` (the baseline the cache falls back to). `goal` is the open Goal the PR's issue sits under, as `owner/repo#N` or a bare number in this repo, or null; `repo` defaults to the desk's. An entry with another label or no `merged_at` is left out and counted on the panel. `state.json` carries the counts as `effort`.
 
 ## Header
 
@@ -127,6 +149,7 @@ Each build also writes `state.json` beside `index.html` (so `_site/state.json` o
 | `wire` | [the wire](#the-wire): `day`, `events` (whether the repo's events could be read) and `items`, newest first, each with `kind` (`opened`, `ruled`, `lapsed`, `record`, `red` or `convened`), `time`, `number`, `text` and `link`, plus `record` on a `record` item; `[]` items on a quiet day |
 | `past_committees` | each ended committee's card: `discussion`, `url`, `question`, `question_title`, `question_url`, `record` (`id`, `url`, or null), `summary` (the INDEX.md ruling, or null), `consensus` (`text`, `consensus`, `dissent`), `rounds_used`, `max_rounds`, `stopped_early`, `models`, `diversity_met`, `minutes`, `swing` and `seats`; `[]` when none has ended |
 | `grants` | [grants in use](#grants-in-use) (#713): `mode` (`off`, `shadow`, `live`, or null if `swarm.toml` couldn't be read), `read` (whether the merger's comments could be read) and `calls`, newest first, one per PR: `number`, `title` (null if it couldn't be read), `group` (`merged`, `enqueued`, `would` or `left`), `queued` (true when the merger enqueued it, so a `merged` call merged through the queue), `reason` (the merger's words), `time` and `link` (the comment) |
+| `effort` | [Effort](#effort) (#1013): `status` (`ok`, `missing` or `error`); when `ok`, `classifier`, `goals` (each `ref` with `this` and `last`: `total`, `fixes`, `by` and `fix_by` label) and `trend` (`week`, `capability`, `total`) |
 | `desk` | what the [live refresh](#live-refresh) draws: the desk's `mast` (masthead) and each panel (`floor`, `committee_desk`, `trends`, `precedent`, `past_committees`) as a node tree, or `null` for a panel that can't be one |
 
 It carries **no cost**: no session cost, daily spend, cap, over-cap flag or spend totals (GOV-0014; #397). It's public like the page (#33), and sessions and PRs keep only the fields the page shows. Later panels add their slice to `state.py`.
